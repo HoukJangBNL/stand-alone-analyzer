@@ -3,6 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 from flake_analysis.ui.sidebar import render_sidebar
+from flake_analysis.ui.tab_clustering import render_tab_clustering
 from flake_analysis.ui.tab_compute import render_tab_compute
 from flake_analysis.ui.tab_selector import render_tab_selector
 
@@ -27,7 +28,7 @@ with tabs[1]:
     render_tab_selector(raw_images_dir, annotations_path, analysis_folder)
 
 with tabs[2]:
-    st.info("3. Clustering — placeholder. Wired in PR 2.4.")
+    render_tab_clustering(raw_images_dir, annotations_path, analysis_folder)
 
 with tabs[3]:
     st.info("4. Explorer — placeholder. Wired in PR 2.5.")
