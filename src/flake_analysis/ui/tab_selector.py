@@ -133,6 +133,24 @@ def _downsample_indices(n: int, cap: int = _MAX_POINTS) -> np.ndarray:
     return np.random.default_rng(0).choice(n, cap, replace=False)
 
 
+def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
+    """Route a Plotly chart event based on the active interaction mode.
+
+    Single-pick → ``handle_click_event`` (replace selection w/ 1 id, clear
+    focus_id since the user explicitly clicked the scatter).
+    Lasso → ``handle_selection_event`` (mode-aware combine).
+
+    Returns True iff state was modified.
+    """
+    if state.interaction_mode == _brushing.INTERACTION_SINGLE:
+        if _brushing.handle_click_event(event, state):
+            # An explicit scatter click overrides any prior row focus.
+            state.focus_id = None
+            return True
+        return False
+    return _brushing.handle_selection_event(event, state)
+
+
 def _render_4pane_scatter(
     stats: Dict[str, np.ndarray],
     accept_mask: np.ndarray,
@@ -142,6 +160,10 @@ def _render_4pane_scatter(
 
     Color encoding: green=accepted, red=rejected.
     Lasso/box-selected points get an orange ring across all panes.
+
+    The 2D panes' ``dragmode`` follows ``state.interaction_mode``:
+    ``pan`` for single-pick (left-drag pans, click selects 1 pt) and
+    ``lasso`` for lasso mode.
     """
     rgb = stats["repr_rgbs"]
     flake_ids = stats["flake_ids"].astype(np.int64)
@@ -161,6 +183,13 @@ def _render_4pane_scatter(
         )
 
     selected = state.selected_ids
+    dragmode = _brushing.get_dragmode(state)
+    interaction = state.interaction_mode
+    pane_hint = (
+        "click to select · drag to pan · scroll to zoom"
+        if interaction == _brushing.INTERACTION_SINGLE
+        else "lasso/box to brush · scroll to zoom"
+    )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -172,37 +201,46 @@ def _render_4pane_scatter(
         _brushing.render_scatter(fig3d, key="sel_pane_3d", on_select=False)
 
     with col2:
-        st.caption("R vs G (lasso/box to brush · scroll to zoom)")
+        st.caption(f"R vs G ({pane_hint})")
         fig_rg = _brushing.make_2d_scatter(
             rgb_sub[:, 0], rgb_sub[:, 1], ids_sub,
             base_colors=base_colors, selected_ids=selected,
             x_label="R", y_label="G",
+            dragmode=dragmode,
         )
-        evt_rg = _brushing.render_scatter(fig_rg, key="sel_pane_rg")
-        if _brushing.handle_selection_event(evt_rg, state):
+        evt_rg = _brushing.render_scatter(
+            fig_rg, key="sel_pane_rg", interaction_mode=interaction,
+        )
+        if _dispatch_event(evt_rg, state):
             st.rerun()
 
     col3, col4 = st.columns(2)
     with col3:
-        st.caption("R vs B (lasso/box to brush · scroll to zoom)")
+        st.caption(f"R vs B ({pane_hint})")
         fig_rb = _brushing.make_2d_scatter(
             rgb_sub[:, 0], rgb_sub[:, 2], ids_sub,
             base_colors=base_colors, selected_ids=selected,
             x_label="R", y_label="B",
+            dragmode=dragmode,
         )
-        evt_rb = _brushing.render_scatter(fig_rb, key="sel_pane_rb")
-        if _brushing.handle_selection_event(evt_rb, state):
+        evt_rb = _brushing.render_scatter(
+            fig_rb, key="sel_pane_rb", interaction_mode=interaction,
+        )
+        if _dispatch_event(evt_rb, state):
             st.rerun()
 
     with col4:
-        st.caption("G vs B (lasso/box to brush · scroll to zoom)")
+        st.caption(f"G vs B ({pane_hint})")
         fig_gb = _brushing.make_2d_scatter(
             rgb_sub[:, 1], rgb_sub[:, 2], ids_sub,
             base_colors=base_colors, selected_ids=selected,
             x_label="G", y_label="B",
+            dragmode=dragmode,
         )
-        evt_gb = _brushing.render_scatter(fig_gb, key="sel_pane_gb")
-        if _brushing.handle_selection_event(evt_gb, state):
+        evt_gb = _brushing.render_scatter(
+            fig_gb, key="sel_pane_gb", interaction_mode=interaction,
+        )
+        if _dispatch_event(evt_gb, state):
             st.rerun()
 
 
@@ -211,8 +249,17 @@ def _render_4pane_scatter(
 def _render_flake_list(
     stats: Dict[str, np.ndarray],
     accept_mask: np.ndarray,
-    selected_ids: Set[int],
+    state: _brushing.BrushingState,
 ) -> None:
+    """Render the flake table with single-row click → focus_id binding.
+
+    Row click sets ``state.focus_id`` to the clicked ``domain_id``. This
+    drives the image preview without modifying the brushing
+    ``selected_ids`` set — focus and brush selection are intentionally
+    separate concepts (one identifies a domain to inspect, the other is
+    the cross-pane brushing selection used by Selector / Clustering
+    workflows).
+    """
     flake_ids = stats["flake_ids"].astype(np.int64)
     rgb = stats["repr_rgbs"]
     std = stats["std_pcts"]
@@ -221,6 +268,7 @@ def _render_flake_list(
     if sam2 is None:
         sam2 = np.full(len(flake_ids), np.nan)
 
+    selected_ids = state.selected_ids
     df = pd.DataFrame(
         {
             "domain_id": flake_ids,
@@ -238,13 +286,59 @@ def _render_flake_list(
     if selected_ids:
         df.loc[df["domain_id"].isin(selected_ids), "status"] = "selected"
 
-    st.dataframe(df, height=300, use_container_width=True)
+    # Newer Streamlit (>= 1.35) supports on_select="rerun" with
+    # selection_mode="single-row" on st.dataframe. Older versions raise;
+    # gracefully fall back to a non-interactive table so the tab still
+    # renders.
+    try:
+        event = st.dataframe(
+            df,
+            height=300,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="selector_flake_list",
+        )
+    except (TypeError, ValueError):
+        st.dataframe(df, height=300, use_container_width=True)
+        return
+
+    selection = (
+        event.get("selection") if isinstance(event, dict) else getattr(event, "selection", None)
+    )
+    if selection is None:
+        return
+    rows = (
+        selection.get("rows")
+        if isinstance(selection, dict)
+        else getattr(selection, "rows", None)
+    )
+    if not rows:
+        return
+    try:
+        row_idx = int(rows[0])
+    except (TypeError, ValueError):
+        return
+    if 0 <= row_idx < len(df):
+        new_focus = int(df.iloc[row_idx]["domain_id"])
+        if state.focus_id != new_focus:
+            state.focus_id = new_focus
+            st.rerun()
 
 
 # ─── Top-level renderer ──────────────────────────────────────────────────
 
 def _focus_domain_id(state: _brushing.BrushingState) -> Optional[int]:
-    """Pick the focused domain for the image preview panel."""
+    """Pick the focused domain for the image preview panel.
+
+    Priority order:
+
+    1. ``state.focus_id`` — explicit row click in the flake list.
+    2. ``min(selected_ids)`` — fallback when only the brushing set is set.
+    3. ``None`` — neither focus nor selection.
+    """
+    if state.focus_id is not None:
+        return int(state.focus_id)
     if not state.selected_ids:
         return None
     return min(state.selected_ids)
@@ -262,14 +356,16 @@ def render_tab_selector(
 
     state = _brushing.get_brushing_state("selector")
 
-    # Inject keyboard shortcut JS (best-effort — Streamlit iframe sandbox
-    # may block it; the visible buttons remain primary).
+    # Inject keyboard shortcut JS + wheel capture (best-effort — Streamlit
+    # iframe sandbox may block them; the visible buttons remain primary).
     _brushing.render_keyboard_shortcuts()
+    _brushing.render_wheel_capture()
 
     st.info(
-        "Selector right-pane is mandatory in v1. "
-        "Lasso/box select in any 2D pane → highlight same domains in all panes. "
-        "Use mode toggles to combine selections; scroll to zoom; Ctrl/Cmd+Z to undo."
+        "Default mode is Single-pick: left-click a point to focus one domain. "
+        "Press L (or click Lasso: Replace) for lasso brushing across panes — "
+        "use sub-modes Replace/Add/Subtract (R/A/D) to combine selections. "
+        "Click a row in the flake list below to drive the image preview."
     )
 
     stats = _load_stats_npz(analysis_folder)
@@ -332,7 +428,7 @@ def render_tab_selector(
     list_col, img_col = st.columns([3, 2])
     with list_col:
         st.subheader("Flake list")
-        _render_flake_list(stats, accept_mask, selected_ids)
+        _render_flake_list(stats, accept_mask, state)
     with img_col:
         focus = _focus_domain_id(state)
         render_image_preview(

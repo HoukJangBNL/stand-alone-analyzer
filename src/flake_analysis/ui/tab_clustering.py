@@ -200,12 +200,31 @@ def _render_seed_group_panel(
 
 # ─── 4-pane scatter ──────────────────────────────────────────────────────
 
+def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
+    """Route a Plotly chart event based on the active interaction mode.
+
+    Single-pick replaces with the clicked id (clears focus_id since
+    Clustering tab has no image preview, but we keep the field consistent
+    with Selector). Lasso uses the mode-aware combine.
+    """
+    if state.interaction_mode == _brushing.INTERACTION_SINGLE:
+        if _brushing.handle_click_event(event, state):
+            state.focus_id = None
+            return True
+        return False
+    return _brushing.handle_selection_event(event, state)
+
+
 def _render_4pane_scatter(
     stats: Dict[str, Any],
     cluster_assign: Optional[Dict[int, int]],
     state: _brushing.BrushingState,
 ) -> None:
-    """4-pane scatter (3D + R-G + R-B + G-B) with linked brushing."""
+    """4-pane scatter (3D + R-G + R-B + G-B) with linked brushing.
+
+    The 2D panes' ``dragmode`` follows ``state.interaction_mode``:
+    ``pan`` for single-pick, ``lasso`` for lasso mode.
+    """
     rgb_all = stats["repr_rgbs"]
     flake_ids = stats["flake_ids"].astype(np.int64)
     sel_mask = stats["selected_mask"]
@@ -237,6 +256,13 @@ def _render_4pane_scatter(
         base_colors = np.full(len(ids_sub), NEUTRAL_GRAY)
 
     selected = state.selected_ids
+    dragmode = _brushing.get_dragmode(state)
+    interaction = state.interaction_mode
+    pane_hint = (
+        "click to select · drag to pan · scroll to zoom"
+        if interaction == _brushing.INTERACTION_SINGLE
+        else "lasso/box to brush · scroll to zoom"
+    )
 
     col1, col2 = st.columns(2)
     with col1:
@@ -248,37 +274,46 @@ def _render_4pane_scatter(
         _brushing.render_scatter(fig3d, key="clu_pane_3d", on_select=False)
 
     with col2:
-        st.caption("R vs G (lasso/box to brush · scroll to zoom)")
+        st.caption(f"R vs G ({pane_hint})")
         fig_rg = _brushing.make_2d_scatter(
             rgb_sub[:, 0], rgb_sub[:, 1], ids_sub,
             base_colors=base_colors, selected_ids=selected,
             x_label="R", y_label="G",
+            dragmode=dragmode,
         )
-        evt_rg = _brushing.render_scatter(fig_rg, key="clu_pane_rg")
-        if _brushing.handle_selection_event(evt_rg, state):
+        evt_rg = _brushing.render_scatter(
+            fig_rg, key="clu_pane_rg", interaction_mode=interaction,
+        )
+        if _dispatch_event(evt_rg, state):
             st.rerun()
 
     col3, col4 = st.columns(2)
     with col3:
-        st.caption("R vs B (lasso/box to brush · scroll to zoom)")
+        st.caption(f"R vs B ({pane_hint})")
         fig_rb = _brushing.make_2d_scatter(
             rgb_sub[:, 0], rgb_sub[:, 2], ids_sub,
             base_colors=base_colors, selected_ids=selected,
             x_label="R", y_label="B",
+            dragmode=dragmode,
         )
-        evt_rb = _brushing.render_scatter(fig_rb, key="clu_pane_rb")
-        if _brushing.handle_selection_event(evt_rb, state):
+        evt_rb = _brushing.render_scatter(
+            fig_rb, key="clu_pane_rb", interaction_mode=interaction,
+        )
+        if _dispatch_event(evt_rb, state):
             st.rerun()
 
     with col4:
-        st.caption("G vs B (lasso/box to brush · scroll to zoom)")
+        st.caption(f"G vs B ({pane_hint})")
         fig_gb = _brushing.make_2d_scatter(
             rgb_sub[:, 1], rgb_sub[:, 2], ids_sub,
             base_colors=base_colors, selected_ids=selected,
             x_label="G", y_label="B",
+            dragmode=dragmode,
         )
-        evt_gb = _brushing.render_scatter(fig_gb, key="clu_pane_gb")
-        if _brushing.handle_selection_event(evt_gb, state):
+        evt_gb = _brushing.render_scatter(
+            fig_gb, key="clu_pane_gb", interaction_mode=interaction,
+        )
+        if _dispatch_event(evt_gb, state):
             st.rerun()
 
 
@@ -380,11 +415,14 @@ def render_tab_clustering(
 
     state = _brushing.get_brushing_state("clustering")
     _brushing.render_keyboard_shortcuts()
+    _brushing.render_wheel_capture()
 
     st.info(
         "Clustering operates on the selector-narrowed domain set. "
-        "Brush domains in any 2D pane → click + Add to attach them to a seed group. "
-        "Use mode toggles to combine selections; scroll to zoom; Ctrl/Cmd+Z to undo."
+        "Default mode is Single-pick — click a point to identify it. "
+        "Press L for Lasso brushing to build seed groups; sub-modes R/A/D "
+        "combine selections (Replace / Add / Subtract). Click + Add attaches "
+        "the brush buffer to a seed group."
     )
 
     # Prereq gate

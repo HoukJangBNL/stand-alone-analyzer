@@ -16,14 +16,19 @@ import pytest
 from flake_analysis.ui import _brushing as B
 from flake_analysis.ui._brushing import (
     BrushingState,
+    INTERACTION_LASSO,
+    INTERACTION_SINGLE,
     MODE_ADD,
     MODE_REPLACE,
     MODE_SUBTRACT,
     HISTORY_MAX,
     apply_lasso,
+    get_dragmode,
+    handle_click_event,
     handle_selection_event,
     push_history,
     redo,
+    set_interaction_mode,
     undo,
 )
 
@@ -234,3 +239,143 @@ def test_handle_selection_event_attr_style():
 def test_shared_plotly_config_has_scroll_zoom():
     assert B.SHARED_PLOTLY_CONFIG["scrollZoom"] is True
     assert B.SHARED_PLOTLY_CONFIG["displaylogo"] is False
+
+
+# ─── v0.1.3: interaction modes (single / lasso) ─────────────────────────
+
+def test_default_interaction_mode_is_single():
+    """v0.1.3: new states default to single-pick (left-click selects 1)."""
+    s = BrushingState()
+    assert s.interaction_mode == INTERACTION_SINGLE
+    assert s.focus_id is None
+
+
+def test_set_interaction_mode_single_to_lasso_to_single():
+    """Mode toggles preserve selection + sub-mode (mode is metadata)."""
+    s = BrushingState()
+    s.selected_ids = {1, 2, 3}
+    s.mode = MODE_ADD
+    set_interaction_mode(s, INTERACTION_LASSO)
+    assert s.interaction_mode == INTERACTION_LASSO
+    assert s.selected_ids == {1, 2, 3}  # preserved
+    assert s.mode == MODE_ADD            # preserved
+    set_interaction_mode(s, INTERACTION_SINGLE)
+    assert s.interaction_mode == INTERACTION_SINGLE
+    assert s.selected_ids == {1, 2, 3}  # still preserved
+
+
+def test_set_interaction_mode_unknown_falls_back_to_single():
+    s = BrushingState()
+    set_interaction_mode(s, "garbage")
+    assert s.interaction_mode == INTERACTION_SINGLE
+
+
+def test_get_dragmode_returns_pan_for_single():
+    s = BrushingState()
+    s.interaction_mode = INTERACTION_SINGLE
+    assert get_dragmode(s) == "pan"
+
+
+def test_get_dragmode_returns_lasso_for_lasso():
+    s = BrushingState()
+    s.interaction_mode = INTERACTION_LASSO
+    assert get_dragmode(s) == "lasso"
+
+
+# ─── v0.1.3: handle_click_event (single-pick) ───────────────────────────
+
+def test_handle_click_event_replaces_selection():
+    """Single-pick click replaces the selection regardless of mode."""
+    s = BrushingState()
+    s.mode = MODE_ADD
+    s.selected_ids = {1, 2, 3}
+    event = {"selection": {"points": [{"customdata": 42}]}}
+    assert handle_click_event(event, s) is True
+    assert s.selected_ids == {42}
+
+
+def test_handle_click_event_pushes_history():
+    """Click is undoable — must snapshot prior selection."""
+    s = BrushingState()
+    s.selected_ids = {1, 2, 3}
+    event = {"selection": {"points": [{"customdata": 99}]}}
+    handle_click_event(event, s)
+    assert s.selected_ids == {99}
+    assert undo(s) is True
+    assert s.selected_ids == {1, 2, 3}
+
+
+def test_handle_click_event_no_op_on_empty_event():
+    s = BrushingState()
+    s.selected_ids = {1}
+    assert handle_click_event(None, s) is False
+    assert handle_click_event({}, s) is False
+    assert handle_click_event({"selection": {"points": []}}, s) is False
+    # Selection unchanged + no spurious history snapshot.
+    assert s.selected_ids == {1}
+    assert list(s.history) == []
+
+
+def test_handle_click_event_picks_min_id_on_overlap():
+    """When multiple ids come back (overlapping markers), prefer min."""
+    s = BrushingState()
+    event = {
+        "selection": {
+            "points": [
+                {"customdata": 17},
+                {"customdata": 4},
+                {"customdata": 99},
+            ]
+        }
+    }
+    handle_click_event(event, s)
+    assert s.selected_ids == {4}
+
+
+# ─── v0.1.3: focus_id field ─────────────────────────────────────────────
+
+def test_focus_id_set_by_row_click():
+    """focus_id is a separate 'inspect' concept from brushing selection."""
+    s = BrushingState()
+    s.selected_ids = {7, 9, 11}
+    s.focus_id = 9  # simulating row-click in the flake list
+    # Brushing selection unchanged (focus_id is independent state).
+    assert s.selected_ids == {7, 9, 11}
+    assert s.focus_id == 9
+
+
+def test_get_brushing_state_backfills_new_fields(monkeypatch):
+    """A pre-v0.1.3 BrushingState (no interaction_mode/focus_id) is upgraded."""
+    fake_session: dict = {}
+
+    class _SS:
+        def get(self, k, default=None):
+            return fake_session.get(k, default)
+
+        def __getitem__(self, k):
+            return fake_session[k]
+
+        def __setitem__(self, k, v):
+            fake_session[k] = v
+
+        def __contains__(self, k):
+            return k in fake_session
+
+    monkeypatch.setattr(B.st, "session_state", _SS())
+
+    # Simulate a legacy state object missing the new attributes.
+    class _Legacy:
+        def __init__(self):
+            self.selected_ids = {1, 2}
+            from collections import deque
+            self.history = deque(maxlen=HISTORY_MAX)
+            self.redo_stack = []
+            self.mode = MODE_REPLACE
+
+    fake_session["legacy.brushing"] = _Legacy()
+    s = B.get_brushing_state("legacy")
+    assert hasattr(s, "interaction_mode")
+    assert hasattr(s, "focus_id")
+    assert s.interaction_mode == INTERACTION_SINGLE
+    assert s.focus_id is None
+    assert s.selected_ids == {1, 2}
