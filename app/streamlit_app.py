@@ -4,6 +4,7 @@ import streamlit as st
 
 from flake_analysis.ui.sidebar import render_sidebar
 from flake_analysis.ui.tab_compute import render_tab_compute
+from flake_analysis.ui.tab_selector import render_tab_selector
 
 
 st.set_page_config(
@@ -23,7 +24,7 @@ with tabs[0]:
     render_tab_compute(raw_images_dir, annotations_path, analysis_folder)
 
 with tabs[1]:
-    st.info("2. Selector — placeholder. Wired in PR 2.3.")
+    render_tab_selector(raw_images_dir, annotations_path, analysis_folder)
 
 with tabs[2]:
     st.info("3. Clustering — placeholder. Wired in PR 2.4.")
