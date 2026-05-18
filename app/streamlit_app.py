@@ -1,10 +1,11 @@
-"""stand-alone-analyzer Streamlit entry point (M2 PR 2.2 — Compute tab wired)."""
+"""stand-alone-analyzer Streamlit entry point (M2 PR 2.5 — Explorer tab wired)."""
 from __future__ import annotations
 import streamlit as st
 
 from flake_analysis.ui.sidebar import render_sidebar
 from flake_analysis.ui.tab_clustering import render_tab_clustering
 from flake_analysis.ui.tab_compute import render_tab_compute
+from flake_analysis.ui.tab_explorer import render_tab_explorer
 from flake_analysis.ui.tab_selector import render_tab_selector
 
 
@@ -31,4 +32,4 @@ with tabs[2]:
     render_tab_clustering(raw_images_dir, annotations_path, analysis_folder)
 
 with tabs[3]:
-    st.info("4. Explorer — placeholder. Wired in PR 2.5.")
+    render_tab_explorer(raw_images_dir, annotations_path, analysis_folder)
