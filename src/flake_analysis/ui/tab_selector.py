@@ -191,6 +191,12 @@ def _render_4pane_scatter(
         else "lasso/box to brush · scroll to zoom"
     )
 
+    # Embed interaction mode in the chart key so Streamlit treats the
+    # chart as a different element when dragmode flips. Without this
+    # suffix, the cached event payload from a prior lasso could replay
+    # against the freshly-rebuilt 'pan' figure (Task 1 fix).
+    suffix = interaction
+
     col1, col2 = st.columns(2)
     with col1:
         st.caption("3D R-G-B scatter (display only)")
@@ -209,7 +215,7 @@ def _render_4pane_scatter(
             dragmode=dragmode,
         )
         evt_rg = _brushing.render_scatter(
-            fig_rg, key="sel_pane_rg", interaction_mode=interaction,
+            fig_rg, key=f"sel_pane_rg_{suffix}", interaction_mode=interaction,
         )
         if _dispatch_event(evt_rg, state):
             st.rerun()
@@ -224,7 +230,7 @@ def _render_4pane_scatter(
             dragmode=dragmode,
         )
         evt_rb = _brushing.render_scatter(
-            fig_rb, key="sel_pane_rb", interaction_mode=interaction,
+            fig_rb, key=f"sel_pane_rb_{suffix}", interaction_mode=interaction,
         )
         if _dispatch_event(evt_rb, state):
             st.rerun()
@@ -238,7 +244,7 @@ def _render_4pane_scatter(
             dragmode=dragmode,
         )
         evt_gb = _brushing.render_scatter(
-            fig_gb, key="sel_pane_gb", interaction_mode=interaction,
+            fig_gb, key=f"sel_pane_gb_{suffix}", interaction_mode=interaction,
         )
         if _dispatch_event(evt_gb, state):
             st.rerun()
@@ -361,12 +367,16 @@ def render_tab_selector(
     _brushing.render_keyboard_shortcuts()
     _brushing.render_wheel_capture()
 
-    st.info(
-        "Default mode is Single-pick: left-click a point to focus one domain. "
-        "Press L (or click Lasso: Replace) for lasso brushing across panes — "
-        "use sub-modes Replace/Add/Subtract (R/A/D) to combine selections. "
-        "Click a row in the flake list below to drive the image preview."
-    )
+    info_col, help_col = st.columns([6, 1])
+    with info_col:
+        st.info(
+            "Default mode is Single-pick: left-click a point to focus one domain. "
+            "Press L (or click Lasso: Replace) for lasso brushing across panes — "
+            "use sub-modes Replace/Add/Subtract (R/A/D) to combine selections. "
+            "Click a row in the flake list below to drive the image preview."
+        )
+    with help_col:
+        _brushing.render_help_button(key="selector_help_btn")
 
     stats = _load_stats_npz(analysis_folder)
     if stats is None:

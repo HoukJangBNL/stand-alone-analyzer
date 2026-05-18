@@ -250,18 +250,27 @@ def test_default_interaction_mode_is_single():
     assert s.focus_id is None
 
 
-def test_set_interaction_mode_single_to_lasso_to_single():
-    """Mode toggles preserve selection + sub-mode (mode is metadata)."""
+def test_set_interaction_mode_single_to_lasso_preserves_sub_mode():
+    """Lasso entry preserves selection + last sub-mode (mode is metadata)."""
     s = BrushingState()
     s.selected_ids = {1, 2, 3}
     s.mode = MODE_ADD
     set_interaction_mode(s, INTERACTION_LASSO)
     assert s.interaction_mode == INTERACTION_LASSO
     assert s.selected_ids == {1, 2, 3}  # preserved
-    assert s.mode == MODE_ADD            # preserved
+    assert s.mode == MODE_ADD            # preserved through lasso entry
+
+
+def test_set_interaction_mode_single_resets_sub_mode():
+    """Single-pick entry defensively resets stale Add/Subtract sub-modes."""
+    s = BrushingState()
+    s.selected_ids = {1, 2, 3}
+    s.mode = MODE_SUBTRACT
+    s.interaction_mode = INTERACTION_LASSO
     set_interaction_mode(s, INTERACTION_SINGLE)
     assert s.interaction_mode == INTERACTION_SINGLE
-    assert s.selected_ids == {1, 2, 3}  # still preserved
+    assert s.selected_ids == {1, 2, 3}  # selection preserved
+    assert s.mode == MODE_REPLACE  # sub-mode reset
 
 
 def test_set_interaction_mode_unknown_falls_back_to_single():
@@ -342,6 +351,49 @@ def test_focus_id_set_by_row_click():
     # Brushing selection unchanged (focus_id is independent state).
     assert s.selected_ids == {7, 9, 11}
     assert s.focus_id == 9
+
+
+def test_lasso_to_single_pick_dragmode_reverts(monkeypatch):
+    """v0.1.4 regression — Lasso → Single-pick must restore dragmode='pan'.
+
+    The original bug: pressing S after using lasso left the chart with
+    ``dragmode='lasso'`` because the cached event payload from the prior
+    lasso interaction was still in session_state and Streamlit was
+    re-using the same chart key. Verify that:
+
+    1. ``set_interaction_mode(state, 'single')`` flips ``interaction_mode``.
+    2. ``get_dragmode`` immediately returns ``'pan'``.
+    3. Stale ``sel_pane_*`` / ``clu_pane_*`` event payloads are dropped.
+    """
+    fake_session: dict = {
+        "sel_pane_rg": {"selection": {"points": [{"customdata": 7}]}},
+        "sel_pane_rb": {"selection": {"points": [{"customdata": 8}]}},
+        "clu_pane_gb": {"selection": {"points": [{"customdata": 9}]}},
+        "filter_widget_state": "must-not-be-deleted",
+    }
+
+    class _SS(dict):
+        def keys(self):  # type: ignore[override]
+            return list(super().keys())
+
+    ss = _SS(fake_session)
+    monkeypatch.setattr(B.st, "session_state", ss)
+
+    s = BrushingState()
+    s.interaction_mode = INTERACTION_LASSO
+    s.mode = MODE_ADD
+
+    set_interaction_mode(s, INTERACTION_SINGLE)
+
+    assert s.interaction_mode == INTERACTION_SINGLE
+    assert s.mode == MODE_REPLACE  # defensive reset
+    assert get_dragmode(s) == "pan"
+
+    # Pane event payloads cleared, unrelated session keys preserved.
+    assert "sel_pane_rg" not in ss
+    assert "sel_pane_rb" not in ss
+    assert "clu_pane_gb" not in ss
+    assert ss["filter_widget_state"] == "must-not-be-deleted"
 
 
 def test_get_brushing_state_backfills_new_fields(monkeypatch):

@@ -4,16 +4,26 @@ Used by ``tab_selector`` to show the raw imagery context for a single
 focused domain. Wraps ``flake_core.annotations.AnnotationsCache`` when
 available, with a json.loads fallback that does not require flake_core.
 
+v0.1.4: switched from ``st.image`` to a Plotly ``px.imshow`` figure so the
+user gets mouse-wheel zoom, click-drag pan, and a native modebar reset.
+A boundary overlay decoded from the COCO RLE ``segmentation`` field can
+be toggled (``B`` shortcut) to highlight the segmented contour.
+
 Public API:
     render_image_preview(...)           — Streamlit panel
     crop_for_domain(...)                — pure crop helper (testable)
+    crop_for_domain_with_mask(...)      — crop + cropped binary mask
+    decode_segmentation_mask(...)       — pycocotools wrapper (RLE → ndarray)
+    contours_for_mask(mask)             — cv2.findContours wrapper (testable)
+    build_image_preview_figure(...)     — pure Plotly figure builder (testable)
     load_annotations_index(...)         — return (id_lookup, image_lookup)
 """
 from __future__ import annotations
 import json
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 from PIL import Image
 import streamlit as st
 
@@ -55,6 +65,105 @@ def load_annotations_index(
     return annotations, images
 
 
+# ─── Mask + contour helpers ────────────────────────────────────────────
+
+def decode_segmentation_mask(
+    segmentation: Any,
+    *,
+    height: Optional[int] = None,
+    width: Optional[int] = None,
+) -> Optional[np.ndarray]:
+    """Decode a COCO ``segmentation`` field into a HxW uint8 binary mask.
+
+    Supports the two common shapes:
+
+    * ``{"size": [H, W], "counts": str}`` — pycocotools-encoded RLE.
+    * ``{"size": [H, W], "counts": list[int]}`` — uncompressed RLE.
+
+    Returns ``None`` if the field is missing/empty/unrecognised so callers
+    can fall back to a no-overlay preview cleanly.
+
+    ``height``/``width`` are accepted for symmetry with future polygon
+    support but are ignored when the RLE itself carries ``size``.
+    """
+    if not segmentation:
+        return None
+    try:
+        from pycocotools import mask as mask_util
+    except ImportError:  # pragma: no cover - dep is in install reqs
+        return None
+
+    # Polygon segmentations are a list of lists of floats — convert via
+    # frPyObjects when we know the image dims.
+    if isinstance(segmentation, list):
+        if not segmentation:
+            return None
+        if height is None or width is None:
+            return None
+        try:
+            rles = mask_util.frPyObjects(segmentation, int(height), int(width))
+            rle = mask_util.merge(rles)
+        except Exception:
+            return None
+    elif isinstance(segmentation, dict):
+        rle = dict(segmentation)
+        # pycocotools expects bytes for compressed counts; tolerate str.
+        counts = rle.get("counts")
+        if isinstance(counts, str):
+            rle["counts"] = counts.encode("ascii")
+        elif isinstance(counts, list):
+            try:
+                rle = mask_util.frPyObjects(
+                    [rle], int(rle["size"][0]), int(rle["size"][1])
+                )[0]
+            except Exception:
+                return None
+    else:
+        return None
+
+    try:
+        decoded = mask_util.decode(rle)
+    except Exception:
+        return None
+    if decoded is None:
+        return None
+    arr = np.asarray(decoded)
+    if arr.ndim == 3:
+        arr = arr[..., 0]
+    return arr.astype(np.uint8)
+
+
+def contours_for_mask(mask: np.ndarray) -> List[np.ndarray]:
+    """Return external contours of a binary mask as a list of (N, 2) ndarrays.
+
+    Each contour is closed (first point appended at the end) so it can
+    be drawn as a filled-line Plotly trace without a visible seam.
+    Returns an empty list if cv2 isn't available, the mask is empty, or
+    no contours were found.
+    """
+    if mask is None or mask.size == 0:
+        return []
+    try:
+        import cv2
+    except ImportError:  # pragma: no cover - dep is in install reqs
+        return []
+    binary = (np.asarray(mask) > 0).astype(np.uint8)
+    if binary.sum() == 0:
+        return []
+    contours, _ = cv2.findContours(
+        binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    closed: List[np.ndarray] = []
+    for c in contours:
+        if c is None or len(c) == 0:
+            continue
+        pts = c.reshape(-1, 2)
+        if len(pts) < 2:
+            continue
+        closed.append(np.vstack([pts, pts[:1]]))
+    return closed
+
+
 def crop_for_domain(
     raw_images_dir: str | Path,
     annotations: Dict[int, Dict[str, Any]],
@@ -67,6 +176,31 @@ def crop_for_domain(
 
     Pads the bbox by ``bbox_padding`` (fraction of bbox width/height)
     and clamps to image bounds.
+    """
+    result = crop_for_domain_with_mask(
+        raw_images_dir, annotations, images, domain_id, bbox_padding=bbox_padding
+    )
+    if result is None:
+        return None
+    crop, _mask, info = result
+    return crop, info
+
+
+def crop_for_domain_with_mask(
+    raw_images_dir: str | Path,
+    annotations: Dict[int, Dict[str, Any]],
+    images: Dict[int, Dict[str, Any]],
+    domain_id: int,
+    *,
+    bbox_padding: float = 0.2,
+) -> Optional[Tuple[Image.Image, Optional[np.ndarray], Dict[str, Any]]]:
+    """Like :func:`crop_for_domain` but also returns the mask cropped to the
+    same window (or ``None`` if the annotation has no usable segmentation).
+
+    The returned mask is a HxW uint8 array in the *crop* coordinate
+    system, so passing it to :func:`contours_for_mask` yields contour
+    coordinates that overlay directly on the crop without further
+    translation.
     """
     ann = annotations.get(int(domain_id))
     if ann is None:
@@ -98,6 +232,25 @@ def crop_for_domain(
         return None
     crop = img.crop((left, top, right, bottom))
 
+    crop_mask: Optional[np.ndarray] = None
+    full_mask = decode_segmentation_mask(
+        ann.get("segmentation"),
+        height=img_info.get("height", img.height),
+        width=img_info.get("width", img.width),
+    )
+    if full_mask is not None:
+        # Defend against shape mismatch (older datasets sometimes have an
+        # image-info width/height that doesn't equal the actual asset).
+        full_h, full_w = full_mask.shape[:2]
+        m_left = max(0, min(left, full_w))
+        m_right = max(0, min(right, full_w))
+        m_top = max(0, min(top, full_h))
+        m_bottom = max(0, min(bottom, full_h))
+        if m_right > m_left and m_bottom > m_top:
+            crop_mask = full_mask[m_top:m_bottom, m_left:m_right]
+        else:
+            crop_mask = None
+
     info = {
         "domain_id": int(domain_id),
         "image_id": image_id,
@@ -105,11 +258,68 @@ def crop_for_domain(
         "bbox": (x, y, w, h),
         "crop_box": (left, top, right, bottom),
         "image_path": str(image_path),
+        "has_mask": crop_mask is not None,
     }
-    return crop, info
+    return crop, crop_mask, info
+
+
+# ─── Plotly figure builder ─────────────────────────────────────────────
+
+# Distinct gold tone for the boundary overlay — keeps it visible against
+# the green/red segmentation palette and the typical purple substrate.
+BOUNDARY_COLOR = "#FFC800"
+BOUNDARY_WIDTH = 2
+
+
+def build_image_preview_figure(
+    crop: Image.Image,
+    crop_mask: Optional[np.ndarray],
+    show_boundary: bool,
+):
+    """Build a Plotly Figure displaying ``crop`` with optional boundary.
+
+    Pure function (no Streamlit calls) so it can be smoke-tested.
+
+    The y-axis is reversed by ``px.imshow`` so the image origin sits in
+    the top-left exactly like a normal raster viewer; contour points
+    therefore overlay in image-pixel coordinates without a manual flip.
+    """
+    import plotly.express as px
+    import plotly.graph_objects as go
+
+    arr = np.asarray(crop)
+    fig = px.imshow(arr)
+    fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
+    fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False)
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        dragmode="pan",
+        showlegend=False,
+    )
+
+    if show_boundary and crop_mask is not None:
+        for contour in contours_for_mask(crop_mask):
+            xs = contour[:, 0].tolist()
+            ys = contour[:, 1].tolist()
+            fig.add_trace(
+                go.Scatter(
+                    x=xs,
+                    y=ys,
+                    mode="lines",
+                    line=dict(color=BOUNDARY_COLOR, width=BOUNDARY_WIDTH),
+                    hoverinfo="skip",
+                    showlegend=False,
+                )
+            )
+    return fig
 
 
 # ─── Streamlit panel ────────────────────────────────────────────────────
+
+# session_state slot for the boundary toggle — flat key so the keyboard
+# shortcut can flip it without scoping (single preview panel per app).
+_BOUNDARY_KEY = "preview.show_boundary"
+
 
 def render_image_preview(
     *,
@@ -124,6 +334,10 @@ def render_image_preview(
     Designed to be called inside a Streamlit column. Caches the parsed
     annotations.json by file path (and mtime) so successive reruns don't
     re-parse the file on every selection change.
+
+    v0.1.4 — uses a Plotly figure (zoom/pan via modebar) and shows a
+    boundary overlay decoded from the segmentation RLE when the user
+    enables it (``B`` shortcut or the "Boundary (B)" button).
     """
     st.subheader("Raw image preview")
 
@@ -144,7 +358,7 @@ def render_image_preview(
         st.caption(f"annotations.json missing or empty: {annotations_path}")
         return
 
-    result = crop_for_domain(
+    result = crop_for_domain_with_mask(
         raw_images_dir,
         annotations,
         images,
@@ -157,20 +371,55 @@ def render_image_preview(
         )
         return
 
-    crop, info = result
+    crop, crop_mask, info = result
+    show_boundary = bool(st.session_state.get(_BOUNDARY_KEY, True))
+
+    # The boundary toggle button — ASCII label so the JS shortcut handler
+    # can match by innerText (mirrors the mode-button convention).
+    btn_cols = st.columns([1, 1, 3])
+    with btn_cols[0]:
+        toggle_label = (
+            "Boundary on (B)" if show_boundary else "Boundary off (B)"
+        )
+        if st.button(
+            toggle_label,
+            key="preview_boundary_btn",
+            disabled=not info.get("has_mask", False),
+            help="Toggle the segmentation boundary overlay (B)",
+        ):
+            st.session_state[_BOUNDARY_KEY] = not show_boundary
+            st.rerun()
+
+    fig = build_image_preview_figure(crop, crop_mask, show_boundary)
+
     suffix = f" (focus of {n_selected} selected)" if n_selected > 1 else ""
-    st.image(
-        crop,
-        caption=(
-            f"Domain {info['domain_id']} · img_{info['image_id']} "
-            f"· {info['image_name']}{suffix}"
-        ),
-        use_container_width=True,
+    st.caption(
+        f"Domain {info['domain_id']} · img_{info['image_id']} "
+        f"· {info['image_name']}{suffix}"
     )
+
+    # Plotly modebar already provides +/-/Reset View; remove lasso/select
+    # buttons since they're meaningless for a static raster preview.
+    config = {
+        "scrollZoom": True,
+        "displayModeBar": True,
+        "displaylogo": False,
+        "modeBarButtonsToRemove": ["lasso2d", "select2d"],
+    }
+    st.plotly_chart(
+        fig,
+        config=config,
+        use_container_width=True,
+        # The key includes the boundary flag so toggling forces a fresh
+        # render (avoids the same caching pitfall fixed in Task 1).
+        key=f"preview_{info['domain_id']}_{int(show_boundary)}",
+    )
+
     bx, by, bw, bh = info["bbox"]
     st.caption(
         f"bbox=({bx:.0f},{by:.0f},{bw:.0f},{bh:.0f}) "
         f"· crop={info['crop_box']} · pad={bbox_padding:.0%}"
+        + ("" if info.get("has_mask") else " · (no mask)")
     )
 
 

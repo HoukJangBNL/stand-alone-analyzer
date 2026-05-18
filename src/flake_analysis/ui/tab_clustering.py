@@ -264,6 +264,11 @@ def _render_4pane_scatter(
         else "lasso/box to brush · scroll to zoom"
     )
 
+    # Embed interaction mode in the chart key so Streamlit treats the
+    # chart as a different element when dragmode flips (Task 1 fix —
+    # mirrors the Selector tab logic).
+    suffix = interaction
+
     col1, col2 = st.columns(2)
     with col1:
         st.caption("3D R-G-B (display only)")
@@ -282,7 +287,7 @@ def _render_4pane_scatter(
             dragmode=dragmode,
         )
         evt_rg = _brushing.render_scatter(
-            fig_rg, key="clu_pane_rg", interaction_mode=interaction,
+            fig_rg, key=f"clu_pane_rg_{suffix}", interaction_mode=interaction,
         )
         if _dispatch_event(evt_rg, state):
             st.rerun()
@@ -297,7 +302,7 @@ def _render_4pane_scatter(
             dragmode=dragmode,
         )
         evt_rb = _brushing.render_scatter(
-            fig_rb, key="clu_pane_rb", interaction_mode=interaction,
+            fig_rb, key=f"clu_pane_rb_{suffix}", interaction_mode=interaction,
         )
         if _dispatch_event(evt_rb, state):
             st.rerun()
@@ -311,7 +316,7 @@ def _render_4pane_scatter(
             dragmode=dragmode,
         )
         evt_gb = _brushing.render_scatter(
-            fig_gb, key="clu_pane_gb", interaction_mode=interaction,
+            fig_gb, key=f"clu_pane_gb_{suffix}", interaction_mode=interaction,
         )
         if _dispatch_event(evt_gb, state):
             st.rerun()
@@ -417,13 +422,17 @@ def render_tab_clustering(
     _brushing.render_keyboard_shortcuts()
     _brushing.render_wheel_capture()
 
-    st.info(
-        "Clustering operates on the selector-narrowed domain set. "
-        "Default mode is Single-pick — click a point to identify it. "
-        "Press L for Lasso brushing to build seed groups; sub-modes R/A/D "
-        "combine selections (Replace / Add / Subtract). Click + Add attaches "
-        "the brush buffer to a seed group."
-    )
+    info_col, help_col = st.columns([6, 1])
+    with info_col:
+        st.info(
+            "Clustering operates on the selector-narrowed domain set. "
+            "Default mode is Single-pick — click a point to identify it. "
+            "Press L for Lasso brushing to build seed groups; sub-modes R/A/D "
+            "combine selections (Replace / Add / Subtract). Click + Add attaches "
+            "the brush buffer to a seed group."
+        )
+    with help_col:
+        _brushing.render_help_button(key="clustering_help_btn")
 
     # Prereq gate
     manifest = load_manifest(analysis_folder)

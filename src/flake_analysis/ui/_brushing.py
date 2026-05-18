@@ -187,12 +187,50 @@ def clear_selection(state: BrushingState) -> None:
 def set_interaction_mode(state: BrushingState, mode: str) -> None:
     """Switch between ``"single"`` and ``"lasso"``.
 
-    Switching is a metadata change only — selected_ids, history, and the
-    lasso sub-mode are preserved. Unknown values fall back to single.
+    Switching is a metadata change only — selected_ids and history are
+    preserved. Unknown values fall back to single.
+
+    For ``"single"`` we additionally snap the lasso sub-mode back to
+    ``MODE_REPLACE`` defensively. The sub-mode is irrelevant in
+    single-pick (every click replaces), but resetting it means a
+    subsequent ``L`` press lands in Replace rather than reviving a
+    stale Add/Subtract context. We also clear stale Plotly chart
+    selection event payloads parked in ``st.session_state`` under the
+    selector/clustering pane key prefixes so Streamlit does not replay
+    a previous lasso event when the figure rebuilds with a new
+    ``dragmode``.
     """
     if mode not in ALL_INTERACTION_MODES:
         mode = INTERACTION_SINGLE
     state.interaction_mode = mode
+    if mode == INTERACTION_SINGLE:
+        state.mode = MODE_REPLACE
+    _purge_pane_event_state()
+
+
+def _purge_pane_event_state() -> None:
+    """Drop cached Plotly chart event payloads on interaction-mode change.
+
+    Streamlit's ``plotly_chart`` with ``on_select="rerun"`` parks the
+    most recent event under a session_state key derived from the
+    chart's ``key=``. When ``dragmode`` flips between ``pan`` and
+    ``lasso`` we want a clean slate so a stale lasso polygon can not
+    be re-applied to the freshly-rebuilt figure. Operates only on
+    keys whose prefix matches the panes registered by Selector and
+    Clustering tabs (``sel_pane_*`` / ``clu_pane_*``); everything
+    else (filter widgets, seed groups, …) is left untouched.
+    """
+    try:
+        for key in list(st.session_state.keys()):
+            if isinstance(key, str) and (
+                key.startswith("sel_pane_") or key.startswith("clu_pane_")
+            ):
+                del st.session_state[key]
+    except Exception:  # pragma: no cover - defensive
+        # In test harnesses session_state may be a dict-like mock that
+        # doesn't support iteration; degrade gracefully rather than
+        # taking the whole rerun down.
+        pass
 
 
 def get_dragmode(state: BrushingState) -> str:
@@ -607,6 +645,14 @@ _KEYBOARD_JS = """
         clickByLabel('Clear');
         return;
       }
+      // '?' (Shift+/) → open the keyboard shortcuts cheat-sheet.
+      // Browsers report key === '?' when shift is held with '/'; we
+      // also tolerate the bare '/' fallback since some keyboard layouts
+      // surface only that variant.
+      if (key === '?' || (e.shiftKey && key === '/')) {
+        if (clickByLabel('⌨ Shortcuts (?)')) { e.preventDefault(); }
+        return;
+      }
       // Plain letter shortcuts (no modifier)
       if (e.ctrlKey || e.metaKey || e.altKey) return;
       var lower = key.toLowerCase();
@@ -620,6 +666,13 @@ _KEYBOARD_JS = """
         clickByLabel('Lasso: Add (A)');
       } else if (lower === 'd') {
         clickByLabel('Lasso: Subtract (D)');
+      } else if (lower === 'b') {
+        // B → toggle boundary overlay in the image preview. The
+        // button's label flips between "Boundary on (B)" and
+        // "Boundary off (B)" so we try both.
+        if (!clickByLabel('Boundary on (B)')) {
+          clickByLabel('Boundary off (B)');
+        }
       }
     };
     doc.addEventListener('keydown', onKey);
@@ -643,15 +696,18 @@ def render_keyboard_shortcuts() -> None:
     ``L``                        Lasso mode (defaults to Replace; press again to reset to Replace)
     ``A``                        Lasso sub-mode: Add
     ``D``                        Lasso sub-mode: Delete/Subtract
+    ``B``                        Toggle image-preview boundary overlay
+    ``?``                        Open the keyboard shortcuts cheat-sheet
     ``Esc``                      Clear selection
     ``Ctrl/Cmd+Z``               Undo
     ``Ctrl/Cmd+Shift+Z``         Redo
     ===========================  =======================================
 
     Pan/Zoom/Reset View are not bound here because they live in Plotly's
-    modebar; users can press its built-in shortcuts. If Streamlit's
-    cross-origin policy blocks ``window.parent.document`` access, the
-    visible buttons remain the primary control surface.
+    modebar; the modebar buttons (``+``, ``-``, ``Reset View``) handle
+    those natively. If Streamlit's cross-origin policy blocks
+    ``window.parent.document`` access, the visible buttons remain the
+    primary control surface.
     """
     import streamlit.components.v1 as components
     components.html(_KEYBOARD_JS, height=0)
@@ -678,6 +734,74 @@ _WHEEL_CAPTURE_JS = """<script>
   } catch (err) { /* silent */ }
 })();
 </script>"""
+
+
+# ─── Keyboard shortcuts cheat-sheet (Task 3) ───────────────────────────
+
+_SHORTCUTS_BUTTON_LABEL = "⌨ Shortcuts (?)"
+
+# Markdown body kept in one place so the dialog and the expander fallback
+# render identical content.
+_SHORTCUTS_MARKDOWN = """
+**Mode**
+
+- `S` — Single-pick mode (left-click selects one point)
+- `L` — Lasso mode (Replace)
+- `A` — Lasso: Add to current selection
+- `D` — Lasso: Subtract from current selection
+
+**Selection**
+
+- `Esc` — Clear current selection
+- `Ctrl/⌘ + Z` — Undo
+- `Ctrl/⌘ + Shift + Z` — Redo
+
+**Image preview** (Selector tab)
+
+- `B` — Toggle segmentation boundary overlay
+- Mouse wheel — Zoom in / out
+- Click + drag — Pan
+- Reset View — modebar button restores the fit
+
+**Help**
+
+- `?` — Open this cheat-sheet
+"""
+
+
+def _render_shortcuts_body() -> None:
+    st.markdown(_SHORTCUTS_MARKDOWN)
+
+
+# Streamlit ≥1.35 ships ``st.dialog`` as a decorator. On older builds we
+# fall back to an inline expander so the cheat-sheet remains accessible.
+_HAS_DIALOG = hasattr(st, "dialog")
+
+if _HAS_DIALOG:
+    @st.dialog("Keyboard shortcuts")  # type: ignore[misc]
+    def _show_shortcuts_dialog() -> None:
+        _render_shortcuts_body()
+else:  # pragma: no cover - fallback path on legacy Streamlit
+    def _show_shortcuts_dialog() -> None:
+        with st.expander("⌨ Keyboard shortcuts", expanded=True):
+            _render_shortcuts_body()
+
+
+def render_help_button(key: str = "help_shortcuts_btn") -> None:
+    """Render the "Shortcuts (?)" button + open the dialog on click.
+
+    Use a unique ``key`` per tab so Streamlit doesn't complain about
+    duplicate widget ids when more than one tab calls this. The button
+    label is stable ASCII (with a single keyboard glyph) so the JS
+    keyboard handler can match it by ``innerText`` for the ``?``
+    shortcut.
+    """
+    if st.button(
+        _SHORTCUTS_BUTTON_LABEL,
+        key=key,
+        help="Show keyboard shortcuts (?)",
+    ):
+        _show_shortcuts_dialog()
 
 
 def render_wheel_capture() -> None:
