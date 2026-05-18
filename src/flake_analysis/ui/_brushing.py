@@ -283,7 +283,7 @@ def handle_click_event(event: Any, state: BrushingState) -> bool:
 # Button labels — kept ASCII so the keyboard-shortcut JS innerText match
 # stays robust. (Emoji glyphs proved brittle across Streamlit versions.)
 _BTN_SINGLE = "Single-pick (S)"
-_BTN_LASSO_REPLACE = "Lasso: Replace (L)"
+_BTN_LASSO_REPLACE = "Lasso: Replace"
 _BTN_LASSO_ADD = "Lasso: Add (A)"
 _BTN_LASSO_SUBTRACT = "Lasso: Subtract (D)"
 _BTN_UNDO = "Undo"
@@ -613,11 +613,9 @@ _KEYBOARD_JS = """
       if (lower === 's') {
         clickByLabel('Single-pick (S)');
       } else if (lower === 'l') {
-        // L → enter lasso mode (defaults to Replace sub-mode)
-        clickByLabel('Lasso: Replace (L)');
-      } else if (lower === 'r') {
-        // R → set sub-mode Replace (only effective when already in lasso)
-        clickByLabel('Lasso: Replace (L)');
+        // L → enter lasso mode (defaults to Replace sub-mode);
+        // also acts as "back to Replace" when already in lasso.
+        clickByLabel('Lasso: Replace');
       } else if (lower === 'a') {
         clickByLabel('Lasso: Add (A)');
       } else if (lower === 'd') {
@@ -642,8 +640,7 @@ def render_keyboard_shortcuts() -> None:
     Key                          Action
     ===========================  =======================================
     ``S``                        Single-pick mode
-    ``L``                        Lasso mode (defaults to Replace)
-    ``R``                        Lasso sub-mode: Replace
+    ``L``                        Lasso mode (defaults to Replace; press again to reset to Replace)
     ``A``                        Lasso sub-mode: Add
     ``D``                        Lasso sub-mode: Delete/Subtract
     ``Esc``                      Clear selection
