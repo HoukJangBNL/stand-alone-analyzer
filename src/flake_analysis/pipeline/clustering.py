@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
@@ -39,6 +39,9 @@ from flake_core.pipeline.clustering import run_clustering as core_run_clustering
 from flake_analysis.state.hashing import params_hash
 from flake_analysis.state.manifest import StepEntry, load_manifest, save_manifest
 from flake_analysis.state.paths import step_dir
+
+
+ProgressCallback = Callable[[float, str], None]
 
 
 def run_clustering_step(
@@ -50,6 +53,7 @@ def run_clustering_step(
     random_state: int = 42,
     rgb_threshold: float = 0.50,
     cluster_thresholds: Optional[Dict[int, float]] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Fit manual seed-group GMM and persist outputs.
 
@@ -125,6 +129,7 @@ def run_clustering_step(
         seed_groups=seed_groups,
         output_dir=output_dir,
         rgb_threshold=rgb_threshold,
+        progress_callback=progress_callback,
     )
 
     # Wrapper-only output: seed_groups.json (verbatim user authoring).

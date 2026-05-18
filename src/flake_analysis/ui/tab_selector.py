@@ -473,13 +473,24 @@ def render_tab_selector(
         type="primary",
         help="Write 03_selector/selection.parquet and update manifest",
     ):
-        with st.spinner("Writing selection.parquet..."):
-            try:
-                result = run_selector_step(analysis_folder=analysis_folder, **params)
-                st.success(
-                    f"Selection committed: {result['selected_count']:,} / "
-                    f"{result['total_count']:,} domains -> {result['output_path']}"
-                )
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+        progress_bar = st.progress(0.0, "Starting...")
+        status = st.empty()
+
+        def cb(pct: float, msg: str) -> None:
+            progress_bar.progress(pct, msg)
+            status.caption(msg)
+
+        try:
+            result = run_selector_step(
+                analysis_folder=analysis_folder,
+                progress_callback=cb,
+                **params,
+            )
+            progress_bar.progress(1.0, "Done")
+            st.success(
+                f"Selection committed: {result['selected_count']:,} / "
+                f"{result['total_count']:,} domains -> {result['output_path']}"
+            )
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))

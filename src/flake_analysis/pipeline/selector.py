@@ -9,13 +9,16 @@ Per plan v1 r9 §M2 PR 2.3.
 from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from flake_core.pipeline.selector import run_selector as core_run_selector
 
 from flake_analysis.state.hashing import params_hash
 from flake_analysis.state.manifest import StepEntry, load_manifest, save_manifest
 from flake_analysis.state.paths import step_dir
+
+
+ProgressCallback = Callable[[float, str], None]
 
 
 def run_selector_step(
@@ -31,6 +34,7 @@ def run_selector_step(
     std_b_max: Optional[float] = None,
     sam2_min: Optional[float] = None,
     sam2_max: Optional[float] = None,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Apply the 5-metric bidirectional filter and write selection.parquet.
 
@@ -72,6 +76,7 @@ def run_selector_step(
     result = core_run_selector(
         stats_npz_path=stats_npz,
         output_path=output_path,
+        progress_callback=progress_callback,
         **params,
     )
 

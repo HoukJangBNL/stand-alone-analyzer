@@ -5,7 +5,7 @@ Calls flake_core.pipeline.background.run_background, then updates manifest.
 from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 from flake_core.pipeline.background import run_background as core_run_background
 
@@ -18,6 +18,10 @@ from flake_analysis.state.paths import step_dir
 from flake_analysis.state.hashing import dir_mtime_max, params_hash
 
 
+# Public progress signature: pct in [0, 1] + short status string.
+ProgressCallback = Callable[[float, str], None]
+
+
 def run_background_step(
     *,
     raw_images_dir: str | Path,
@@ -26,6 +30,7 @@ def run_background_step(
     max_images: int = 100,
     gaussian_sigma: float = 10.0,
     method: str = "median",
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Run background generation step.
 
@@ -50,6 +55,7 @@ def run_background_step(
         max_images=max_images,
         gaussian_sigma=gaussian_sigma,
         method=method,
+        progress_callback=progress_callback,
     )
 
     # Update manifest

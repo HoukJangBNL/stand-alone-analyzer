@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from flake_core.pipeline.domain_proximity import (
     run_domain_proximity as core_run_domain_proximity,
@@ -17,6 +17,9 @@ from flake_analysis.state.paths import step_dir
 from flake_analysis.state.hashing import file_mtime, params_hash
 
 
+ProgressCallback = Callable[[float, str], None]
+
+
 def run_domain_proximity_step(
     *,
     annotations_path: str | Path,
@@ -28,6 +31,7 @@ def run_domain_proximity_step(
     pixel_size_um: float = 0.5,
     link_distance_um: float = 5.0,
     workers: int = 4,
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Run pair distance + flake construction.
 
@@ -56,6 +60,7 @@ def run_domain_proximity_step(
         link_distance_um=link_distance_um,
         pixel_size_um=pixel_size_um,
         workers=workers,
+        progress_callback=progress_callback,
     )
 
     manifest = load_manifest(analysis_folder)

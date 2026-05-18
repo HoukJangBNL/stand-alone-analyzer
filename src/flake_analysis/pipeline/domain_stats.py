@@ -2,7 +2,7 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Callable, Dict, Optional
 
 from flake_core.pipeline.domain_stats import run_domain_stats as core_run_domain_stats
 
@@ -14,6 +14,9 @@ from flake_analysis.state.manifest import (
 from flake_analysis.state.hashing import file_mtime, params_hash
 
 
+ProgressCallback = Callable[[float, str], None]
+
+
 def run_domain_stats_step(
     *,
     raw_images_dir: str | Path,
@@ -21,6 +24,7 @@ def run_domain_stats_step(
     analysis_folder: str | Path,
     repr_mode: str = "median",
     raw_ext: str = ".png",
+    progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Run domain stats step.
 
@@ -50,6 +54,7 @@ def run_domain_stats_step(
         analysis_folder=analysis_folder,
         repr_mode=repr_mode,
         raw_ext=raw_ext,
+        progress_callback=progress_callback,
     )
 
     manifest.steps["domain_stats"] = StepEntry(

@@ -5,7 +5,7 @@ from __future__ import annotations
 def test_package_import():
     import flake_analysis
 
-    assert flake_analysis.__version__ == "0.1.0"
+    assert flake_analysis.__version__ == "0.1.1"
 
 
 def test_subpackages_importable():

@@ -552,21 +552,29 @@ def render_tab_clustering(
         disabled=not can_fit,
         key="clu_fit",
     ):
-        with st.spinner("Fitting GMM..."):
-            try:
-                result = run_clustering_step(
-                    analysis_folder=analysis_folder,
-                    seed_groups=seed_groups,
-                )
-                _render_diagnostics(result)
-                st.success(
-                    f"GMM fitted: {result.get('n_clusters', '?')} clusters · "
-                    f"assigned={result.get('n_assigned', '?')} · "
-                    f"unassigned={result.get('n_unassigned', '?')}"
-                )
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+        progress_bar = st.progress(0.0, "Starting...")
+        status = st.empty()
+
+        def cb(pct: float, msg: str) -> None:
+            progress_bar.progress(pct, msg)
+            status.caption(msg)
+
+        try:
+            result = run_clustering_step(
+                analysis_folder=analysis_folder,
+                seed_groups=seed_groups,
+                progress_callback=cb,
+            )
+            progress_bar.progress(1.0, "Done")
+            _render_diagnostics(result)
+            st.success(
+                f"GMM fitted: {result.get('n_clusters', '?')} clusters · "
+                f"assigned={result.get('n_assigned', '?')} · "
+                f"unassigned={result.get('n_unassigned', '?')}"
+            )
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
 
     # If a fit is on disk, expose thresholds + size chart.
     if labels:

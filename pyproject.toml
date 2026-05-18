@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stand-alone-analyzer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Streamlit app for interactive 2D material flake analysis"
 readme = "README.md"
 license = "MIT"
@@ -24,7 +24,7 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-    "flake-analysis-core>=0.1.0",
+    "flake-analysis-core>=0.2.0",
     "streamlit>=1.32",
     "plotly>=5.18",
     "pandas>=2.1",

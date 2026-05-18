@@ -34,25 +34,44 @@ def render_tab_compute(
         )
 
     if run_all:
-        with st.spinner("Running all compute steps..."):
-            try:
-                run_background_step(
-                    raw_images_dir=raw_images_dir,
-                    analysis_folder=analysis_folder,
-                )
-                run_domain_stats_step(
-                    raw_images_dir=raw_images_dir,
-                    annotations_path=annotations_path,
-                    analysis_folder=analysis_folder,
-                )
-                run_domain_proximity_step(
-                    annotations_path=annotations_path,
-                    analysis_folder=analysis_folder,
-                )
-                st.success("All 3 compute steps completed.")
-                st.rerun()
-            except Exception as e:
-                st.error(f"Run All failed: {e}")
+        # Run All combines step-level meta-progress (1/3, 2/3, 3/3) with the
+        # per-step inner progress emitted by flake_core. The combined pct
+        # is ``(step_idx + inner_pct) / total_steps`` so the bar fills
+        # smoothly across the whole pipeline.
+        overall = st.progress(0.0, "Starting...")
+        status = st.empty()
+        TOTAL = 3
+
+        def make_combined(step_idx: int):
+            def cb(pct: float, msg: str) -> None:
+                combined = (step_idx + pct) / TOTAL
+                label = f"Step {step_idx + 1}/{TOTAL}: {msg}"
+                overall.progress(combined, label)
+                status.caption(label)
+            return cb
+
+        try:
+            run_background_step(
+                raw_images_dir=raw_images_dir,
+                analysis_folder=analysis_folder,
+                progress_callback=make_combined(0),
+            )
+            run_domain_stats_step(
+                raw_images_dir=raw_images_dir,
+                annotations_path=annotations_path,
+                analysis_folder=analysis_folder,
+                progress_callback=make_combined(1),
+            )
+            run_domain_proximity_step(
+                annotations_path=annotations_path,
+                analysis_folder=analysis_folder,
+                progress_callback=make_combined(2),
+            )
+            overall.progress(1.0, "All compute steps completed.")
+            st.success("All 3 compute steps completed.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Run All failed: {e}")
 
     # Re-load manifest for status display
     manifest = load_manifest(analysis_folder)
@@ -88,20 +107,28 @@ def render_tab_compute(
             method = st.selectbox("method", ["median", "mean"], key="bg_method")
 
         if st.button("▶ Compute background", key="bg_compute"):
-            with st.spinner("Computing background..."):
-                try:
-                    result = run_background_step(
-                        raw_images_dir=raw_images_dir,
-                        analysis_folder=analysis_folder,
-                        seed=int(seed),
-                        max_images=int(max_images),
-                        gaussian_sigma=float(gaussian_sigma),
-                        method=method,
-                    )
-                    st.success(f"Background written to {result['output_path']}")
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+            progress_bar = st.progress(0.0, "Starting...")
+            status = st.empty()
+
+            def cb(pct: float, msg: str) -> None:
+                progress_bar.progress(pct, msg)
+                status.caption(msg)
+
+            try:
+                result = run_background_step(
+                    raw_images_dir=raw_images_dir,
+                    analysis_folder=analysis_folder,
+                    seed=int(seed),
+                    max_images=int(max_images),
+                    gaussian_sigma=float(gaussian_sigma),
+                    method=method,
+                    progress_callback=cb,
+                )
+                progress_bar.progress(1.0, "Done")
+                st.success(f"Background written to {result['output_path']}")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
         if bg_complete:
             st.caption(f"Last run: {bg_done.completed_at}")
@@ -148,22 +175,30 @@ def render_tab_compute(
             if st.button(
                 "▶ Compute stats", key="ds_compute", disabled=bg_required
             ):
-                with st.spinner("Computing domain stats..."):
-                    try:
-                        result = run_domain_stats_step(
-                            raw_images_dir=raw_images_dir,
-                            annotations_path=annotations_path,
-                            analysis_folder=analysis_folder,
-                            repr_mode=repr_mode,
-                            raw_ext=raw_ext,
-                        )
-                        st.success(
-                            f"Domain stats written: {result['output_path']} "
-                            f"({result['num_flakes']} flakes)"
-                        )
-                        st.rerun()
-                    except Exception as e:
-                        st.error(str(e))
+                progress_bar = st.progress(0.0, "Starting...")
+                status = st.empty()
+
+                def cb(pct: float, msg: str) -> None:
+                    progress_bar.progress(pct, msg)
+                    status.caption(msg)
+
+                try:
+                    result = run_domain_stats_step(
+                        raw_images_dir=raw_images_dir,
+                        annotations_path=annotations_path,
+                        analysis_folder=analysis_folder,
+                        repr_mode=repr_mode,
+                        raw_ext=raw_ext,
+                        progress_callback=cb,
+                    )
+                    progress_bar.progress(1.0, "Done")
+                    st.success(
+                        f"Domain stats written: {result['output_path']} "
+                        f"({result['num_flakes']} flakes)"
+                    )
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
 
             if stats_complete:
                 st.caption(f"Last run: {stats_done.completed_at}")
@@ -216,25 +251,33 @@ def render_tab_compute(
         if st.button(
             "▶ Compute pair distances + flakes", key="dp_compute"
         ):
-            with st.spinner("Computing pair distances + flakes..."):
-                try:
-                    result = run_domain_proximity_step(
-                        annotations_path=annotations_path,
-                        analysis_folder=analysis_folder,
-                        r_max_px=float(r_max_px),
-                        d_touch_px=float(d_touch_px),
-                        link_distance_um=float(link_distance_um),
-                        min_area_px=int(min_area_px_dp),
-                        pixel_size_um=float(pixel_size_um),
-                        workers=int(workers),
-                    )
-                    st.success(
-                        f"{result['n_pairs']} pairs / {result['n_flakes']} flakes "
-                        f"across {result['n_domains']} domains"
-                    )
-                    st.rerun()
-                except Exception as e:
-                    st.error(str(e))
+            progress_bar = st.progress(0.0, "Starting...")
+            status = st.empty()
+
+            def cb(pct: float, msg: str) -> None:
+                progress_bar.progress(pct, msg)
+                status.caption(msg)
+
+            try:
+                result = run_domain_proximity_step(
+                    annotations_path=annotations_path,
+                    analysis_folder=analysis_folder,
+                    r_max_px=float(r_max_px),
+                    d_touch_px=float(d_touch_px),
+                    link_distance_um=float(link_distance_um),
+                    min_area_px=int(min_area_px_dp),
+                    pixel_size_um=float(pixel_size_um),
+                    workers=int(workers),
+                    progress_callback=cb,
+                )
+                progress_bar.progress(1.0, "Done")
+                st.success(
+                    f"{result['n_pairs']} pairs / {result['n_flakes']} flakes "
+                    f"across {result['n_domains']} domains"
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
         if prox_complete:
             st.caption(f"Last run: {prox_done.completed_at}")
