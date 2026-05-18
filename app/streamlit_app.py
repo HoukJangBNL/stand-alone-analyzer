@@ -1,11 +1,9 @@
-"""stand-alone-analyzer Streamlit entry point.
-
-For M0, this is just a Hello World page. Subsequent milestones (M3) wire up
-sidebar (3 paths + manifest) and 6 pipeline tabs.
-"""
+"""stand-alone-analyzer Streamlit entry point (M2 PR 2.1)."""
 from __future__ import annotations
-
 import streamlit as st
+
+from flake_analysis.ui.sidebar import render_sidebar
+
 
 st.set_page_config(
     page_title="Stand-Alone Analyzer",
@@ -13,36 +11,21 @@ st.set_page_config(
     layout="wide",
 )
 
+raw_images_dir, annotations_path, analysis_folder = render_sidebar()
+
 st.title("Stand-Alone Analyzer")
-st.caption("M0 skeleton. Pipeline tabs wired up in M3.")
+st.caption("Pipeline tabs (M2 PR 2.2+ wires real content)")
 
-st.markdown(
-    """
-    **Status**: Hello World page (Milestone 0)
+tab_names = [
+    "1. Background",
+    "2. Domain Stats",
+    "3. Selector",
+    "4. Clustering",
+    "5. Domain Proximity",
+    "6. Explorer",
+]
+tabs = st.tabs(tab_names)
 
-    This is the entry point for the standalone flake-analysis Streamlit app.
-    Subsequent milestones will add:
-
-    - **M1**: `flake-analysis-core` extraction (sibling repo)
-    - **M2**: Qpress migration to use the shared package
-    - **M3**: Sidebar (3 paths + manifest) + 6 pipeline tabs
-    - **M4**: Parity validation harness
-    - **M5**: Polish + GitHub release
-
-    See `plan_v1.md` for full milestone breakdown.
-    """
-)
-
-st.divider()
-
-st.subheader("Planned tab layout")
-st.markdown(
-    """
-    1. Background — compute median background from raw images
-    2. Domain Stats — compute per-domain RGB stats (compute-only)
-    3. Selector — 5-metric bidirectional filter with 4-pane scatter
-    4. Clustering — manual seed-group GMM with per-cluster thresholds
-    5. Domain Proximity — pair distance + flake construction (union-find)
-    6. Explorer — substrate grid + LOD + Include/Exclude label picker
-    """
-)
+for tab, name in zip(tabs, tab_names):
+    with tab:
+        st.info(f"{name} — placeholder. Wired in subsequent PRs.")
