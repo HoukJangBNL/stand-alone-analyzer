@@ -1,9 +1,11 @@
 """Selector tab — 4-pane RGB scatter + 5-metric bidirectional filter + flake list.
 
-This tab is the SPIKE for the linked-brushing pattern (plan v1 r9 §10 R7).
+Per-domain image preview, mode toggles (Replace/Add/Subtract), undo/redo,
+and scroll-zoom were added in v0.1.2 via the shared ``_brushing`` helper.
+
 The 5-metric filter is the actual selection contract; the lasso/box
 brushing is for cross-pane inspection only and does not modify metric
-ranges. Per-domain image preview is deferred to a follow-up (M3).
+ranges.
 
 Mockup reference: ``04_tab_selector.html``.
 """
@@ -17,22 +19,8 @@ import streamlit as st
 
 from flake_analysis.pipeline.selector import run_selector_step
 from flake_analysis.state.manifest import load_manifest
-
-
-# ─── State helpers ────────────────────────────────────────────────────────
-
-LASSO_KEY = "selector.lasso_selected_ids"
-
-
-def _get_lasso_ids() -> Set[int]:
-    val = st.session_state.get(LASSO_KEY)
-    if not val:
-        return set()
-    return set(val)
-
-
-def _save_lasso_ids(ids: Set[int]) -> None:
-    st.session_state[LASSO_KEY] = ids
+from flake_analysis.ui import _brushing
+from flake_analysis.ui._image_preview import render_image_preview
 
 
 # ─── Data loading + filtering ────────────────────────────────────────────
@@ -48,12 +36,7 @@ def _load_stats_npz(analysis_folder: str) -> Optional[Dict[str, np.ndarray]]:
 def _apply_filter(
     stats: Dict[str, np.ndarray], params: Dict[str, Optional[float]]
 ) -> np.ndarray:
-    """Return boolean mask of accepted domains based on 5-metric bounds.
-
-    Mirrors ``flake_core.pipeline.selector.run_selector`` but operates
-    purely in-memory for live preview. Missing ``sam2`` column → bounds
-    ignored (allow_missing=True semantics).
-    """
+    """Return boolean mask of accepted domains based on 5-metric bounds."""
     n = len(stats["flake_ids"])
     mask = np.ones(n, dtype=bool)
 
@@ -99,11 +82,7 @@ _METRIC_DEFS = (
 
 
 def _render_filter_controls() -> Dict[str, Optional[float]]:
-    """Render 5-metric × min/max sliders. Returns params dict.
-
-    A bound equal to its default is treated as ``None`` (no constraint),
-    matching the ``run_selector`` semantics.
-    """
+    """Render 5-metric × min/max sliders. Returns params dict."""
     st.subheader("5-metric filter")
     cols = st.columns(5)
     params: Dict[str, Optional[float]] = {}
@@ -142,7 +121,7 @@ def _clear_filter_session_keys() -> None:
         st.session_state.pop(f"sel_{key}_max", None)
 
 
-# ─── 4-pane scatter (linked brushing spike) ──────────────────────────────
+# ─── 4-pane scatter (linked brushing via shared _brushing helper) ────────
 
 # Static downsample cap for PR 2.3. Future: zoom-aware (M3).
 _MAX_POINTS = 5000
@@ -154,102 +133,16 @@ def _downsample_indices(n: int, cap: int = _MAX_POINTS) -> np.ndarray:
     return np.random.default_rng(0).choice(n, cap, replace=False)
 
 
-def _make_2d_scatter(
-    x: np.ndarray,
-    y: np.ndarray,
-    ids: np.ndarray,
-    colors: np.ndarray,
-    sizes: np.ndarray,
-    line_colors: np.ndarray,
-    x_label: str,
-    y_label: str,
-):
-    import plotly.graph_objects as go
-
-    fig = go.Figure(
-        data=go.Scattergl(
-            x=x,
-            y=y,
-            mode="markers",
-            marker=dict(
-                size=sizes,
-                color=colors,
-                line=dict(width=1.5, color=line_colors),
-            ),
-            customdata=ids,
-            hovertemplate=(
-                f"id=%{{customdata}}<br>{x_label}=%{{x:.0f}}<br>"
-                f"{y_label}=%{{y:.0f}}<extra></extra>"
-            ),
-        )
-    )
-    fig.update_layout(
-        height=300,
-        margin=dict(l=10, r=10, t=10, b=30),
-        xaxis_title=x_label,
-        yaxis_title=y_label,
-        dragmode="lasso",
-        showlegend=False,
-    )
-    return fig
-
-
-def _handle_selection_event(event, key: str) -> None:
-    """Save lasso/box selection from a Plotly event into session_state.
-
-    Streamlit ≥1.30 returns an object with ``.selection`` (mapping or
-    AttrDict) when ``on_select="rerun"`` is set. We tolerate both
-    dict-style and attr-style access plus ``None``.
-    """
-    if not event:
-        return
-
-    selection = None
-    if isinstance(event, dict):
-        selection = event.get("selection")
-    else:
-        selection = getattr(event, "selection", None)
-
-    if not selection:
-        return
-
-    points = None
-    if isinstance(selection, dict):
-        points = selection.get("points")
-    else:
-        points = getattr(selection, "points", None)
-
-    if not points:
-        # Empty selection — user cleared the lasso. Only clear on a fresh
-        # interaction with this pane (skip if no widgets were touched).
-        return
-
-    selected_ids: Set[int] = set()
-    for p in points:
-        cd = p.get("customdata") if isinstance(p, dict) else getattr(p, "customdata", None)
-        if cd is None:
-            continue
-        try:
-            selected_ids.add(int(cd))
-        except (TypeError, ValueError):
-            continue
-
-    if selected_ids:
-        _save_lasso_ids(selected_ids)
-
-
 def _render_4pane_scatter(
     stats: Dict[str, np.ndarray],
     accept_mask: np.ndarray,
-    lasso_ids: Set[int],
+    state: _brushing.BrushingState,
 ) -> None:
     """4-pane RGB scatter (3D + R-G + R-B + G-B) with linked brushing.
 
     Color encoding: green=accepted, red=rejected.
     Lasso/box-selected points get an orange ring across all panes.
     """
-    import plotly.graph_objects as go
-
     rgb = stats["repr_rgbs"]
     flake_ids = stats["flake_ids"].astype(np.int64)
     n = len(flake_ids)
@@ -259,10 +152,7 @@ def _render_4pane_scatter(
     ids_sub = flake_ids[sub_idx]
     accepted_sub = accept_mask[sub_idx]
 
-    colors = np.where(accepted_sub, "#43a047", "#e53935")  # green / red
-    is_lasso = np.array([fid in lasso_ids for fid in ids_sub])
-    sizes = np.where(is_lasso, 8, 4)
-    line_colors = np.where(is_lasso, "#ff9800", "rgba(0,0,0,0)")  # orange ring
+    base_colors = np.where(accepted_sub, "#43a047", "#e53935")
 
     if n > _MAX_POINTS:
         st.caption(
@@ -270,88 +160,58 @@ def _render_4pane_scatter(
             f"(seeded random downsample for plot perf)."
         )
 
+    selected = state.selected_ids
+
     col1, col2 = st.columns(2)
     with col1:
-        st.caption("3D R-G-B scatter")
-        fig3d = go.Figure(
-            data=go.Scatter3d(
-                x=rgb_sub[:, 0],
-                y=rgb_sub[:, 1],
-                z=rgb_sub[:, 2],
-                mode="markers",
-                marker=dict(size=3, color=colors),
-                customdata=ids_sub,
-                hovertemplate=(
-                    "domain_id=%{customdata}<br>"
-                    "R=%{x:.0f}, G=%{y:.0f}, B=%{z:.0f}<extra></extra>"
-                ),
-            )
+        st.caption("3D R-G-B scatter (display only)")
+        fig3d = _brushing.make_3d_scatter(
+            rgb_sub, ids_sub,
+            base_colors=base_colors, selected_ids=selected,
         )
-        fig3d.update_layout(
-            height=350,
-            margin=dict(l=0, r=0, t=20, b=0),
-            scene=dict(
-                xaxis_title="R",
-                yaxis_title="G",
-                zaxis_title="B",
-            ),
-        )
-        # Plotly 3D does not support box/lasso selection events — display only.
-        st.plotly_chart(fig3d, use_container_width=True, key="sel_pane_3d")
+        _brushing.render_scatter(fig3d, key="sel_pane_3d", on_select=False)
 
     with col2:
-        st.caption("R vs G (lasso/box to brush)")
-        fig_rg = _make_2d_scatter(
+        st.caption("R vs G (lasso/box to brush · scroll to zoom)")
+        fig_rg = _brushing.make_2d_scatter(
             rgb_sub[:, 0], rgb_sub[:, 1], ids_sub,
-            colors, sizes, line_colors, "R", "G",
+            base_colors=base_colors, selected_ids=selected,
+            x_label="R", y_label="G",
         )
-        event_rg = st.plotly_chart(
-            fig_rg,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode=("lasso", "box"),
-            key="sel_pane_rg",
-        )
-        _handle_selection_event(event_rg, "sel_pane_rg")
+        evt_rg = _brushing.render_scatter(fig_rg, key="sel_pane_rg")
+        if _brushing.handle_selection_event(evt_rg, state):
+            st.rerun()
 
     col3, col4 = st.columns(2)
     with col3:
-        st.caption("R vs B (lasso/box to brush)")
-        fig_rb = _make_2d_scatter(
+        st.caption("R vs B (lasso/box to brush · scroll to zoom)")
+        fig_rb = _brushing.make_2d_scatter(
             rgb_sub[:, 0], rgb_sub[:, 2], ids_sub,
-            colors, sizes, line_colors, "R", "B",
+            base_colors=base_colors, selected_ids=selected,
+            x_label="R", y_label="B",
         )
-        event_rb = st.plotly_chart(
-            fig_rb,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode=("lasso", "box"),
-            key="sel_pane_rb",
-        )
-        _handle_selection_event(event_rb, "sel_pane_rb")
+        evt_rb = _brushing.render_scatter(fig_rb, key="sel_pane_rb")
+        if _brushing.handle_selection_event(evt_rb, state):
+            st.rerun()
 
     with col4:
-        st.caption("G vs B (lasso/box to brush)")
-        fig_gb = _make_2d_scatter(
+        st.caption("G vs B (lasso/box to brush · scroll to zoom)")
+        fig_gb = _brushing.make_2d_scatter(
             rgb_sub[:, 1], rgb_sub[:, 2], ids_sub,
-            colors, sizes, line_colors, "G", "B",
+            base_colors=base_colors, selected_ids=selected,
+            x_label="G", y_label="B",
         )
-        event_gb = st.plotly_chart(
-            fig_gb,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode=("lasso", "box"),
-            key="sel_pane_gb",
-        )
-        _handle_selection_event(event_gb, "sel_pane_gb")
+        evt_gb = _brushing.render_scatter(fig_gb, key="sel_pane_gb")
+        if _brushing.handle_selection_event(evt_gb, state):
+            st.rerun()
 
 
-# ─── Right pane: flake list + image preview placeholder ──────────────────
+# ─── Right pane: flake list ──────────────────────────────────────────────
 
 def _render_flake_list(
     stats: Dict[str, np.ndarray],
     accept_mask: np.ndarray,
-    lasso_ids: Set[int],
+    selected_ids: Set[int],
 ) -> None:
     flake_ids = stats["flake_ids"].astype(np.int64)
     rgb = stats["repr_rgbs"]
@@ -375,14 +235,20 @@ def _render_flake_list(
             "status": np.where(accept_mask, "accepted", "rejected"),
         }
     )
-    if lasso_ids:
-        df.loc[df["domain_id"].isin(lasso_ids), "status"] = "lasso"
+    if selected_ids:
+        df.loc[df["domain_id"].isin(selected_ids), "status"] = "selected"
 
     st.dataframe(df, height=300, use_container_width=True)
-    st.caption("Per-domain image preview deferred to follow-up (M3).")
 
 
 # ─── Top-level renderer ──────────────────────────────────────────────────
+
+def _focus_domain_id(state: _brushing.BrushingState) -> Optional[int]:
+    """Pick the focused domain for the image preview panel."""
+    if not state.selected_ids:
+        return None
+    return min(state.selected_ids)
+
 
 def render_tab_selector(
     raw_images_dir: str,
@@ -394,9 +260,16 @@ def render_tab_selector(
         st.warning("Set analysis_folder in sidebar to enable the Selector tab.")
         return
 
+    state = _brushing.get_brushing_state("selector")
+
+    # Inject keyboard shortcut JS (best-effort — Streamlit iframe sandbox
+    # may block it; the visible buttons remain primary).
+    _brushing.render_keyboard_shortcuts()
+
     st.info(
         "Selector right-pane is mandatory in v1. "
-        "Lasso/box select in any 2D pane → highlight same domains in all panes."
+        "Lasso/box select in any 2D pane → highlight same domains in all panes. "
+        "Use mode toggles to combine selections; scroll to zoom; Ctrl/Cmd+Z to undo."
     )
 
     stats = _load_stats_npz(analysis_folder)
@@ -416,20 +289,18 @@ def render_tab_selector(
 
     st.success(f"✅ Domain Stats ready (last run: {stats_entry.completed_at})")
 
-    # Preset buttons
-    col_a, col_b, col_c, _spacer = st.columns([1, 1, 1, 3])
+    # Mode controls + Undo / Redo / Clear (selection history)
+    _brushing.render_mode_controls(state, "selector")
+
+    # Filter preset buttons
+    col_a, col_b, _spacer = st.columns([1, 1, 5])
     with col_a:
         if st.button("✓ Select All", help="Clear all bounds (accept everything)"):
             _clear_filter_session_keys()
-            _save_lasso_ids(set())
             st.rerun()
     with col_b:
-        if st.button("↺ Reset", help="Reset filter widgets to defaults"):
+        if st.button("↺ Reset filter", help="Reset filter widgets to defaults"):
             _clear_filter_session_keys()
-            st.rerun()
-    with col_c:
-        if st.button("✗ Clear lasso", help="Clear cross-pane lasso highlight"):
-            _save_lasso_ids(set())
             st.rerun()
 
     # 5-metric filter widgets
@@ -440,7 +311,7 @@ def render_tab_selector(
     n_total = int(len(accept_mask))
     n_accepted = int(accept_mask.sum())
     pct = (100.0 * n_accepted / n_total) if n_total else 0.0
-    lasso_ids = _get_lasso_ids()
+    selected_ids = state.selected_ids
 
     metric_cols = st.columns(3)
     with metric_cols[0]:
@@ -448,18 +319,28 @@ def render_tab_selector(
     with metric_cols[1]:
         st.metric("Rejected", f"{n_total - n_accepted:,}")
     with metric_cols[2]:
-        st.metric("Lasso highlighted", f"{len(lasso_ids):,}")
+        st.metric("Brush selected", f"{len(selected_ids):,}")
 
     st.divider()
 
-    # 4-pane scatter (linked brushing spike)
-    _render_4pane_scatter(stats, accept_mask, lasso_ids)
+    # 4-pane scatter (linked brushing)
+    _render_4pane_scatter(stats, accept_mask, state)
 
     st.divider()
 
-    # Right-pane: flake list
-    st.subheader("Flake list")
-    _render_flake_list(stats, accept_mask, lasso_ids)
+    # Right-pane: flake list + raw image preview side-by-side.
+    list_col, img_col = st.columns([3, 2])
+    with list_col:
+        st.subheader("Flake list")
+        _render_flake_list(stats, accept_mask, selected_ids)
+    with img_col:
+        focus = _focus_domain_id(state)
+        render_image_preview(
+            raw_images_dir=raw_images_dir,
+            annotations_path=annotations_path,
+            domain_id=focus,
+            n_selected=len(selected_ids),
+        )
 
     st.divider()
 

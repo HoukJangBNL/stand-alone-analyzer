@@ -1,12 +1,13 @@
 """Clustering tab — manual seed-group GMM + per-cluster thresholds.
 
-Operates on the selector-narrowed domain set. Reuses the linked-brushing
-4-pane scatter pattern from PR 2.3 (tab_selector) — color encoding here
-is "all gray" pre-fit and per-cluster palette post-fit. Lasso/box brushes
-domains for the next "Add to group" action.
+Operates on the selector-narrowed domain set. v0.1.2 swapped the inline
+brushing helpers for the shared ``_brushing`` module so mode toggles
+(Replace/Add/Subtract), undo/redo, and scroll-zoom are uniform with the
+Selector tab. Per-domain image preview is intentionally out of scope for
+this tab in v0.1.2 (selection here drives seed-group authoring, not
+inspection).
 
 Per plan v1 r9 §M2 PR 2.4. Mockup: ``05_tab_clustering.html``.
-Per-domain image preview is deferred to M3 (consistent with PR 2.3).
 """
 from __future__ import annotations
 import json
@@ -19,6 +20,7 @@ import streamlit as st
 
 from flake_analysis.pipeline.clustering import apply_thresholds, run_clustering_step
 from flake_analysis.state.manifest import load_manifest
+from flake_analysis.ui import _brushing
 
 
 # ─── Constants ───────────────────────────────────────────────────────────
@@ -29,9 +31,7 @@ CLUSTER_PALETTE = [
     "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf",
 ]
 NEUTRAL_GRAY = "#9e9e9e"
-LASSO_RING = "#ff9800"
 
-LASSO_KEY = "clustering.lasso_selected_ids"
 SEED_GROUPS_KEY = "clustering.seed_groups"
 
 _MAX_POINTS = 5000
@@ -43,17 +43,6 @@ def _ensure_session_seed_groups() -> List[Dict[str, Any]]:
     if SEED_GROUPS_KEY not in st.session_state:
         st.session_state[SEED_GROUPS_KEY] = []
     return st.session_state[SEED_GROUPS_KEY]
-
-
-def _get_lasso_ids() -> Set[int]:
-    val = st.session_state.get(LASSO_KEY)
-    if not val:
-        return set()
-    return set(val)
-
-
-def _save_lasso_ids(ids: Set[int]) -> None:
-    st.session_state[LASSO_KEY] = ids
 
 
 # ─── Data loading ────────────────────────────────────────────────────────
@@ -87,84 +76,10 @@ def _load_committed_clustering(analysis_folder: str) -> Optional[Dict[str, Any]]
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-# ─── Linked brushing (reused pattern from tab_selector) ──────────────────
-
-def _handle_selection_event(event) -> None:
-    """Save lasso/box selection from a Plotly event into session_state.
-
-    Matches the helper in ``tab_selector._handle_selection_event``.
-    """
-    if not event:
-        return
-    selection = event.get("selection") if isinstance(event, dict) else getattr(event, "selection", None)
-    if not selection:
-        return
-    points = (
-        selection.get("points")
-        if isinstance(selection, dict)
-        else getattr(selection, "points", None)
-    )
-    if not points:
-        return
-
-    selected_ids: Set[int] = set()
-    for p in points:
-        cd = p.get("customdata") if isinstance(p, dict) else getattr(p, "customdata", None)
-        if cd is None:
-            continue
-        try:
-            selected_ids.add(int(cd))
-        except (TypeError, ValueError):
-            continue
-
-    if selected_ids:
-        _save_lasso_ids(selected_ids)
-
-
 def _downsample_indices(n: int, cap: int = _MAX_POINTS) -> np.ndarray:
     if n <= cap:
         return np.arange(n)
     return np.random.default_rng(0).choice(n, cap, replace=False)
-
-
-def _make_2d_scatter(
-    x: np.ndarray,
-    y: np.ndarray,
-    ids: np.ndarray,
-    colors: np.ndarray,
-    sizes: np.ndarray,
-    line_colors: np.ndarray,
-    x_label: str,
-    y_label: str,
-):
-    import plotly.graph_objects as go
-
-    fig = go.Figure(
-        data=go.Scattergl(
-            x=x,
-            y=y,
-            mode="markers",
-            marker=dict(
-                size=sizes,
-                color=colors,
-                line=dict(width=1.5, color=line_colors),
-            ),
-            customdata=ids,
-            hovertemplate=(
-                f"id=%{{customdata}}<br>{x_label}=%{{x:.0f}}<br>"
-                f"{y_label}=%{{y:.0f}}<extra></extra>"
-            ),
-        )
-    )
-    fig.update_layout(
-        height=300,
-        margin=dict(l=10, r=10, t=10, b=30),
-        xaxis_title=x_label,
-        yaxis_title=y_label,
-        dragmode="lasso",
-        showlegend=False,
-    )
-    return fig
 
 
 # ─── Seed group panel ────────────────────────────────────────────────────
@@ -203,7 +118,10 @@ def _seed_groups_to_table(
     return pd.DataFrame(rows)
 
 
-def _render_seed_group_panel(stats: Dict[str, Any]) -> None:
+def _render_seed_group_panel(
+    stats: Dict[str, Any],
+    state: _brushing.BrushingState,
+) -> None:
     """Seed group management UI: Add / Remove / Rename / Clear All."""
     seed_groups = _ensure_session_seed_groups()
     st.subheader("Seed groups")
@@ -214,10 +132,10 @@ def _render_seed_group_panel(stats: Dict[str, Any]) -> None:
         )
         st.dataframe(df, use_container_width=True, height=200)
     else:
-        st.caption("No seed groups yet. Lasso domains in the scatter, then click + Add.")
+        st.caption("No seed groups yet. Brush domains in the scatter, then click + Add.")
 
-    lasso_ids = _get_lasso_ids()
-    st.caption(f"Lasso buffer: {len(lasso_ids)} domain(s) ready to add.")
+    selected_ids = state.selected_ids
+    st.caption(f"Brush buffer: {len(selected_ids)} domain(s) ready to add (mode={state.mode}).")
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -229,16 +147,16 @@ def _render_seed_group_panel(stats: Dict[str, Any]) -> None:
         if st.button("+ Add", key="cluster_add_group"):
             if not new_name:
                 st.warning("Enter a group name first.")
-            elif not lasso_ids:
-                st.warning("Lasso some domains in the scatter first.")
+            elif not selected_ids:
+                st.warning("Brush some domains in the scatter first.")
             elif any(g.get("name") == new_name for g in seed_groups):
                 st.warning(f"Group '{new_name}' already exists.")
             else:
                 seed_groups.append({
                     "name": new_name,
-                    "domain_ids": sorted(int(i) for i in lasso_ids),
+                    "domain_ids": sorted(int(i) for i in selected_ids),
                 })
-                _save_lasso_ids(set())
+                _brushing.clear_selection(state)
                 st.rerun()
 
     names = [g["name"] for g in seed_groups]
@@ -276,7 +194,7 @@ def _render_seed_group_panel(stats: Dict[str, Any]) -> None:
     with col4:
         if st.button("↺ Clear All", key="cluster_clear_all"):
             seed_groups.clear()
-            _save_lasso_ids(set())
+            _brushing.clear_selection(state)
             st.rerun()
 
 
@@ -285,15 +203,9 @@ def _render_seed_group_panel(stats: Dict[str, Any]) -> None:
 def _render_4pane_scatter(
     stats: Dict[str, Any],
     cluster_assign: Optional[Dict[int, int]],
+    state: _brushing.BrushingState,
 ) -> None:
-    """4-pane scatter (3D + R-G + R-B + G-B) with linked brushing.
-
-    Color encoding:
-      * pre-fit (cluster_assign is None) → all gray
-      * post-fit → cluster palette by cluster_id; gray for unassigned (-1)
-    """
-    import plotly.graph_objects as go
-
+    """4-pane scatter (3D + R-G + R-B + G-B) with linked brushing."""
     rgb_all = stats["repr_rgbs"]
     flake_ids = stats["flake_ids"].astype(np.int64)
     sel_mask = stats["selected_mask"]
@@ -315,89 +227,59 @@ def _render_4pane_scatter(
         )
 
     if cluster_assign:
-        colors = np.array([
+        base_colors = np.array([
             CLUSTER_PALETTE[cluster_assign[int(fid)] % len(CLUSTER_PALETTE)]
             if int(fid) in cluster_assign and cluster_assign[int(fid)] >= 0
             else NEUTRAL_GRAY
             for fid in ids_sub
         ])
     else:
-        colors = np.full(len(ids_sub), NEUTRAL_GRAY)
+        base_colors = np.full(len(ids_sub), NEUTRAL_GRAY)
 
-    lasso_ids = _get_lasso_ids()
-    is_lasso = np.array([fid in lasso_ids for fid in ids_sub])
-    sizes = np.where(is_lasso, 8, 4)
-    line_colors = np.where(is_lasso, LASSO_RING, "rgba(0,0,0,0)")
+    selected = state.selected_ids
 
     col1, col2 = st.columns(2)
     with col1:
         st.caption("3D R-G-B (display only)")
-        fig3d = go.Figure(
-            data=go.Scatter3d(
-                x=rgb_sub[:, 0],
-                y=rgb_sub[:, 1],
-                z=rgb_sub[:, 2],
-                mode="markers",
-                marker=dict(size=3, color=colors),
-                customdata=ids_sub,
-                hovertemplate=(
-                    "domain_id=%{customdata}<br>"
-                    "R=%{x:.0f}, G=%{y:.0f}, B=%{z:.0f}<extra></extra>"
-                ),
-            )
+        fig3d = _brushing.make_3d_scatter(
+            rgb_sub, ids_sub,
+            base_colors=base_colors, selected_ids=selected,
         )
-        fig3d.update_layout(
-            height=350,
-            margin=dict(l=0, r=0, t=20, b=0),
-            scene=dict(xaxis_title="R", yaxis_title="G", zaxis_title="B"),
-        )
-        st.plotly_chart(fig3d, use_container_width=True, key="clu_pane_3d")
+        _brushing.render_scatter(fig3d, key="clu_pane_3d", on_select=False)
 
     with col2:
-        st.caption("R vs G (lasso/box to brush)")
-        fig_rg = _make_2d_scatter(
+        st.caption("R vs G (lasso/box to brush · scroll to zoom)")
+        fig_rg = _brushing.make_2d_scatter(
             rgb_sub[:, 0], rgb_sub[:, 1], ids_sub,
-            colors, sizes, line_colors, "R", "G",
+            base_colors=base_colors, selected_ids=selected,
+            x_label="R", y_label="G",
         )
-        evt_rg = st.plotly_chart(
-            fig_rg,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode=("lasso", "box"),
-            key="clu_pane_rg",
-        )
-        _handle_selection_event(evt_rg)
+        evt_rg = _brushing.render_scatter(fig_rg, key="clu_pane_rg")
+        if _brushing.handle_selection_event(evt_rg, state):
+            st.rerun()
 
     col3, col4 = st.columns(2)
     with col3:
-        st.caption("R vs B (lasso/box to brush)")
-        fig_rb = _make_2d_scatter(
+        st.caption("R vs B (lasso/box to brush · scroll to zoom)")
+        fig_rb = _brushing.make_2d_scatter(
             rgb_sub[:, 0], rgb_sub[:, 2], ids_sub,
-            colors, sizes, line_colors, "R", "B",
+            base_colors=base_colors, selected_ids=selected,
+            x_label="R", y_label="B",
         )
-        evt_rb = st.plotly_chart(
-            fig_rb,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode=("lasso", "box"),
-            key="clu_pane_rb",
-        )
-        _handle_selection_event(evt_rb)
+        evt_rb = _brushing.render_scatter(fig_rb, key="clu_pane_rb")
+        if _brushing.handle_selection_event(evt_rb, state):
+            st.rerun()
 
     with col4:
-        st.caption("G vs B (lasso/box to brush)")
-        fig_gb = _make_2d_scatter(
+        st.caption("G vs B (lasso/box to brush · scroll to zoom)")
+        fig_gb = _brushing.make_2d_scatter(
             rgb_sub[:, 1], rgb_sub[:, 2], ids_sub,
-            colors, sizes, line_colors, "G", "B",
+            base_colors=base_colors, selected_ids=selected,
+            x_label="G", y_label="B",
         )
-        evt_gb = st.plotly_chart(
-            fig_gb,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode=("lasso", "box"),
-            key="clu_pane_gb",
-        )
-        _handle_selection_event(evt_gb)
+        evt_gb = _brushing.render_scatter(fig_gb, key="clu_pane_gb")
+        if _brushing.handle_selection_event(evt_gb, state):
+            st.rerun()
 
 
 # ─── Diagnostics + threshold sliders + cluster size chart ────────────────
@@ -496,9 +378,13 @@ def render_tab_clustering(
         st.warning("Set analysis_folder in sidebar to enable the Clustering tab.")
         return
 
+    state = _brushing.get_brushing_state("clustering")
+    _brushing.render_keyboard_shortcuts()
+
     st.info(
         "Clustering operates on the selector-narrowed domain set. "
-        "Lasso domains in any 2D pane → click + Add to attach them to a seed group."
+        "Brush domains in any 2D pane → click + Add to attach them to a seed group. "
+        "Use mode toggles to combine selections; scroll to zoom; Ctrl/Cmd+Z to undo."
     )
 
     # Prereq gate
@@ -522,8 +408,11 @@ def render_tab_clustering(
         f"(last commit: {selector_entry.completed_at})"
     )
 
+    # Mode controls + Undo/Redo/Clear
+    _brushing.render_mode_controls(state, "clustering")
+
     # Seed group authoring
-    _render_seed_group_panel(stats)
+    _render_seed_group_panel(stats, state)
 
     st.divider()
 
@@ -536,7 +425,7 @@ def render_tab_clustering(
         }
 
     # 4-pane scatter
-    _render_4pane_scatter(stats, cluster_assign)
+    _render_4pane_scatter(stats, cluster_assign, state)
 
     st.divider()
 
