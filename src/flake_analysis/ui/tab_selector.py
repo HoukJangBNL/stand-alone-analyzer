@@ -127,10 +127,38 @@ def _clear_filter_session_keys() -> None:
 _MAX_POINTS = 5000
 
 
-def _downsample_indices(n: int, cap: int = _MAX_POINTS) -> np.ndarray:
+def _downsample_indices(
+    n: int,
+    *,
+    flake_ids: Optional[np.ndarray] = None,
+    must_include_ids: Optional[Set[int]] = None,
+    cap: int = _MAX_POINTS,
+) -> np.ndarray:
+    """Pick up to ``cap`` indices, but always keep ``must_include_ids``.
+
+    The point of this is so that lasso/click-selected domains stay visible
+    on the scatter even when the dataset is downsampled. If everything
+    fits, we just return ``np.arange(n)``; otherwise we union a seeded
+    random subset with the indices of the must-include set, then trim.
+    """
     if n <= cap:
         return np.arange(n)
-    return np.random.default_rng(0).choice(n, cap, replace=False)
+    rng = np.random.default_rng(0)
+    base = rng.choice(n, cap, replace=False)
+    if must_include_ids and flake_ids is not None and len(must_include_ids) > 0:
+        keep_mask = np.isin(flake_ids, list(must_include_ids))
+        keep_idx = np.where(keep_mask)[0]
+        if keep_idx.size:
+            # Union; if total > cap, drop random non-keep entries to fit.
+            combined = np.unique(np.concatenate([base, keep_idx]))
+            if combined.size > cap:
+                # Keep all must-include + fill the rest from base random.
+                non_keep = np.setdiff1d(base, keep_idx, assume_unique=False)
+                space = max(cap - keep_idx.size, 0)
+                base = np.concatenate([keep_idx, non_keep[:space]])
+                return np.sort(base)
+            return np.sort(combined)
+    return np.sort(base)
 
 
 def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
@@ -169,7 +197,11 @@ def _render_4pane_scatter(
     flake_ids = stats["flake_ids"].astype(np.int64)
     n = len(flake_ids)
 
-    sub_idx = _downsample_indices(n)
+    sub_idx = _downsample_indices(
+        n,
+        flake_ids=flake_ids,
+        must_include_ids=state.selected_ids,
+    )
     rgb_sub = rgb[sub_idx]
     ids_sub = flake_ids[sub_idx]
     accepted_sub = accept_mask[sub_idx]

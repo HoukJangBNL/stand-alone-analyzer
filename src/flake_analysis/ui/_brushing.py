@@ -457,26 +457,54 @@ def make_2d_scatter(
     import plotly.graph_objects as go
 
     is_selected = np.array([int(fid) in selected_ids for fid in ids])
-    sizes = np.where(is_selected, 8, 4)
-    line_colors = np.where(is_selected, "#ff9800", "rgba(0,0,0,0)")
+    n_sel = int(is_selected.sum())
 
-    fig = go.Figure(
-        data=go.Scattergl(
-            x=x,
-            y=y,
+    # Two traces — base + overlay — so the overlay stacks visually on top
+    # and we can use a non-WebGL Scatter for the overlay (Scattergl ignores
+    # marker.line in many builds, which made selection rings invisible).
+    base = go.Scattergl(
+        x=x,
+        y=y,
+        mode="markers",
+        marker=dict(size=4, color=base_colors, opacity=0.55),
+        customdata=ids,
+        hovertemplate=(
+            f"id=%{{customdata}}<br>{x_label}=%{{x:.3f}}<br>"
+            f"{y_label}=%{{y:.3f}}<extra></extra>"
+        ),
+        name="all",
+        showlegend=False,
+    )
+
+    traces = [base]
+    if n_sel > 0:
+        # Build the overlay: prominent orange ring + filled gold core,
+        # rendered on top of the base. SVG Scatter (not Scattergl) so the
+        # marker line actually renders.
+        sel_x = np.asarray(x)[is_selected]
+        sel_y = np.asarray(y)[is_selected]
+        sel_ids = np.asarray(ids)[is_selected]
+        overlay = go.Scatter(
+            x=sel_x,
+            y=sel_y,
             mode="markers",
             marker=dict(
-                size=sizes,
-                color=base_colors,
-                line=dict(width=1.5, color=line_colors),
+                size=12,
+                color="#FFC800",  # gold fill, matches Explorer "selected" cue
+                line=dict(width=2.5, color="#ff5722"),  # bold orange ring
+                opacity=1.0,
             ),
-            customdata=ids,
+            customdata=sel_ids,
             hovertemplate=(
-                f"id=%{{customdata}}<br>{x_label}=%{{x:.3f}}<br>"
-                f"{y_label}=%{{y:.3f}}<extra></extra>"
+                f"id=%{{customdata}} (selected)<br>"
+                f"{x_label}=%{{x:.3f}}<br>{y_label}=%{{y:.3f}}<extra></extra>"
             ),
+            name="selected",
+            showlegend=False,
         )
-    )
+        traces.append(overlay)
+
+    fig = go.Figure(data=traces)
     fig.update_layout(
         height=height,
         margin=dict(l=10, r=10, t=10, b=30),
@@ -504,24 +532,48 @@ def make_3d_scatter(
     import plotly.graph_objects as go
 
     is_selected = np.array([int(fid) in selected_ids for fid in ids])
-    # Plotly 3D markers don't support per-point line color — emulate the
-    # "ring" with a slightly larger marker for selected points.
-    sizes = np.where(is_selected, 5, 3)
+    n_sel = int(is_selected.sum())
 
-    fig = go.Figure(
-        data=go.Scatter3d(
-            x=rgb[:, 0],
-            y=rgb[:, 1],
-            z=rgb[:, 2],
+    base = go.Scatter3d(
+        x=rgb[:, 0],
+        y=rgb[:, 1],
+        z=rgb[:, 2],
+        mode="markers",
+        marker=dict(size=3, color=base_colors, opacity=0.55),
+        customdata=ids,
+        hovertemplate=(
+            "domain_id=%{customdata}<br>"
+            "R=%{x:.3f}, G=%{y:.3f}, B=%{z:.3f}<extra></extra>"
+        ),
+        name="all",
+        showlegend=False,
+    )
+    traces = [base]
+    if n_sel > 0:
+        sel_rgb = rgb[is_selected]
+        sel_ids = np.asarray(ids)[is_selected]
+        overlay = go.Scatter3d(
+            x=sel_rgb[:, 0],
+            y=sel_rgb[:, 1],
+            z=sel_rgb[:, 2],
             mode="markers",
-            marker=dict(size=sizes, color=base_colors),
-            customdata=ids,
+            marker=dict(
+                size=8,
+                color="#FFC800",
+                line=dict(width=1.5, color="#ff5722"),
+                opacity=1.0,
+            ),
+            customdata=sel_ids,
             hovertemplate=(
-                "domain_id=%{customdata}<br>"
+                "domain_id=%{customdata} (selected)<br>"
                 "R=%{x:.3f}, G=%{y:.3f}, B=%{z:.3f}<extra></extra>"
             ),
+            name="selected",
+            showlegend=False,
         )
-    )
+        traces.append(overlay)
+
+    fig = go.Figure(data=traces)
     fig.update_layout(
         height=height,
         margin=dict(l=0, r=0, t=20, b=0),

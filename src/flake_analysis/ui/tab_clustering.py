@@ -76,10 +76,34 @@ def _load_committed_clustering(analysis_folder: str) -> Optional[Dict[str, Any]]
     return json.loads(p.read_text(encoding="utf-8"))
 
 
-def _downsample_indices(n: int, cap: int = _MAX_POINTS) -> np.ndarray:
+def _downsample_indices(
+    n: int,
+    *,
+    flake_ids: Optional[np.ndarray] = None,
+    must_include_ids: Optional[Set[int]] = None,
+    cap: int = _MAX_POINTS,
+) -> np.ndarray:
+    """Pick up to ``cap`` indices, but always keep ``must_include_ids``.
+
+    Mirrors the helper in tab_selector — selected domains stay visible
+    even when the dataset exceeds the downsample cap.
+    """
     if n <= cap:
         return np.arange(n)
-    return np.random.default_rng(0).choice(n, cap, replace=False)
+    rng = np.random.default_rng(0)
+    base = rng.choice(n, cap, replace=False)
+    if must_include_ids and flake_ids is not None and len(must_include_ids) > 0:
+        keep_mask = np.isin(flake_ids, list(must_include_ids))
+        keep_idx = np.where(keep_mask)[0]
+        if keep_idx.size:
+            combined = np.unique(np.concatenate([base, keep_idx]))
+            if combined.size > cap:
+                non_keep = np.setdiff1d(base, keep_idx, assume_unique=False)
+                space = max(cap - keep_idx.size, 0)
+                base = np.concatenate([keep_idx, non_keep[:space]])
+                return np.sort(base)
+            return np.sort(combined)
+    return np.sort(base)
 
 
 # ─── Seed group panel ────────────────────────────────────────────────────
@@ -236,7 +260,11 @@ def _render_4pane_scatter(
         st.warning("Selector kept zero domains; cannot render scatter.")
         return
 
-    sub_idx = _downsample_indices(n)
+    sub_idx = _downsample_indices(
+        n,
+        flake_ids=ids_sel,
+        must_include_ids=state.selected_ids,
+    )
     rgb_sub = rgb_sel[sub_idx]
     ids_sub = ids_sel[sub_idx]
     if n > _MAX_POINTS:
