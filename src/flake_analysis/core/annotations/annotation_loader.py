@@ -7,8 +7,9 @@ and RLE mask decoding (5x faster than PNG loading).
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 import json
+import os
 import time
 
 import numpy as np
@@ -312,6 +313,7 @@ def load_flakes_from_annotations(
     annotations_cache: AnnotationsCache,
     raw_image_folder: Path,
     raw_ext: str = ".png",
+    progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> List["RLEFlake"]:
     """Load flakes from annotations.json without scanning masks/ directory.
 
@@ -348,20 +350,42 @@ def load_flakes_from_annotations(
     missing_raw = 0
 
     all_metadata = annotations_cache.get_all_metadata()
-    msg.info(f"[ANNOTATIONS] Creating flakes from {len(all_metadata)} annotations")
+    total = len(all_metadata)
+    msg.info(f"[ANNOTATIONS] Creating flakes from {total} annotations")
+
+    if progress_callback is not None:
+        progress_callback(0.0, "Listing raw images...")
+
+    # Optimization: single os.scandir on the raw image folder is O(N) once,
+    # vs O(N) Path.exists() calls (each is a stat syscall — slow on Samba/SMB).
+    # For ~14k flakes on a network mount this turns minutes into < 1 s.
+    try:
+        with os.scandir(raw_image_folder) as it:
+            available_stems = {Path(entry.name).stem for entry in it if entry.is_file()}
+    except (FileNotFoundError, NotADirectoryError, PermissionError, OSError):
+        available_stems = None  # Fallback to per-flake exists() below.
+
+    if progress_callback is not None:
+        progress_callback(0.05, f"Building {total} flake objects...")
 
     for i, metadata in enumerate(all_metadata):
-        # Bug 11 diagnostic: per-1000 progress counter to disambiguate
-        # SMB stat-loop slowness vs true hang. Read-only log, no behavior change.
         if i and i % 1000 == 0:
-            msg.info(f"[ANNOTATIONS] {i}/{len(all_metadata)} processed")
-        # Get raw image path from image_name
+            msg.info(f"[ANNOTATIONS] {i}/{total} processed")
+            if progress_callback is not None:
+                # Reserve 0.05–0.95 of this stage for the build loop.
+                pct = 0.05 + 0.90 * (i / max(total, 1))
+                progress_callback(pct, f"Building flake {i:,}/{total:,}...")
         image_stem = Path(metadata.image_name).stem
         raw_path = raw_image_folder / f"{image_stem}{raw_ext}"
 
-        if not raw_path.exists():
-            missing_raw += 1
-            continue
+        if available_stems is not None:
+            if image_stem not in available_stems:
+                missing_raw += 1
+                continue
+        else:
+            if not raw_path.exists():
+                missing_raw += 1
+                continue
 
         flake = RLEFlake(
             raw_path=raw_path,
@@ -369,6 +393,9 @@ def load_flakes_from_annotations(
             annotations_cache=annotations_cache,
         )
         flakes.append(flake)
+
+    if progress_callback is not None:
+        progress_callback(1.0, f"Done — {len(flakes):,} flakes loaded")
 
     if missing_raw > 0:
         msg.warning(f"[ANNOTATIONS] {missing_raw} annotations skipped (raw images not found)")

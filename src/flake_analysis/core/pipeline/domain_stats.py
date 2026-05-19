@@ -149,7 +149,21 @@ def run_domain_stats(
             f"(analysis_dir={analysis_dir}, analysis_type={analysis_type})"
         )
 
-    flakes = load_flakes_from_annotations(cache, raw_images_dir, raw_ext=raw_ext)
+    # Adapter: load_flakes_from_annotations emits its own 0.0–1.0 stream;
+    # we squash it into our 0.0–0.30 outer band so it doesn't drown out
+    # the rest of the stats pipeline.
+    if progress_callback is not None:
+        def _flake_load_cb(pct: float, msg_: str) -> None:
+            progress_callback(0.30 * float(pct), msg_)
+    else:
+        _flake_load_cb = None
+
+    flakes = load_flakes_from_annotations(
+        cache,
+        raw_images_dir,
+        raw_ext=raw_ext,
+        progress_callback=_flake_load_cb,
+    )
     msg.info(f"[pipeline.domain_stats] loaded {len(flakes)} flakes")
 
     if progress_callback is not None:
