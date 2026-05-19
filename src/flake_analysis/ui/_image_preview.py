@@ -466,7 +466,7 @@ def render_image_preview(
     st.plotly_chart(
         fig,
         config=config,
-        use_container_width=True,
+        width="stretch",
         # The key includes the boundary flag so toggling forces a fresh
         # render (avoids the same caching pitfall fixed in Task 1).
         key=f"preview_{info['domain_id']}_{int(show_boundary)}",

@@ -395,7 +395,7 @@ def _render_substrate_grid(
         xaxis=dict(visible=False),
         yaxis=dict(visible=False, autorange="reversed"),
     )
-    st.plotly_chart(fig, use_container_width=True, key="explorer_grid")
+    st.plotly_chart(fig, width="stretch", key="explorer_grid")
     st.caption(
         "LOD 2 · color = pass-ratio per tile · gold = selected. "
         "LOD 0/1/3 (per-tile drill-down + bbox overlays) deferred to M3."
@@ -419,7 +419,7 @@ def _render_flake_list(filtered: pd.DataFrame) -> None:
     try:
         st.dataframe(
             visible,
-            use_container_width=True,
+            width="stretch",
             height=400,
             on_select="rerun",
             selection_mode="single-row",
@@ -446,7 +446,7 @@ def _render_flake_list(filtered: pd.DataFrame) -> None:
     except Exception as e:
         # Fallback: selectbox of flake_ids if interactive selection unsupported.
         st.warning(f"Row-click unavailable ({e}); using selectbox fallback.")
-        st.dataframe(visible, use_container_width=True, height=400)
+        st.dataframe(visible, width="stretch", height=400)
         opts = filtered["flake_id"].astype(int).tolist()
         chosen = st.selectbox(
             "Pick a flake_id",

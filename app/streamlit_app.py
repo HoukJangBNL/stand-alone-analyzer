@@ -1,5 +1,40 @@
 """stand-alone-analyzer Streamlit entry point (M2 PR 2.5 — Explorer tab wired)."""
 from __future__ import annotations
+
+# Streamlit 1.57 spams stderr with deprecation notices for st.components.v1.html
+# (still the only inline-HTML/JS escape hatch — there is no 1:1 replacement)
+# and for use_container_width on widgets we don't directly construct (e.g.
+# inside st.dataframe). Hide both so the terminal stays readable for our own
+# debug prints. They remain valid until 2026-06-01 / 2025-12-31 respectively.
+import warnings as _warnings
+
+_warnings.filterwarnings(
+    "ignore",
+    message=".*use_container_width.*",
+)
+_warnings.filterwarnings(
+    "ignore",
+    message=".*st.components.v1.html.*",
+)
+
+# Streamlit logs via stdlib logging too — silence the matching deprecation
+# WARN records on the streamlit logger so they don't leak to stderr.
+import logging as _logging
+
+
+class _DeprecationFilter(_logging.Filter):
+    def filter(self, record: _logging.LogRecord) -> bool:
+        msg = record.getMessage()
+        if "use_container_width" in msg:
+            return False
+        if "st.components.v1.html" in msg:
+            return False
+        return True
+
+
+for _name in ("streamlit", "streamlit.runtime"):
+    _logging.getLogger(_name).addFilter(_DeprecationFilter())
+
 import streamlit as st
 
 from flake_analysis.ui.sidebar import render_sidebar

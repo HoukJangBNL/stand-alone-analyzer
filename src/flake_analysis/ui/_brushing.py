@@ -650,7 +650,7 @@ def render_scatter(
         return st.plotly_chart(
             fig,
             config=SHARED_PLOTLY_CONFIG,
-            use_container_width=True,
+            width="stretch",
             key=key,
         )
 
@@ -665,7 +665,7 @@ def render_scatter(
                 config=SHARED_PLOTLY_CONFIG,
                 on_select="rerun",
                 selection_mode=("points", "box", "lasso"),
-                use_container_width=True,
+                width="stretch",
                 key=key,
             )
         except (TypeError, ValueError):
@@ -674,7 +674,7 @@ def render_scatter(
                 config=SHARED_PLOTLY_CONFIG,
                 on_select="rerun",
                 selection_mode=("box", "lasso"),
-                use_container_width=True,
+                width="stretch",
                 key=key,
             )
 
@@ -685,7 +685,7 @@ def render_scatter(
         return st.plotly_chart(
             fig,
             config=SHARED_PLOTLY_CONFIG,
-            use_container_width=True,
+            width="stretch",
             key=key,
         )
 
@@ -697,7 +697,7 @@ def render_scatter(
         config=SHARED_PLOTLY_CONFIG,
         on_select="rerun",
         selection_mode=("lasso",),
-        use_container_width=True,
+        width="stretch",
         key=key,
     )
 

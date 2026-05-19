@@ -154,7 +154,7 @@ def _render_seed_group_panel(
         df = _seed_groups_to_table(
             seed_groups, stats["repr_rgbs"], stats["flake_ids"]
         )
-        st.dataframe(df, use_container_width=True, height=200)
+        st.dataframe(df, width="stretch", height=200)
     else:
         st.caption("No seed groups yet. Brush domains in the scatter, then click + Add.")
 

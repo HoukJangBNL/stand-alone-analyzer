@@ -438,13 +438,13 @@ def _render_flake_list(
         event = st.dataframe(
             df,
             height=300,
-            use_container_width=True,
+            width="stretch",
             on_select="rerun",
             selection_mode="single-row",
             key="selector_flake_list",
         )
     except (TypeError, ValueError):
-        st.dataframe(df, height=300, use_container_width=True)
+        st.dataframe(df, height=300, width="stretch")
         return
 
     selection = (

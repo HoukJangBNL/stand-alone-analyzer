@@ -27,7 +27,7 @@ def render_tab_compute(
     # ─── Run All ────────────────────────────────────────────
     col_run_all, col_caption = st.columns([1, 3])
     with col_run_all:
-        run_all = st.button("▶ Run All", type="primary", use_container_width=True)
+        run_all = st.button("▶ Run All", type="primary", width="stretch")
     with col_caption:
         st.caption(
             "Run Background → Domain Stats → Domain Proximity in order with default params."
