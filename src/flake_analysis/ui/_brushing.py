@@ -291,12 +291,35 @@ def handle_selection_event(event: Any, state: BrushingState) -> bool:
     Returns True if state was modified (caller should not rerun otherwise).
     """
     ids = _extract_ids_from_event(event)
+    # DEBUG: trace what Plotly actually returns. Logged to streamlit's
+    # terminal so we can correlate "looks like everything got selected"
+    # with the actual id count + sample of returned ids.
+    import sys as _sys
+    if ids is None:
+        print("[DEBUG handle_selection_event] no selection (ids is None)", file=_sys.stderr, flush=True)
+    elif not ids:
+        print("[DEBUG handle_selection_event] empty selection (0 ids)", file=_sys.stderr, flush=True)
+    else:
+        sample = sorted(list(ids))[:5]
+        print(
+            f"[DEBUG handle_selection_event] mode={state.mode} "
+            f"prior_selected={len(state.selected_ids)} "
+            f"lasso_returned={len(ids)} "
+            f"sample={sample}",
+            file=_sys.stderr,
+            flush=True,
+        )
     if ids is None:
         return False
     if not ids:
-        # Empty point list — treat as no interaction (user opened modebar etc).
         return False
     apply_lasso(state, ids)
+    print(
+        f"[DEBUG handle_selection_event] AFTER apply_lasso "
+        f"new_selected_count={len(state.selected_ids)}",
+        file=_sys.stderr,
+        flush=True,
+    )
     return True
 
 
