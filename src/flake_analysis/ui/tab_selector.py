@@ -841,17 +841,12 @@ def render_tab_selector(
     _brushing.render_keyboard_shortcuts()
     _brushing.render_wheel_capture()
 
-    info_col, help_col = st.columns([6, 1])
-    with info_col:
-        st.info(
-            "Default mode is Single-pick: left-click a point to focus one domain. "
-            "Press L (or click Lasso: Replace) for lasso brushing — "
-            "use sub-modes Replace/Add/Subtract (R/A/D) to combine selections. "
-            "All controls live in the sidebar drawer (⚙ Selector controls). "
-            "Pop open the Flake list expander to row-click for image preview."
-        )
-    with help_col:
-        _brushing.render_help_button(key="selector_help_btn")
+    st.info(
+        "Default mode is Single-pick: left-click a point to focus one domain. "
+        "Switch to Lasso: New / Add / Subtract from the sidebar drawer to "
+        "brush selections (New replaces, Add unions, Subtract removes). "
+        "Pop open the Flake list expander to row-click for image preview."
+    )
 
     stats = _load_stats_npz(analysis_folder)
     if stats is None:

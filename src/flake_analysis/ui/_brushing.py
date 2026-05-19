@@ -323,22 +323,21 @@ def handle_click_event(event: Any, state: BrushingState) -> bool:
 
 # ─── Mode controls ───────────────────────────────────────────────────────
 
-# Button labels — kept ASCII so the keyboard-shortcut JS innerText match
-# stays robust. (Emoji glyphs proved brittle across Streamlit versions.)
-_BTN_SINGLE = "Single-pick (S)"
-_BTN_LASSO_REPLACE = "Lasso: Replace"
-_BTN_LASSO_ADD = "Lasso: Add (A)"
-_BTN_LASSO_SUBTRACT = "Lasso: Subtract (D)"
-_BTN_ZOOM = "Zoom (Z)"
+# Button labels. Keyboard-shortcut JS was removed in v0.2.4 (it was a
+# no-op anyway and Streamlit's iframe sandbox blocked it in many
+# deployments), so labels no longer need to encode shortcut hints.
+_BTN_SINGLE = "Single-pick"
+_BTN_LASSO_REPLACE = "Lasso: New"
+_BTN_LASSO_ADD = "Lasso: Add"
+_BTN_LASSO_SUBTRACT = "Lasso: Subtract"
+_BTN_ZOOM = "Zoom"
 _BTN_UNDO = "Undo"
 _BTN_REDO = "Redo"
 _BTN_CLEAR = "Clear"
 
-# Compact labels for the narrow-sidebar layout. The keyboard-shortcut JS
-# matches by ``innerText`` so we use these only when ``compact=True`` and
-# the shortcut layer is disabled in the sidebar context anyway.
+# Compact labels for the narrow-sidebar layout.
 _BTN_SINGLE_C = "Single"
-_BTN_LASSO_REPLACE_C = "Replace"
+_BTN_LASSO_REPLACE_C = "New"
 _BTN_LASSO_ADD_C = "Add"
 _BTN_LASSO_SUBTRACT_C = "Subtract"
 _BTN_ZOOM_C = "Zoom"
@@ -366,14 +365,14 @@ def _render_mode_controls_compact(
     2x3 grid with shorter labels and stacks the Undo/Redo/Clear row + the
     status caption underneath.
     """
-    # Mode grid: 2 cols × 3 rows (Single / Replace / Add / Subtract / Zoom / blank).
+    # Mode grid: 2 cols × 3 rows (Single / New / Add / Subtract / Zoom / blank).
     row1 = st.columns(2)
     with row1[0]:
         if st.button(
             _BTN_SINGLE_C,
             key=f"{key_prefix}_mode_single",
             type="primary" if _is_active_single(state) else "secondary",
-            help="Left-click selects one point; left-drag pans (S)",
+            help="Left-click selects one point; left-drag pans",
             use_container_width=True,
         ):
             set_interaction_mode(state, INTERACTION_SINGLE)
@@ -383,7 +382,7 @@ def _render_mode_controls_compact(
             f"L: {_BTN_LASSO_REPLACE_C}",
             key=f"{key_prefix}_mode_lasso_replace",
             type="primary" if _is_active_lasso(state, MODE_REPLACE) else "secondary",
-            help="Lasso drag replaces selection (L)",
+            help="Lasso starts a fresh selection (replaces any prior one)",
             use_container_width=True,
         ):
             set_interaction_mode(state, INTERACTION_LASSO)
@@ -396,7 +395,7 @@ def _render_mode_controls_compact(
             f"L: {_BTN_LASSO_ADD_C}",
             key=f"{key_prefix}_mode_lasso_add",
             type="primary" if _is_active_lasso(state, MODE_ADD) else "secondary",
-            help="Lasso adds to current selection (A)",
+            help="Lasso adds to current selection (union)",
             use_container_width=True,
         ):
             set_interaction_mode(state, INTERACTION_LASSO)
@@ -407,7 +406,7 @@ def _render_mode_controls_compact(
             f"L: {_BTN_LASSO_SUBTRACT_C}",
             key=f"{key_prefix}_mode_lasso_subtract",
             type="primary" if _is_active_lasso(state, MODE_SUBTRACT) else "secondary",
-            help="Lasso subtracts from current selection (D)",
+            help="Lasso removes brushed points from the current selection",
             use_container_width=True,
         ):
             set_interaction_mode(state, INTERACTION_LASSO)
@@ -420,7 +419,7 @@ def _render_mode_controls_compact(
             _BTN_ZOOM_C,
             key=f"{key_prefix}_mode_zoom",
             type="primary" if _is_active_zoom(state) else "secondary",
-            help="Box drag zooms in (Z)",
+            help="Box drag zooms into the chart",
             use_container_width=True,
         ):
             set_interaction_mode(state, INTERACTION_ZOOM)
@@ -443,7 +442,7 @@ def _render_mode_controls_compact(
         if st.button(
             _BTN_UNDO,
             key=f"{key_prefix}_undo",
-            help="Undo last selection change (Ctrl/Cmd+Z)",
+            help="Undo last selection change",
             disabled=not state.history,
             use_container_width=True,
         ):
@@ -453,7 +452,7 @@ def _render_mode_controls_compact(
         if st.button(
             _BTN_REDO,
             key=f"{key_prefix}_redo",
-            help="Redo (Ctrl/Cmd+Shift+Z)",
+            help="Redo",
             disabled=not state.redo_stack,
             use_container_width=True,
         ):
@@ -463,7 +462,7 @@ def _render_mode_controls_compact(
         if st.button(
             _BTN_CLEAR,
             key=f"{key_prefix}_clear",
-            help="Clear current selection (Esc)",
+            help="Clear current selection",
             disabled=not state.selected_ids,
             use_container_width=True,
         ):
@@ -483,11 +482,6 @@ def render_mode_controls(
     Compact layout (``compact=True``): mode buttons in a 2-column grid
     (3 rows) with shorter labels — sized for the ~280px sidebar drawer
     where 5 columns made each label wrap character-by-character.
-
-    The button labels in wide mode are the stable ASCII strings
-    (``_BTN_SINGLE`` etc.) that the keyboard-shortcut JS matches against
-    by ``innerText``. The compact labels drop the shortcut hints since
-    the shortcut layer is disabled in the sidebar anyway.
     """
     if compact:
         _render_mode_controls_compact(state, key_prefix)
@@ -500,7 +494,7 @@ def render_mode_controls(
             _BTN_SINGLE,
             key=f"{key_prefix}_mode_single",
             type="primary" if _is_active_single(state) else "secondary",
-            help="Left-click selects one point; left-drag pans (S)",
+            help="Left-click selects one point; left-drag pans",
         ):
             set_interaction_mode(state, INTERACTION_SINGLE)
             st.rerun()
@@ -509,7 +503,7 @@ def render_mode_controls(
             _BTN_LASSO_REPLACE,
             key=f"{key_prefix}_mode_lasso_replace",
             type="primary" if _is_active_lasso(state, MODE_REPLACE) else "secondary",
-            help="Lasso drag replaces selection (L)",
+            help="Lasso drag starts a fresh selection (replaces any prior one)",
         ):
             set_interaction_mode(state, INTERACTION_LASSO)
             state.mode = MODE_REPLACE
@@ -519,7 +513,7 @@ def render_mode_controls(
             _BTN_LASSO_ADD,
             key=f"{key_prefix}_mode_lasso_add",
             type="primary" if _is_active_lasso(state, MODE_ADD) else "secondary",
-            help="Lasso adds to current selection (A)",
+            help="Lasso adds to current selection (union)",
         ):
             set_interaction_mode(state, INTERACTION_LASSO)
             state.mode = MODE_ADD
@@ -529,7 +523,7 @@ def render_mode_controls(
             _BTN_LASSO_SUBTRACT,
             key=f"{key_prefix}_mode_lasso_subtract",
             type="primary" if _is_active_lasso(state, MODE_SUBTRACT) else "secondary",
-            help="Lasso subtracts from current selection (D)",
+            help="Lasso removes brushed points from the current selection",
         ):
             set_interaction_mode(state, INTERACTION_LASSO)
             state.mode = MODE_SUBTRACT
@@ -539,7 +533,7 @@ def render_mode_controls(
             _BTN_ZOOM,
             key=f"{key_prefix}_mode_zoom",
             type="primary" if _is_active_zoom(state) else "secondary",
-            help="Box drag zooms in (Z)",
+            help="Box drag zooms into the chart",
         ):
             set_interaction_mode(state, INTERACTION_ZOOM)
             st.rerun()
@@ -562,7 +556,7 @@ def render_mode_controls(
         if st.button(
             _BTN_UNDO,
             key=f"{key_prefix}_undo",
-            help="Undo last selection change (Ctrl/Cmd+Z)",
+            help="Undo last selection change",
             disabled=not state.history,
         ):
             undo(state)
@@ -571,7 +565,7 @@ def render_mode_controls(
         if st.button(
             _BTN_REDO,
             key=f"{key_prefix}_redo",
-            help="Redo (Ctrl/Cmd+Shift+Z)",
+            help="Redo",
             disabled=not state.redo_stack,
         ):
             redo(state)
@@ -580,7 +574,7 @@ def render_mode_controls(
         if st.button(
             _BTN_CLEAR,
             key=f"{key_prefix}_clear",
-            help="Clear current selection (Esc)",
+            help="Clear current selection",
             disabled=not state.selected_ids,
         ):
             clear_selection(state)
@@ -814,237 +808,34 @@ def render_scatter(
     )
 
 
-# ─── Keyboard shortcuts (best-effort JS injection) ─────────────────────
-
-_KEYBOARD_JS = """
-<script>
-(function() {
-  // Best-effort keyboard shortcuts. Streamlit renders the app inside an
-  // iframe; we reach into window.parent.document to find the buttons.
-  // Cross-origin sandboxing CAN block this — if so, the buttons remain
-  // the primary mechanism.
-  try {
-    var doc = window.parent.document;
-    if (!doc || doc.__brushingShortcutsBoundV2) return;
-    doc.__brushingShortcutsBoundV2 = true;
-
-    var clickByLabel = function(label) {
-      var btns = doc.querySelectorAll('button');
-      for (var i = 0; i < btns.length; i++) {
-        var b = btns[i];
-        if ((b.innerText || '').trim() === label) { b.click(); return true; }
-      }
-      return false;
-    };
-
-    var hasButton = function(label) {
-      var btns = doc.querySelectorAll('button');
-      for (var i = 0; i < btns.length; i++) {
-        if ((btns[i].innerText || '').trim() === label) return true;
-      }
-      return false;
-    };
-
-    var onKey = function(e) {
-      var tag = (e.target && e.target.tagName) || '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-      var key = e.key || '';
-
-      // Ctrl/Cmd+Shift+Z → Redo (must check BEFORE plain Ctrl/Cmd+Z)
-      if ((e.ctrlKey || e.metaKey) && key.toLowerCase() === 'z' && e.shiftKey) {
-        if (clickByLabel('Redo')) { e.preventDefault(); }
-        return;
-      }
-      // Ctrl/Cmd+Z → Undo
-      if ((e.ctrlKey || e.metaKey) && key.toLowerCase() === 'z') {
-        if (clickByLabel('Undo')) { e.preventDefault(); }
-        return;
-      }
-      // Esc → Clear
-      if (key === 'Escape') {
-        clickByLabel('Clear');
-        return;
-      }
-      // '?' (Shift+/) → open the keyboard shortcuts cheat-sheet.
-      // Browsers report key === '?' when shift is held with '/'; we
-      // also tolerate the bare '/' fallback since some keyboard layouts
-      // surface only that variant.
-      if (key === '?' || (e.shiftKey && key === '/')) {
-        if (clickByLabel('⌨ Shortcuts (?)')) { e.preventDefault(); }
-        return;
-      }
-      // Plain letter shortcuts (no modifier)
-      if (e.ctrlKey || e.metaKey || e.altKey) return;
-      var lower = key.toLowerCase();
-      if (lower === 's') {
-        clickByLabel('Single-pick (S)');
-      } else if (lower === 'l') {
-        // L → enter lasso mode (defaults to Replace sub-mode);
-        // also acts as "back to Replace" when already in lasso.
-        clickByLabel('Lasso: Replace');
-      } else if (lower === 'a') {
-        clickByLabel('Lasso: Add (A)');
-      } else if (lower === 'd') {
-        clickByLabel('Lasso: Subtract (D)');
-      } else if (lower === 'z') {
-        // Z → enter zoom mode (left-drag draws a zoom box).
-        clickByLabel('Zoom (Z)');
-      } else if (lower === 'b') {
-        // B → toggle boundary overlay in the image preview. The
-        // button's label flips between "Boundary on (B)" and
-        // "Boundary off (B)" so we try both.
-        if (!clickByLabel('Boundary on (B)')) {
-          clickByLabel('Boundary off (B)');
-        }
-      }
-    };
-    doc.addEventListener('keydown', onKey);
-  } catch (err) {
-    // Cross-origin / sandbox — silent fail. Buttons still work.
-  }
-})();
-</script>
-"""
+# ─── Removed keyboard shortcuts + cheat-sheet (v0.2.4) ─────────────────
+#
+# Streamlit's iframe sandbox blocks ``window.parent.document`` keydown
+# listeners in many deployments, so the shortcut layer was unreliable —
+# whether a key fired depended on where the mouse cursor was last (focus
+# context) and on the browser's iframe sandboxing policy. The visible
+# mode buttons in the sidebar drawer are the canonical control surface;
+# button tooltips describe each mode.
+#
+# The functions below remain as no-op stubs so existing call sites
+# (``render_keyboard_shortcuts()``, ``render_wheel_capture()``,
+# ``render_help_button()``) continue to work without raising; remove
+# the call sites in a later cleanup pass.
 
 
 def render_keyboard_shortcuts() -> None:
-    """Inject best-effort keyboard shortcut JS.
-
-    Bindings (when the iframe sandbox allows):
-
-    ===========================  =======================================
-    Key                          Action
-    ===========================  =======================================
-    ``S``                        Single-pick mode
-    ``L``                        Lasso mode (defaults to Replace; press again to reset to Replace)
-    ``A``                        Lasso sub-mode: Add
-    ``D``                        Lasso sub-mode: Delete/Subtract
-    ``Z``                        Zoom mode (left-drag draws zoom box)
-    ``B``                        Toggle image-preview boundary overlay
-    ``?``                        Open the keyboard shortcuts cheat-sheet
-    ``Esc``                      Clear selection
-    ``Ctrl/Cmd+Z``               Undo
-    ``Ctrl/Cmd+Shift+Z``         Redo
-    ===========================  =======================================
-
-    Pan/Zoom/Reset View are not bound here because they live in Plotly's
-    modebar; the modebar buttons (``+``, ``-``, ``Reset View``) handle
-    those natively. If Streamlit's cross-origin policy blocks
-    ``window.parent.document`` access, the visible buttons remain the
-    primary control surface.
-    """
-    # No-op: the JS injection used st.components.v1.html, which Streamlit
-    # is deprecating after 2026-06-01 and which was already blocked by
-    # iframe cross-origin sandboxing in many Streamlit deployments. The
-    # visible mode buttons remain the canonical control surface; the
-    # cheat-sheet dialog (`?` button) lists the shortcuts the buttons
-    # accept. Keeping this as a stable no-op so existing call sites still
-    # work without raising deprecation warnings on every render.
+    """No-op stub — keyboard shortcut layer removed in v0.2.4."""
     return None
 
 
-# ─── Wheel-zoom capture (best-effort) ───────────────────────────────────
-
-_WHEEL_CAPTURE_JS = """<script>
-(function(){
-  // Prevent the page from scrolling when the user wheels over a Plotly
-  // chart. Plotly's scrollZoom keeps working because we only block the
-  // parent document's default; Plotly attaches its own listener earlier.
-  // Same iframe-sandbox caveat as keyboard shortcuts.
-  var doc = window.parent.document;
-  if (!doc || doc.__plotlyWheelCaptureBound) return;
-  doc.__plotlyWheelCaptureBound = true;
-  try {
-    doc.addEventListener('wheel', (e) => {
-      var tgt = e.target;
-      if (tgt && tgt.closest && tgt.closest('.js-plotly-plot')) {
-        e.preventDefault();
-      }
-    }, { passive: false });
-  } catch (err) { /* silent */ }
-})();
-</script>"""
-
-
-# ─── Keyboard shortcuts cheat-sheet (Task 3) ───────────────────────────
-
-_SHORTCUTS_BUTTON_LABEL = "⌨ Shortcuts (?)"
-
-# Markdown body kept in one place so the dialog and the expander fallback
-# render identical content.
-_SHORTCUTS_MARKDOWN = """
-**Mode**
-
-- `S` — Single-pick mode (left-click selects one point)
-- `L` — Lasso mode (Replace)
-- `A` — Lasso: Add to current selection
-- `D` — Lasso: Subtract from current selection
-- `Z` — Zoom mode (left-drag draws a zoom box)
-
-**Selection**
-
-- `Esc` — Clear current selection
-- `Ctrl/⌘ + Z` — Undo
-- `Ctrl/⌘ + Shift + Z` — Redo
-
-**Image preview** (Selector tab)
-
-- `B` — Toggle segmentation boundary overlay
-- Mouse wheel — Zoom in / out
-- Click + drag — Pan
-- Reset View — modebar button restores the fit
-
-**Help**
-
-- `?` — Open this cheat-sheet
-"""
-
-
-def _render_shortcuts_body() -> None:
-    st.markdown(_SHORTCUTS_MARKDOWN)
-
-
-# Streamlit ≥1.35 ships ``st.dialog`` as a decorator. On older builds we
-# fall back to an inline expander so the cheat-sheet remains accessible.
-_HAS_DIALOG = hasattr(st, "dialog")
-
-if _HAS_DIALOG:
-    @st.dialog("Keyboard shortcuts")  # type: ignore[misc]
-    def _show_shortcuts_dialog() -> None:
-        _render_shortcuts_body()
-else:  # pragma: no cover - fallback path on legacy Streamlit
-    def _show_shortcuts_dialog() -> None:
-        with st.expander("⌨ Keyboard shortcuts", expanded=True):
-            _render_shortcuts_body()
+def render_wheel_capture() -> None:
+    """No-op stub — wheel-capture layer removed in v0.2.4."""
+    return None
 
 
 def render_help_button(key: str = "help_shortcuts_btn") -> None:
-    """Render the "Shortcuts (?)" button + open the dialog on click.
+    """No-op stub — cheat-sheet dialog removed in v0.2.4.
 
-    Use a unique ``key`` per tab so Streamlit doesn't complain about
-    duplicate widget ids when more than one tab calls this. The button
-    label is stable ASCII (with a single keyboard glyph) so the JS
-    keyboard handler can match it by ``innerText`` for the ``?``
-    shortcut.
+    Kept signature-compatible so existing tab call sites don't break.
     """
-    if st.button(
-        _SHORTCUTS_BUTTON_LABEL,
-        key=key,
-        help="Show keyboard shortcuts (?)",
-    ):
-        _show_shortcuts_dialog()
-
-
-def render_wheel_capture() -> None:
-    """Inject best-effort wheel-event capture for Plotly charts.
-
-    When the cursor is over a Plotly chart, the page's default scroll is
-    suppressed so that Plotly's ``scrollZoom`` is not fighting the
-    surrounding page scroll. Subject to the same iframe sandbox caveat as
-    :func:`render_keyboard_shortcuts`.
-    """
-    # No-op: see render_keyboard_shortcuts. Same iframe-sandbox + deprecation
-    # rationale. Plotly's own scrollZoom still works inside the chart; the
-    # difference is just that the page itself may also scroll, which is the
-    # legacy default browser behavior.
     return None

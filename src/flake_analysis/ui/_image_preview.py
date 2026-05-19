@@ -416,21 +416,19 @@ def render_image_preview(
     crop, crop_mask, info = result
     show_boundary = bool(st.session_state.get(_BOUNDARY_KEY, True))
 
-    # The boundary toggle button — ASCII label so the JS shortcut handler
-    # can match by innerText (mirrors the mode-button convention).
-    btn_cols = st.columns([1, 1, 3])
-    with btn_cols[0]:
-        toggle_label = (
-            "Boundary on (B)" if show_boundary else "Boundary off (B)"
-        )
-        if st.button(
-            toggle_label,
-            key="preview_boundary_btn",
-            disabled=not info.get("has_mask", False),
-            help="Toggle the segmentation boundary overlay (B)",
-        ):
-            st.session_state[_BOUNDARY_KEY] = not show_boundary
-            st.rerun()
+    # Compact toggle label so the button doesn't truncate in the
+    # half-width image-preview column. Label flips between "Boundary: on"
+    # and "Boundary: off" so the user can tell the current state at a
+    # glance.
+    toggle_label = "Boundary: on" if show_boundary else "Boundary: off"
+    if st.button(
+        toggle_label,
+        key="preview_boundary_btn",
+        disabled=not info.get("has_mask", False),
+        help="Toggle the segmentation boundary overlay",
+    ):
+        st.session_state[_BOUNDARY_KEY] = not show_boundary
+        st.rerun()
 
     # Show the full raw image so the user can zoom out into the rest of
     # the FOV, rather than into empty padding around just the cropped tile.
