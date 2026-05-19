@@ -4,10 +4,16 @@ import os
 import sys
 import streamlit as st
 
-# Print version + commit at startup so the user can confirm which build is
-# running. Goes to the streamlit terminal, not the browser. Suppressed if
+# Print version + commit on the FIRST rerun of each browser session.
+# Streamlit re-executes this script on every user interaction, so without
+# a guard the banner spams the terminal and drowns out real logs. Goes
+# to the streamlit terminal, not the browser. Suppressed by
 # STAND_ALONE_NO_BANNER=1.
-if not os.environ.get("STAND_ALONE_NO_BANNER"):
+_BANNER_FLAG = "_stand_alone_banner_printed"
+if (
+    not os.environ.get("STAND_ALONE_NO_BANNER")
+    and not st.session_state.get(_BANNER_FLAG, False)
+):
     try:
         from flake_analysis import __version__ as _ver
     except Exception:
@@ -28,6 +34,7 @@ if not os.environ.get("STAND_ALONE_NO_BANNER"):
         file=sys.stderr,
         flush=True,
     )
+    st.session_state[_BANNER_FLAG] = True
 
 from flake_analysis.ui.sidebar import render_sidebar
 from flake_analysis.ui.tab_clustering import render_tab_clustering
