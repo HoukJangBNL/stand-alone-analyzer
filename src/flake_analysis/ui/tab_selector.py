@@ -98,37 +98,71 @@ _METRIC_DEFS = (
 )
 
 
+def _on_slider_change(metric_key: str) -> None:
+    """Slider drag → push tuple into canonical store + sync number_input keys."""
+    rng = st.session_state[f"sel_{metric_key}_range"]
+    lo, hi = float(rng[0]), float(rng[1])
+    st.session_state[f"filter.{metric_key}_min"] = lo
+    st.session_state[f"filter.{metric_key}_max"] = hi
+    st.session_state[f"sel_{metric_key}_min_input"] = lo
+    st.session_state[f"sel_{metric_key}_max_input"] = hi
+
+
+def _on_min_input_change(metric_key: str) -> None:
+    """Min number_input edit → update canonical + slider (clamped)."""
+    new_min = float(st.session_state[f"sel_{metric_key}_min_input"])
+    cur_max = float(st.session_state[f"filter.{metric_key}_max"])
+    if new_min > cur_max:
+        new_min = cur_max
+        st.session_state[f"sel_{metric_key}_min_input"] = new_min
+    st.session_state[f"filter.{metric_key}_min"] = new_min
+    st.session_state[f"sel_{metric_key}_range"] = (new_min, cur_max)
+
+
+def _on_max_input_change(metric_key: str) -> None:
+    """Max number_input edit → update canonical + slider (clamped)."""
+    new_max = float(st.session_state[f"sel_{metric_key}_max_input"])
+    cur_min = float(st.session_state[f"filter.{metric_key}_min"])
+    if new_max < cur_min:
+        new_max = cur_min
+        st.session_state[f"sel_{metric_key}_max_input"] = new_max
+    st.session_state[f"filter.{metric_key}_max"] = new_max
+    st.session_state[f"sel_{metric_key}_range"] = (cur_min, new_max)
+
+
 def _render_filter_controls() -> Dict[str, Optional[float]]:
     """Render 5-metric range sliders + numeric inputs. Returns params dict.
 
     Each metric exposes both a range slider (coarse drag) and two
-    ``number_input`` boxes (precise typing). Slider and inputs share the
-    same canonical store keys (``filter.<metric>_min`` /
-    ``filter.<metric>_max``) so editing either widget syncs the other on
-    the next rerun.
+    ``number_input`` boxes (precise typing). All three widgets share a
+    single canonical store (``filter.<metric>_min`` /
+    ``filter.<metric>_max``) and stay in sync via ``on_change`` callbacks.
 
-    Two-key persistence pattern (commit bfad752):
-        * ``filter.<metric>_<min|max>``  — canonical, non-widget, GC-safe.
-        * ``sel_<metric>_range``          — slider widget key.
+    Why callbacks (and not the previous "compare to detect which widget
+    changed" trick): Streamlit ignores the ``value=`` param when a
+    widget's session_state key already has a value, so writing to the
+    canonical store after the slider rendered does NOT cause the slider
+    bar to move on the next rerun (user-reported regression: "숫자
+    업데이트 했는데 바는 업데이트가 안되네"). The callbacks fix this by
+    pushing edits into both the canonical store AND the *other*
+    widgets' session_state keys before the next rerun, so all three
+    widgets re-hydrate from the same value.
+
+    Three session_state surfaces:
+        * ``filter.<metric>_<min|max>``    — canonical, non-widget, GC-safe.
+        * ``sel_<metric>_range``           — slider widget key (tuple).
         * ``sel_<metric>_<min|max>_input`` — number-input widget keys.
 
-    On every render we hydrate the widgets from the canonical store,
-    then mirror the post-edit values back. Streamlit GCs widget-owned
-    keys whenever the script run that instantiated them rebuilds the
-    widget (e.g. mode-button click), so the canonical store is what
-    actually survives reruns.
+    On every render we force-overwrite the widget keys from the
+    canonical store BEFORE the widgets render. This handles three
+    cases: (a) initial mount (canonical has the defaults), (b) post-GC
+    rerun after a mode-button click (widget keys may have been cleared),
+    (c) cross-widget sync (canonical reflects the just-updated value
+    from the callback).
 
     Sentinel-None semantics: when ``mn`` equals the metric's default
-    minimum (i.e. the user has not pushed the lower bound up), we set
-    ``params[<metric>_min] = None`` so :func:`_apply_filter` skips that
-    bound entirely. Same for the max bound. This keeps the "user hasn't
-    touched this bound" signal that the pipeline expects.
-
-    Conflict resolution: if the user edits the slider and the number
-    input in the same rerun (impossible — Streamlit only emits one
-    change at a time), we'd prefer the slider; in practice the user
-    edits one at a time and the canonical store reflects the latest
-    edit before the other widget hydrates.
+    minimum, we set ``params[<metric>_min] = None`` so
+    :func:`_apply_filter` skips that bound entirely. Same for max.
     """
     st.subheader("5-metric filter")
 
@@ -144,63 +178,65 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
 
         cur_min = float(st.session_state[store_min])
         cur_max = float(st.session_state[store_max])
-        # Streamlit raises if value=(a, b) violates a <= b; clamp defensively.
         if cur_min > cur_max:
             cur_min, cur_max = cur_max, cur_min
+            st.session_state[store_min] = cur_min
+            st.session_state[store_max] = cur_max
 
-        # Range slider (coarse).
-        mn, mx = st.slider(
+        range_key = f"sel_{key}_range"
+        min_input_key = f"sel_{key}_min_input"
+        max_input_key = f"sel_{key}_max_input"
+
+        # Force-sync widget session_state from the canonical store BEFORE
+        # the widgets render. Without this, a number_input edit's callback
+        # would update canonical + range_key, but on the very next rerun
+        # the slider widget would still hold its previous tuple in
+        # session_state and the bar wouldn't move. Pre-writing here makes
+        # the slider use the canonical value.
+        st.session_state[range_key] = (cur_min, cur_max)
+        st.session_state[min_input_key] = cur_min
+        st.session_state[max_input_key] = cur_max
+
+        st.slider(
             label,
             min_value=float(lo),
             max_value=float(hi),
-            value=(cur_min, cur_max),
             step=float(step),
             format=fmt,
-            key=f"sel_{key}_range",
+            key=range_key,
+            on_change=_on_slider_change,
+            args=(key,),
         )
-        # Numeric inputs (precise typing). Step matches the slider.
         in_cols = st.columns(2)
         with in_cols[0]:
-            mn_typed = st.number_input(
+            st.number_input(
                 "min",
                 min_value=float(lo),
                 max_value=float(hi),
-                value=float(mn),
                 step=float(step),
                 format=fmt,
-                key=f"sel_{key}_min_input",
+                key=min_input_key,
+                on_change=_on_min_input_change,
+                args=(key,),
                 label_visibility="collapsed",
             )
         with in_cols[1]:
-            mx_typed = st.number_input(
+            st.number_input(
                 "max",
                 min_value=float(lo),
                 max_value=float(hi),
-                value=float(mx),
                 step=float(step),
                 format=fmt,
-                key=f"sel_{key}_max_input",
+                key=max_input_key,
+                on_change=_on_max_input_change,
+                args=(key,),
                 label_visibility="collapsed",
             )
 
-        # Reconcile slider vs. number-input edits. Whichever differs
-        # from the canonical store wins; if both differ (only possible
-        # if the user typed a value into the input then dragged the
-        # slider — Streamlit serialises these), the slider wins because
-        # its tuple was rendered first.
-        eff_min, eff_max = float(mn), float(mx)
-        if abs(mn_typed - cur_min) > 1e-9 and abs(mn - cur_min) <= 1e-9:
-            eff_min = float(mn_typed)
-        if abs(mx_typed - cur_max) > 1e-9 and abs(mx - cur_max) <= 1e-9:
-            eff_max = float(mx_typed)
-        if eff_min > eff_max:
-            eff_min, eff_max = eff_max, eff_min
-
-        st.session_state[store_min] = float(eff_min)
-        st.session_state[store_max] = float(eff_max)
-
-        params[f"{key}_min"] = float(eff_min) if eff_min != mn_default else None
-        params[f"{key}_max"] = float(eff_max) if eff_max != mx_default else None
+        eff_min = float(st.session_state[store_min])
+        eff_max = float(st.session_state[store_max])
+        params[f"{key}_min"] = eff_min if eff_min != mn_default else None
+        params[f"{key}_max"] = eff_max if eff_max != mx_default else None
 
     return params
 
