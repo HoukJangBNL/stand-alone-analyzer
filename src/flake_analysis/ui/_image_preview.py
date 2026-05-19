@@ -278,6 +278,7 @@ def build_image_preview_figure(
     *,
     full_image: Optional[Image.Image] = None,
     crop_box: Optional[Tuple[int, int, int, int]] = None,
+    height: int = 300,
 ):
     """Build a Plotly Figure for a raw image preview with bbox-zoomed viewport.
 
@@ -288,6 +289,10 @@ def build_image_preview_figure(
 
     Falling back to the legacy ``crop``-only signature still works for
     callers that haven't migrated yet.
+
+    ``height`` controls the rendered figure height in px. The default of
+    300 matches the historic implicit size; the Selector tab passes a
+    larger value (e.g. 600) so the preview dominates the inspection view.
 
     Pure function (no Streamlit calls) so it can be smoke-tested.
     """
@@ -326,6 +331,7 @@ def build_image_preview_figure(
         margin=dict(l=0, r=0, t=0, b=0),
         dragmode="pan",
         showlegend=False,
+        height=height,
     )
 
     if show_boundary and crop_mask is not None:
@@ -360,6 +366,7 @@ def render_image_preview(
     domain_id: Optional[int],
     n_selected: int = 0,
     bbox_padding: float = 0.2,
+    height: int = 300,
 ) -> None:
     """Render a per-domain raw-image preview panel.
 
@@ -370,6 +377,9 @@ def render_image_preview(
     v0.1.4 — uses a Plotly figure (zoom/pan via modebar) and shows a
     boundary overlay decoded from the segmentation RLE when the user
     enables it (``B`` shortcut or the "Boundary (B)" button).
+
+    v0.2.1 — accepts a ``height`` keyword to enlarge the figure when the
+    preview is the inspection focus (Selector tab uses 600).
     """
     st.subheader("Raw image preview")
 
@@ -436,6 +446,7 @@ def render_image_preview(
         show_boundary,
         full_image=full_image,
         crop_box=tuple(crop_box) if crop_box is not None else None,
+        height=height,
     )
 
     suffix = f" (focus of {n_selected} selected)" if n_selected > 1 else ""

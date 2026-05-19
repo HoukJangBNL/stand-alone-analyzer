@@ -1,11 +1,21 @@
-"""Selector tab — 4-pane RGB scatter + 5-metric bidirectional filter + flake list.
-
-Per-domain image preview, mode toggles (Replace/Add/Subtract), undo/redo,
-and scroll-zoom were added in v0.1.2 via the shared ``_brushing`` helper.
+"""Selector tab — single 2D scatter (axis-pickable) + filter + flake list.
 
 The 5-metric filter is the actual selection contract; the lasso/box
 brushing is for cross-pane inspection only and does not modify metric
 ranges.
+
+v0.2.1 layout overhaul:
+
+* The historic 4-pane (3D RGB + R-G + R-B + G-B) was replaced by a
+  single 2D scatter with X / Y axis dropdowns. The 3D pane never
+  supported lasso/click selection so removing it is not a functional
+  regression and the user can pick any pair of axes (R/G/B, std_*,
+  area, sam2) from one chart.
+* The raw image preview was moved out of the right column and now sits
+  full-width directly below the scatter at a larger height (600 px) so
+  morphology inspection is the focal point.
+* The flake list moved to the bottom and grew Export buttons for the
+  filtered list and the brush-selected subset (CSV download).
 
 Mockup reference: ``04_tab_selector.html``.
 """
@@ -121,7 +131,46 @@ def _clear_filter_session_keys() -> None:
         st.session_state.pop(f"sel_{key}_max", None)
 
 
-# ─── 4-pane scatter (linked brushing via shared _brushing helper) ────────
+# ─── Axis pickers ───────────────────────────────────────────────────────
+
+# Order matters — controls the dropdown layout and default index picks.
+AVAILABLE_AXES = ("R", "G", "B", "area", "std_r", "std_g", "std_b", "sam2")
+
+
+def _values_for_axis(stats: Dict[str, np.ndarray], axis: str) -> np.ndarray:
+    """Return the per-domain numeric array backing an axis dropdown choice.
+
+    Mapping:
+        R/G/B          → ``repr_rgbs[:, 0/1/2]``
+        std_r/g/b      → ``std_pcts[:, 0/1/2]``
+        area           → ``areas``
+        sam2           → ``sam2`` (zeros fallback when the column is missing)
+    """
+    rgb = stats["repr_rgbs"]
+    std = stats["std_pcts"]
+    if axis == "R":
+        return rgb[:, 0]
+    if axis == "G":
+        return rgb[:, 1]
+    if axis == "B":
+        return rgb[:, 2]
+    if axis == "std_r":
+        return std[:, 0]
+    if axis == "std_g":
+        return std[:, 1]
+    if axis == "std_b":
+        return std[:, 2]
+    if axis == "area":
+        return stats["areas"]
+    if axis == "sam2":
+        sam = stats.get("sam2")
+        if sam is None:
+            return np.zeros(len(stats["flake_ids"]))
+        return sam
+    raise ValueError(f"unknown axis: {axis}")
+
+
+# ─── Single 2D scatter (linked brushing via shared _brushing helper) ─────
 
 # Static downsample cap for PR 2.3. Future: zoom-aware (M3).
 _MAX_POINTS = 5000
@@ -179,21 +228,47 @@ def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
     return _brushing.handle_selection_event(event, state)
 
 
-def _render_4pane_scatter(
+def _render_axis_pickers() -> tuple[str, str]:
+    """Render X / Y axis dropdowns. Returns the picked axis names.
+
+    Defaults: X=R, Y=G (matches the most informative pane from the legacy
+    4-pane layout). The widgets occupy the leftmost two columns of a
+    [1, 1, 6] grid so they don't dominate the row.
+    """
+    pick_cols = st.columns([1, 1, 6])
+    with pick_cols[0]:
+        x_axis = st.selectbox(
+            "X-axis",
+            AVAILABLE_AXES,
+            index=0,
+            key="selector_x_axis",
+        )
+    with pick_cols[1]:
+        y_axis = st.selectbox(
+            "Y-axis",
+            AVAILABLE_AXES,
+            index=1,
+            key="selector_y_axis",
+        )
+    return x_axis, y_axis
+
+
+def _render_2d_scatter(
     stats: Dict[str, np.ndarray],
     accept_mask: np.ndarray,
     state: _brushing.BrushingState,
+    x_axis: str,
+    y_axis: str,
 ) -> None:
-    """4-pane RGB scatter (3D + R-G + R-B + G-B) with linked brushing.
+    """Single 2D scatter with linked brushing on (x_axis, y_axis).
 
     Color encoding: green=accepted, red=rejected.
-    Lasso/box-selected points get an orange ring across all panes.
+    Lasso/box-selected points get an orange ring overlay.
 
-    The 2D panes' ``dragmode`` follows ``state.interaction_mode``:
+    The chart's ``dragmode`` follows ``state.interaction_mode``:
     ``pan`` for single-pick (left-drag pans, click selects 1 pt) and
     ``lasso`` for lasso mode.
     """
-    rgb = stats["repr_rgbs"]
     flake_ids = stats["flake_ids"].astype(np.int64)
     n = len(flake_ids)
 
@@ -202,7 +277,10 @@ def _render_4pane_scatter(
         flake_ids=flake_ids,
         must_include_ids=state.selected_ids,
     )
-    rgb_sub = rgb[sub_idx]
+    x_full = _values_for_axis(stats, x_axis)
+    y_full = _values_for_axis(stats, y_axis)
+    x_sub = x_full[sub_idx]
+    y_sub = y_full[sub_idx]
     ids_sub = flake_ids[sub_idx]
     accepted_sub = accept_mask[sub_idx]
 
@@ -223,80 +301,39 @@ def _render_4pane_scatter(
         else "lasso/box to brush · scroll to zoom"
     )
 
-    # Embed interaction mode in the chart key so Streamlit treats the
-    # chart as a different element when dragmode flips. Without this
-    # suffix, the cached event payload from a prior lasso could replay
-    # against the freshly-rebuilt 'pan' figure (Task 1 fix).
-    suffix = interaction
+    # Embed interaction mode + axis pair in the chart key so Streamlit
+    # treats axis swaps + dragmode flips as fresh widgets and doesn't
+    # replay stale lasso payloads onto the rebuilt figure (Task 1 fix).
+    suffix = f"{interaction}_{x_axis}_{y_axis}"
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.caption("3D R-G-B scatter (display only)")
-        fig3d = _brushing.make_3d_scatter(
-            rgb_sub, ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-        )
-        _brushing.render_scatter(fig3d, key="sel_pane_3d", on_select=False)
-
-    with col2:
-        st.caption(f"R vs G ({pane_hint})")
-        fig_rg = _brushing.make_2d_scatter(
-            rgb_sub[:, 0], rgb_sub[:, 1], ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-            x_label="R", y_label="G",
-            dragmode=dragmode,
-        )
-        evt_rg = _brushing.render_scatter(
-            fig_rg, key=f"sel_pane_rg_{suffix}", interaction_mode=interaction,
-        )
-        if _dispatch_event(evt_rg, state):
-            st.rerun()
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.caption(f"R vs B ({pane_hint})")
-        fig_rb = _brushing.make_2d_scatter(
-            rgb_sub[:, 0], rgb_sub[:, 2], ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-            x_label="R", y_label="B",
-            dragmode=dragmode,
-        )
-        evt_rb = _brushing.render_scatter(
-            fig_rb, key=f"sel_pane_rb_{suffix}", interaction_mode=interaction,
-        )
-        if _dispatch_event(evt_rb, state):
-            st.rerun()
-
-    with col4:
-        st.caption(f"G vs B ({pane_hint})")
-        fig_gb = _brushing.make_2d_scatter(
-            rgb_sub[:, 1], rgb_sub[:, 2], ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-            x_label="G", y_label="B",
-            dragmode=dragmode,
-        )
-        evt_gb = _brushing.render_scatter(
-            fig_gb, key=f"sel_pane_gb_{suffix}", interaction_mode=interaction,
-        )
-        if _dispatch_event(evt_gb, state):
-            st.rerun()
+    st.caption(f"{x_axis} vs {y_axis} ({pane_hint})")
+    fig = _brushing.make_2d_scatter(
+        x_sub, y_sub, ids_sub,
+        base_colors=base_colors, selected_ids=selected,
+        x_label=x_axis, y_label=y_axis,
+        height=500,
+        dragmode=dragmode,
+    )
+    evt = _brushing.render_scatter(
+        fig, key=f"sel_pane_xy_{suffix}", interaction_mode=interaction,
+    )
+    if _dispatch_event(evt, state):
+        st.rerun()
 
 
-# ─── Right pane: flake list ──────────────────────────────────────────────
+# ─── Flake list table ────────────────────────────────────────────────────
 
-def _render_flake_list(
+def build_flake_list_df(
     stats: Dict[str, np.ndarray],
     accept_mask: np.ndarray,
-    state: _brushing.BrushingState,
-) -> None:
-    """Render the flake table with single-row click → focus_id binding.
+    selected_ids: Set[int],
+) -> pd.DataFrame:
+    """Build the per-domain dataframe shown in the flake list table.
 
-    Row click sets ``state.focus_id`` to the clicked ``domain_id``. This
-    drives the image preview without modifying the brushing
-    ``selected_ids`` set — focus and brush selection are intentionally
-    separate concepts (one identifies a domain to inspect, the other is
-    the cross-pane brushing selection used by Selector / Clustering
-    workflows).
+    Marks ``status`` column as ``selected`` for ids in the brushing set,
+    ``accepted`` for everything else passing the metric filter, and
+    ``rejected`` for filtered-out domains. Pure helper so the export
+    buttons can serialise the same rows the user sees.
     """
     flake_ids = stats["flake_ids"].astype(np.int64)
     rgb = stats["repr_rgbs"]
@@ -306,7 +343,6 @@ def _render_flake_list(
     if sam2 is None:
         sam2 = np.full(len(flake_ids), np.nan)
 
-    selected_ids = state.selected_ids
     df = pd.DataFrame(
         {
             "domain_id": flake_ids,
@@ -323,7 +359,22 @@ def _render_flake_list(
     )
     if selected_ids:
         df.loc[df["domain_id"].isin(selected_ids), "status"] = "selected"
+    return df
 
+
+def _render_flake_list(
+    df: pd.DataFrame,
+    state: _brushing.BrushingState,
+) -> None:
+    """Render the flake table with single-row click → focus_id binding.
+
+    Row click sets ``state.focus_id`` to the clicked ``domain_id``. This
+    drives the image preview without modifying the brushing
+    ``selected_ids`` set — focus and brush selection are intentionally
+    separate concepts (one identifies a domain to inspect, the other is
+    the cross-pane brushing selection used by Selector / Clustering
+    workflows).
+    """
     # Newer Streamlit (>= 1.35) supports on_select="rerun" with
     # selection_mode="single-row" on st.dataframe. Older versions raise;
     # gracefully fall back to a non-interactive table so the tab still
@@ -362,6 +413,48 @@ def _render_flake_list(
         if state.focus_id != new_focus:
             state.focus_id = new_focus
             st.rerun()
+
+
+def _render_export_buttons(
+    df_filtered: pd.DataFrame,
+    state: _brushing.BrushingState,
+) -> None:
+    """Export buttons for filtered + brush-selected CSVs.
+
+    The "filtered" download dumps every row currently in the table
+    (including rejected/selected status). The "selected" download is
+    enabled only when the user has lasso/click-selected at least one
+    domain — without a selection it'd be ambiguous whether to dump
+    nothing or the accepted set.
+    """
+    col_a, col_b, _pad = st.columns([2, 2, 6])
+    with col_a:
+        st.download_button(
+            "Export filtered (CSV)",
+            data=df_filtered.to_csv(index=False).encode("utf-8"),
+            file_name="selector_filtered.csv",
+            mime="text/csv",
+            key="export_filtered_csv",
+        )
+    with col_b:
+        if state.selected_ids:
+            df_selected = df_filtered.loc[
+                df_filtered["domain_id"].isin(state.selected_ids)
+            ]
+            st.download_button(
+                "Export selected (CSV)",
+                data=df_selected.to_csv(index=False).encode("utf-8"),
+                file_name="selector_selected.csv",
+                mime="text/csv",
+                key="export_selected_csv",
+            )
+        else:
+            st.button(
+                "Export selected (CSV)",
+                disabled=True,
+                help="Lasso some domains first.",
+                key="export_selected_csv_disabled",
+            )
 
 
 # ─── Top-level renderer ──────────────────────────────────────────────────
@@ -403,9 +496,9 @@ def render_tab_selector(
     with info_col:
         st.info(
             "Default mode is Single-pick: left-click a point to focus one domain. "
-            "Press L (or click Lasso: Replace) for lasso brushing across panes — "
+            "Press L (or click Lasso: Replace) for lasso brushing — "
             "use sub-modes Replace/Add/Subtract (R/A/D) to combine selections. "
-            "Click a row in the flake list below to drive the image preview."
+            "Click a row in the flake list at the bottom to drive the image preview."
         )
     with help_col:
         _brushing.render_help_button(key="selector_help_btn")
@@ -461,24 +554,31 @@ def render_tab_selector(
 
     st.divider()
 
-    # 4-pane scatter (linked brushing)
-    _render_4pane_scatter(stats, accept_mask, state)
+    # Axis pickers + single 2D scatter (linked brushing)
+    x_axis, y_axis = _render_axis_pickers()
+    _render_2d_scatter(stats, accept_mask, state, x_axis, y_axis)
+
+    st.caption(f"Brush selected: {len(selected_ids):,}")
 
     st.divider()
 
-    # Right-pane: flake list + raw image preview side-by-side.
-    list_col, img_col = st.columns([3, 2])
-    with list_col:
-        st.subheader("Flake list")
-        _render_flake_list(stats, accept_mask, state)
-    with img_col:
-        focus = _focus_domain_id(state)
-        render_image_preview(
-            raw_images_dir=raw_images_dir,
-            annotations_path=annotations_path,
-            domain_id=focus,
-            n_selected=len(selected_ids),
-        )
+    # Raw image preview — full width, larger height (was implicit ~300).
+    focus = _focus_domain_id(state)
+    render_image_preview(
+        raw_images_dir=raw_images_dir,
+        annotations_path=annotations_path,
+        domain_id=focus,
+        n_selected=len(selected_ids),
+        height=600,
+    )
+
+    st.divider()
+
+    # Flake list at the bottom + Export buttons.
+    st.subheader("Flake list")
+    df_filtered = build_flake_list_df(stats, accept_mask, selected_ids)
+    _render_export_buttons(df_filtered, state)
+    _render_flake_list(df_filtered, state)
 
     st.divider()
 

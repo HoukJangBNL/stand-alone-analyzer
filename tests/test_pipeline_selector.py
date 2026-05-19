@@ -127,3 +127,44 @@ def test_run_selector_sam2_missing_ignores_bounds():
 
         assert result["selected_count"] == 50
         assert result["total_count"] == 50
+
+
+def test_values_for_axis_returns_correct_columns():
+    """Axis dropdown mapping → correct stats column for each axis name."""
+    from flake_analysis.ui.tab_selector import _values_for_axis
+
+    rng = np.random.default_rng(42)
+    n = 8
+    rgb = rng.uniform(0, 255, size=(n, 3)).astype(np.float64)
+    std = rng.uniform(0, 50, size=(n, 3)).astype(np.float64)
+    areas = rng.integers(10, 1000, size=n).astype(np.float64)
+    sam2 = rng.uniform(0, 1, size=n).astype(np.float64)
+    flake_ids = np.arange(n, dtype=np.int64)
+
+    stats = {
+        "repr_rgbs": rgb,
+        "std_pcts": std,
+        "areas": areas,
+        "sam2": sam2,
+        "flake_ids": flake_ids,
+    }
+
+    np.testing.assert_array_equal(_values_for_axis(stats, "R"), rgb[:, 0])
+    np.testing.assert_array_equal(_values_for_axis(stats, "G"), rgb[:, 1])
+    np.testing.assert_array_equal(_values_for_axis(stats, "B"), rgb[:, 2])
+    np.testing.assert_array_equal(_values_for_axis(stats, "std_r"), std[:, 0])
+    np.testing.assert_array_equal(_values_for_axis(stats, "std_g"), std[:, 1])
+    np.testing.assert_array_equal(_values_for_axis(stats, "std_b"), std[:, 2])
+    np.testing.assert_array_equal(_values_for_axis(stats, "area"), areas)
+    np.testing.assert_array_equal(_values_for_axis(stats, "sam2"), sam2)
+
+    # Unknown axis raises a ValueError so dropdown bugs surface loudly.
+    with pytest.raises(ValueError, match="unknown axis"):
+        _values_for_axis(stats, "bogus")
+
+    # sam2 column missing → zeros fallback (allow_missing semantics, mirrors
+    # the filter behavior in _apply_filter).
+    stats_no_sam = {k: v for k, v in stats.items() if k != "sam2"}
+    np.testing.assert_array_equal(
+        _values_for_axis(stats_no_sam, "sam2"), np.zeros(n)
+    )
