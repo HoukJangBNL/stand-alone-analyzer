@@ -100,41 +100,37 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
     when the user clicks a mode button), wiping any filter ranges the
     user had typed in. Pre-seeding keeps user edits sticky across reruns.
     """
-    import sys as _sys
     st.subheader("5-metric filter")
 
-    # DEBUG: dump filter widget state on entry, so we can see whether the
-    # values survived the rerun triggered by a mode-button click.
-    pre_state = {f"sel_{k}_min": st.session_state.get(f"sel_{k}_min", "<missing>") for k, *_ in _METRIC_DEFS}
-    pre_state.update({f"sel_{k}_max": st.session_state.get(f"sel_{k}_max", "<missing>") for k, *_ in _METRIC_DEFS})
-    print(f"[DEBUG _render_filter_controls] ENTRY session_state={pre_state}",
-          file=_sys.stderr, flush=True)
-
-    # Pre-seed defaults once.
-    seeded = []
-    for key, _label, _lo, _hi, mn_default, mx_default, _step, _fmt in _METRIC_DEFS:
-        kmn = f"sel_{key}_min"
-        kmx = f"sel_{key}_max"
-        if kmn not in st.session_state:
-            st.session_state[kmn] = float(mn_default)
-            seeded.append(kmn)
-        if kmx not in st.session_state:
-            st.session_state[kmx] = float(mx_default)
-            seeded.append(kmx)
-    if seeded:
-        print(f"[DEBUG _render_filter_controls] SEEDED {seeded}",
-              file=_sys.stderr, flush=True)
+    # We persist filter values in NON-widget keys (``filter.<metric>_min``)
+    # because Streamlit garbage-collects widget keys (``sel_<metric>_min``)
+    # whenever the script run that owned them does not re-instantiate the
+    # widget. Mode-button clicks trigger a rerun whose ScriptRunner pass
+    # apparently treats the about-to-be-rebuilt sliders as "not yet seen",
+    # so it discards the prior widget state entry — the user's typed value
+    # vanishes. Mirroring the value into a plain ``filter.*`` key sidesteps
+    # that GC: we read from ``filter.*`` to populate the widget's value=
+    # argument, and on every render we copy the widget output back into
+    # ``filter.*`` so subsequent reruns can rehydrate.
 
     cols = st.columns(5)
     params: Dict[str, Optional[float]] = {}
 
     for i, (key, label, lo, hi, mn_default, mx_default, step, fmt) in enumerate(_METRIC_DEFS):
+        store_min = f"filter.{key}_min"
+        store_max = f"filter.{key}_max"
+        if store_min not in st.session_state:
+            st.session_state[store_min] = float(mn_default)
+        if store_max not in st.session_state:
+            st.session_state[store_max] = float(mx_default)
+
         with cols[i]:
             st.caption(label)
             mn = st.number_input(
                 f"{key} min",
                 min_value=float(lo),
                 max_value=float(hi),
+                value=float(st.session_state[store_min]),
                 step=float(step),
                 format=fmt,
                 key=f"sel_{key}_min",
@@ -143,10 +139,15 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
                 f"{key} max",
                 min_value=float(lo),
                 max_value=float(hi),
+                value=float(st.session_state[store_max]),
                 step=float(step),
                 format=fmt,
                 key=f"sel_{key}_max",
             )
+            # Persist back so the next rerun rehydrates from filter.*
+            st.session_state[store_min] = float(mn)
+            st.session_state[store_max] = float(mx)
+
             params[f"{key}_min"] = mn if mn != mn_default else None
             params[f"{key}_max"] = mx if mx != mx_default else None
 
@@ -154,8 +155,10 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
 
 
 def _clear_filter_session_keys() -> None:
-    """Reset all selector filter widgets to defaults by deleting keys."""
-    for key, *_ in _METRIC_DEFS:
+    """Reset all selector filter widgets to defaults."""
+    for key, _label, _lo, _hi, mn_default, mx_default, _step, _fmt in _METRIC_DEFS:
+        st.session_state[f"filter.{key}_min"] = float(mn_default)
+        st.session_state[f"filter.{key}_max"] = float(mx_default)
         st.session_state.pop(f"sel_{key}_min", None)
         st.session_state.pop(f"sel_{key}_max", None)
 
