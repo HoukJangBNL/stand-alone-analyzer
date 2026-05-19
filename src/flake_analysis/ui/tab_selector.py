@@ -740,13 +740,18 @@ def render_selector_sidebar(
         pct = (100.0 * n_accepted / n_total) if n_total else 0.0
         selected_ids = state.selected_ids
 
-        metric_cols = st.columns(3)
-        with metric_cols[0]:
-            st.metric("Accepted", f"{n_accepted:,} / {n_total:,}", f"{pct:.1f}%")
-        with metric_cols[1]:
-            st.metric("Rejected", f"{n_total - n_accepted:,}")
-        with metric_cols[2]:
-            st.metric("Brush selected", f"{len(selected_ids):,}")
+        # Compact one-line counters — `st.metric` clamps to its column
+        # width and the sidebar (~280px) makes the big-font numbers
+        # ellipsize ("15,..."). Markdown lets the numbers stay full
+        # width and wrap naturally if the user shrinks the drawer.
+        n_rejected = n_total - n_accepted
+        st.markdown(
+            f"**Accepted** {n_accepted:,} / {n_total:,} "
+            f"<span style='color:#43a047'>({pct:.1f}%)</span>  \n"
+            f"**Rejected** {n_rejected:,}  \n"
+            f"**Brush selected** {len(selected_ids):,}",
+            unsafe_allow_html=True,
+        )
 
         st.divider()
 
