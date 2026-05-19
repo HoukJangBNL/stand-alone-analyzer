@@ -364,12 +364,31 @@ def compute_and_cache_stats_from_flakes(
     areas = areas[order]
     flake_ids = flake_ids[order]
 
+    # SAM2 confidence score from each flake's metadata. Stored alongside the
+    # other per-flake arrays so the standalone Selector tab can filter on it
+    # (otherwise the sam2 column was always zeros). Default 1.0 if missing
+    # (matches annotation_loader's fallback at load time).
+    def _flake_score(f) -> float:
+        # RLEFlake exposes its FlakeMetadata as _metadata; older or fixture
+        # objects may have a public .metadata. Fall back to score=1.0 if
+        # neither carries one (matches annotation_loader's default).
+        meta = getattr(f, "_metadata", None) or getattr(f, "metadata", None)
+        if meta is None:
+            return 1.0
+        try:
+            return float(getattr(meta, "score", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            return 1.0
+
+    sam2_scores = np.array([_flake_score(f) for f in flakes], dtype=np.float32)
+
     np.savez(
         cache_file,
         repr_rgbs=repr_rgbs,
         std_pcts=std_pcts,
         areas=areas,
         flake_ids=flake_ids,
+        sam2=sam2_scores,
     )
     msg.info(f"[STATS] Saved stats to {cache_file}")
 

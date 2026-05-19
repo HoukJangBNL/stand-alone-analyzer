@@ -342,19 +342,38 @@ def _render_2d_scatter(
     # replay stale lasso payloads onto the rebuilt figure (Task 1 fix).
     suffix = f"{interaction}_{x_axis}_{y_axis}"
 
-    st.caption(f"{x_axis} vs {y_axis} ({pane_hint})")
-    fig = _brushing.make_2d_scatter(
-        x_sub, y_sub, ids_sub,
-        base_colors=base_colors, selected_ids=selected,
-        x_label=x_axis, y_label=y_axis,
-        height=500,
-        dragmode=dragmode,
-    )
-    evt = _brushing.render_scatter(
-        fig, key=f"sel_pane_xy_{suffix}", interaction_mode=interaction,
-    )
-    if _dispatch_event(evt, state):
-        st.rerun()
+    # Two side-by-side panels: 3D RGB (display only — no lasso events) on
+    # the left, the user-configurable 2D scatter on the right. The 3D
+    # plot orients the user in RGB space; the 2D plot is where actual
+    # selection happens.
+    col_3d, col_2d = st.columns([1, 1])
+
+    rgb_sub_3d = stats["repr_rgbs"][visible_idx][sub_idx]
+    with col_3d:
+        st.caption("3D R-G-B (display only)")
+        fig3d = _brushing.make_3d_scatter(
+            rgb_sub_3d, ids_sub,
+            base_colors=base_colors, selected_ids=selected,
+            height=500,
+        )
+        _brushing.render_scatter(
+            fig3d, key=f"sel_pane_3d_{suffix}", on_select=False,
+        )
+
+    with col_2d:
+        st.caption(f"{x_axis} vs {y_axis} ({pane_hint})")
+        fig = _brushing.make_2d_scatter(
+            x_sub, y_sub, ids_sub,
+            base_colors=base_colors, selected_ids=selected,
+            x_label=x_axis, y_label=y_axis,
+            height=500,
+            dragmode=dragmode,
+        )
+        evt = _brushing.render_scatter(
+            fig, key=f"sel_pane_xy_{suffix}", interaction_mode=interaction,
+        )
+        if _dispatch_event(evt, state):
+            st.rerun()
 
 
 # ─── Flake list table ────────────────────────────────────────────────────
