@@ -59,7 +59,11 @@ def render_sidebar() -> Tuple[str, str, str]:
     """Render sidebar widgets. Returns (raw_images_dir, annotations_path, analysis_folder)."""
     with st.sidebar:
         st.title("Stand-Alone Analyzer")
-        st.caption("M2 PR 2.1 — sidebar + manifest core")
+        try:
+            from flake_analysis import __version__ as _ver
+        except Exception:
+            _ver = "?"
+        st.caption(f"v{_ver}")
 
         st.subheader("Project Paths")
 
@@ -143,6 +147,10 @@ def render_sidebar() -> Tuple[str, str, str]:
                 st.error(f"manifest error: {e}")
 
         st.divider()
-        st.caption("v0.1.0a0 (M2 PR 2.1)")
+        try:
+            from flake_analysis import __version__ as _ver
+        except Exception:
+            _ver = "?"
+        st.caption(f"stand-alone-analyzer v{_ver}")
 
     return raw_images_dir, annotations_path, analysis_folder
