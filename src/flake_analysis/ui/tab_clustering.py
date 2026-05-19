@@ -453,17 +453,13 @@ def render_tab_clustering(
     _brushing.render_keyboard_shortcuts()
     _brushing.render_wheel_capture()
 
-    info_col, help_col = st.columns([6, 1])
-    with info_col:
-        st.info(
-            "Clustering operates on the selector-narrowed domain set. "
-            "Default mode is Single-pick — click a point to identify it. "
-            "Press L for Lasso brushing to build seed groups; sub-modes R/A/D "
-            "combine selections (Replace / Add / Subtract). Click + Add attaches "
-            "the brush buffer to a seed group."
-        )
-    with help_col:
-        _brushing.render_help_button(key="clustering_help_btn")
+    st.info(
+        "Clustering operates on the **selector-accepted domain set** "
+        "(committed in tab 2). Default mode is Single-pick — click a point "
+        "to identify it. Switch to Lasso: New / Add / Subtract to build "
+        "seed groups, then click + Add to attach the brush buffer to a "
+        "named group."
+    )
 
     # Prereq gate
     manifest = load_manifest(analysis_folder)
@@ -481,9 +477,14 @@ def render_tab_clustering(
         st.warning("⚠ stats.npz or selection.parquet missing on disk.")
         return
 
+    n_total = int(len(stats["flake_ids"]))
+    n_sel = int(stats["sel_count"])
+    pct_sel = (100.0 * n_sel / n_total) if n_total else 0.0
     st.success(
-        f"✅ Selector ready · {stats['sel_count']:,} domains "
-        f"(last commit: {selector_entry.completed_at})"
+        f"✅ Working on selector-accepted set: **{n_sel:,} / {n_total:,} "
+        f"domains ({pct_sel:.1f}%)** "
+        f"· last commit {selector_entry.completed_at}. "
+        f"Re-commit Selector if you changed filters there."
     )
 
     # Mode controls + Undo/Redo/Clear
