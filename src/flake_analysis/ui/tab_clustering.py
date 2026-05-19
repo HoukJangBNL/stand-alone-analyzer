@@ -21,6 +21,12 @@ import streamlit as st
 from flake_analysis.pipeline.clustering import apply_thresholds, run_clustering_step
 from flake_analysis.state.manifest import load_manifest
 from flake_analysis.ui import _brushing
+from flake_analysis.ui._image_preview import render_image_preview
+from flake_analysis.ui.tab_selector import (
+    AVAILABLE_AXES,
+    _focus_domain_id,
+    _values_for_axis,
+)
 
 
 # ─── Constants ───────────────────────────────────────────────────────────
@@ -48,7 +54,12 @@ def _ensure_session_seed_groups() -> List[Dict[str, Any]]:
 # ─── Data loading ────────────────────────────────────────────────────────
 
 def _load_inputs(analysis_folder: str) -> Optional[Dict[str, Any]]:
-    """Return dict with stats arrays + selected_mask, or None if prereq missing."""
+    """Return dict with full stats arrays + selected_mask, or None if missing.
+
+    Exposes ``areas``, ``std_pcts``, ``sam2`` in addition to the colour
+    info so the configurable 2D scatter (which reuses Selector's axis
+    options) can plot any pair of metrics on demand.
+    """
     stats_path = Path(analysis_folder) / "02_domain_stats" / "stats.npz"
     sel_path = Path(analysis_folder) / "03_selector" / "selection.parquet"
     if not stats_path.exists() or not sel_path.exists():
@@ -60,12 +71,16 @@ def _load_inputs(analysis_folder: str) -> Optional[Dict[str, Any]]:
     sel_set = set(sel_df.loc[sel_df["selected"].astype(bool), "domain_id"].astype(int).tolist())
     selected_mask = np.isin(flake_ids, list(sel_set))
 
-    return {
+    out: Dict[str, Any] = {
         "flake_ids": flake_ids,
         "repr_rgbs": npz["repr_rgbs"],
+        "std_pcts": npz["std_pcts"] if "std_pcts" in npz.files else None,
+        "areas": npz["areas"] if "areas" in npz.files else None,
+        "sam2": npz["sam2"] if "sam2" in npz.files else None,
         "selected_mask": selected_mask,
         "sel_count": int(selected_mask.sum()),
     }
+    return out
 
 
 def _load_committed_clustering(analysis_folder: str) -> Optional[Dict[str, Any]]:
@@ -259,115 +274,180 @@ def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
     return _brushing.handle_selection_event(event, state)
 
 
-def _render_4pane_scatter(
-    stats: Dict[str, Any],
-    cluster_assign: Optional[Dict[int, int]],
-    state: _brushing.BrushingState,
-) -> None:
-    """4-pane scatter (3D + R-G + R-B + G-B) with linked brushing.
+def _on_clu_x_axis_change() -> None:
+    st.session_state["clu_axis.x"] = st.session_state["clu_x_axis"]
 
-    The 2D panes' ``dragmode`` follows ``state.interaction_mode``:
-    ``pan`` for single-pick, ``lasso`` for lasso mode.
+
+def _on_clu_y_axis_change() -> None:
+    st.session_state["clu_axis.y"] = st.session_state["clu_y_axis"]
+
+
+def _on_clu_show_3d_change() -> None:
+    st.session_state["clu.show_3d"] = bool(st.session_state["clu_show_3d"])
+
+
+def _render_clu_axis_pickers() -> tuple[str, str]:
+    """X / Y axis dropdowns for the Clustering 2D scatter.
+
+    Mirrors :func:`tab_selector._render_axis_pickers` (canonical store +
+    on_change callback pattern that survives Streamlit's GC of widget
+    keys after a mode-button rerun) but uses ``clu_*`` keys so the two
+    tabs can have independent picks.
     """
-    rgb_all = stats["repr_rgbs"]
-    flake_ids = stats["flake_ids"].astype(np.int64)
-    sel_mask = stats["selected_mask"]
+    if "clu_axis.x" not in st.session_state:
+        st.session_state["clu_axis.x"] = AVAILABLE_AXES[0]
+    if "clu_axis.y" not in st.session_state:
+        st.session_state["clu_axis.y"] = AVAILABLE_AXES[1]
+    if "clu_x_axis" not in st.session_state:
+        st.session_state["clu_x_axis"] = st.session_state["clu_axis.x"]
+    if "clu_y_axis" not in st.session_state:
+        st.session_state["clu_y_axis"] = st.session_state["clu_axis.y"]
 
-    rgb_sel = rgb_all[sel_mask]
-    ids_sel = flake_ids[sel_mask]
-    n = len(ids_sel)
-    if n == 0:
-        st.warning("Selector kept zero domains; cannot render scatter.")
-        return
+    pick_cols = st.columns(2)
+    with pick_cols[0]:
+        x = st.selectbox(
+            "X-axis",
+            AVAILABLE_AXES,
+            key="clu_x_axis",
+            on_change=_on_clu_x_axis_change,
+        )
+    with pick_cols[1]:
+        y = st.selectbox(
+            "Y-axis",
+            AVAILABLE_AXES,
+            key="clu_y_axis",
+            on_change=_on_clu_y_axis_change,
+        )
+    return x, y
+
+
+def _build_clu_scatter_arrays(
+    stats: Dict[str, Any],
+    state: _brushing.BrushingState,
+    x_axis: str,
+    y_axis: str,
+) -> Optional[Dict[str, np.ndarray]]:
+    """Selector-narrowed + downsampled arrays for the Clustering scatter.
+
+    Returns ``None`` when the selector-committed set is empty (caller
+    shows an info message instead of a blank chart).
+    """
+    flake_ids_all = stats["flake_ids"].astype(np.int64)
+    sel_mask = stats["selected_mask"]
+    n_total = int(len(flake_ids_all))
+
+    visible_idx = np.where(sel_mask)[0]
+    n_visible = int(len(visible_idx))
+    if n_visible == 0:
+        return None
+
+    flake_ids = flake_ids_all[visible_idx]
+    x_full = _values_for_axis(stats, x_axis)[visible_idx]
+    y_full = _values_for_axis(stats, y_axis)[visible_idx]
+    rgb_visible = stats["repr_rgbs"][visible_idx]
 
     sub_idx = _downsample_indices(
-        n,
-        flake_ids=ids_sel,
+        n_visible,
+        flake_ids=flake_ids,
         must_include_ids=state.selected_ids,
     )
-    rgb_sub = rgb_sel[sub_idx]
-    ids_sub = ids_sel[sub_idx]
-    if n > _MAX_POINTS:
-        st.caption(
-            f"Showing {_MAX_POINTS:,} of {n:,} domains "
-            f"(seeded random downsample for plot perf)."
-        )
+    return {
+        "x_sub": x_full[sub_idx],
+        "y_sub": y_full[sub_idx],
+        "ids_sub": flake_ids[sub_idx],
+        "rgb_sub": rgb_visible[sub_idx],
+        "n_total": np.int64(n_total),
+        "n_visible": np.int64(n_visible),
+    }
 
+
+def _cluster_colors_for_ids(
+    ids: np.ndarray, cluster_assign: Optional[Dict[int, int]]
+) -> np.ndarray:
+    """Map each domain id to its cluster colour (or neutral gray)."""
     if cluster_assign:
-        base_colors = np.array([
+        return np.array([
             CLUSTER_PALETTE[cluster_assign[int(fid)] % len(CLUSTER_PALETTE)]
             if int(fid) in cluster_assign and cluster_assign[int(fid)] >= 0
             else NEUTRAL_GRAY
-            for fid in ids_sub
+            for fid in ids
         ])
-    else:
-        base_colors = np.full(len(ids_sub), NEUTRAL_GRAY)
+    return np.full(len(ids), NEUTRAL_GRAY)
+
+
+def _render_clu_2d_scatter(
+    arrays: Dict[str, np.ndarray],
+    state: _brushing.BrushingState,
+    cluster_assign: Optional[Dict[int, int]],
+    x_axis: str,
+    y_axis: str,
+    *,
+    height: int = 520,
+) -> None:
+    """Configurable 2D scatter for the Clustering tab body."""
+    x_sub = arrays["x_sub"]
+    y_sub = arrays["y_sub"]
+    ids_sub = arrays["ids_sub"]
+    n_total = int(arrays["n_total"])
+    n_visible = int(arrays["n_visible"])
+
+    base_colors = _cluster_colors_for_ids(ids_sub, cluster_assign)
+
+    if n_total > n_visible:
+        st.caption(
+            f"Showing {n_visible:,} accepted of {n_total:,} domains "
+            f"(rest filtered out by selector commit)."
+        )
+    if n_visible > _MAX_POINTS:
+        st.caption(
+            f"Downsampled to {_MAX_POINTS:,} of {n_visible:,} accepted "
+            f"domains (selected ids always kept)."
+        )
 
     selected = state.selected_ids
     dragmode = _brushing.get_dragmode(state)
     interaction = state.interaction_mode
-    pane_hint = (
-        "click to select · drag to pan · scroll to zoom"
-        if interaction == _brushing.INTERACTION_SINGLE
-        else "lasso/box to brush · scroll to zoom"
+    if interaction == _brushing.INTERACTION_SINGLE:
+        pane_hint = "click to select · drag to pan · scroll to zoom"
+    elif interaction == _brushing.INTERACTION_ZOOM:
+        pane_hint = "drag a box to zoom in · scroll to zoom · double-click resets"
+    else:
+        pane_hint = "lasso to brush · scroll to zoom"
+
+    suffix = f"{interaction}_{x_axis}_{y_axis}"
+    st.caption(f"{x_axis} vs {y_axis} ({pane_hint})")
+    fig = _brushing.make_2d_scatter(
+        x_sub, y_sub, ids_sub,
+        base_colors=base_colors, selected_ids=selected,
+        x_label=x_axis, y_label=y_axis,
+        height=height,
+        dragmode=dragmode,
     )
+    evt = _brushing.render_scatter(
+        fig, key=f"clu_pane_xy_{suffix}", interaction_mode=interaction,
+    )
+    if _dispatch_event(evt, state):
+        st.rerun()
 
-    # Embed interaction mode in the chart key so Streamlit treats the
-    # chart as a different element when dragmode flips (Task 1 fix —
-    # mirrors the Selector tab logic).
-    suffix = interaction
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.caption("3D R-G-B (display only)")
-        fig3d = _brushing.make_3d_scatter(
-            rgb_sub, ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-        )
-        _brushing.render_scatter(fig3d, key="clu_pane_3d", on_select=False)
-
-    with col2:
-        st.caption(f"R vs G ({pane_hint})")
-        fig_rg = _brushing.make_2d_scatter(
-            rgb_sub[:, 0], rgb_sub[:, 1], ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-            x_label="R", y_label="G",
-            dragmode=dragmode,
-        )
-        evt_rg = _brushing.render_scatter(
-            fig_rg, key=f"clu_pane_rg_{suffix}", interaction_mode=interaction,
-        )
-        if _dispatch_event(evt_rg, state):
-            st.rerun()
-
-    col3, col4 = st.columns(2)
-    with col3:
-        st.caption(f"R vs B ({pane_hint})")
-        fig_rb = _brushing.make_2d_scatter(
-            rgb_sub[:, 0], rgb_sub[:, 2], ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-            x_label="R", y_label="B",
-            dragmode=dragmode,
-        )
-        evt_rb = _brushing.render_scatter(
-            fig_rb, key=f"clu_pane_rb_{suffix}", interaction_mode=interaction,
-        )
-        if _dispatch_event(evt_rb, state):
-            st.rerun()
-
-    with col4:
-        st.caption(f"G vs B ({pane_hint})")
-        fig_gb = _brushing.make_2d_scatter(
-            rgb_sub[:, 1], rgb_sub[:, 2], ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-            x_label="G", y_label="B",
-            dragmode=dragmode,
-        )
-        evt_gb = _brushing.render_scatter(
-            fig_gb, key=f"clu_pane_gb_{suffix}", interaction_mode=interaction,
-        )
-        if _dispatch_event(evt_gb, state):
-            st.rerun()
+def _render_clu_3d_rgb(
+    arrays: Dict[str, np.ndarray],
+    state: _brushing.BrushingState,
+    cluster_assign: Optional[Dict[int, int]],
+    *,
+    height: int = 520,
+) -> None:
+    """3D R-G-B context pane (display only)."""
+    rgb_sub = arrays["rgb_sub"]
+    ids_sub = arrays["ids_sub"]
+    base_colors = _cluster_colors_for_ids(ids_sub, cluster_assign)
+    st.caption("3D R-G-B (display only)")
+    fig3d = _brushing.make_3d_scatter(
+        rgb_sub, ids_sub,
+        base_colors=base_colors, selected_ids=state.selected_ids,
+        height=height,
+    )
+    _brushing.render_scatter(fig3d, key="clu_pane_3d", on_select=False)
 
 
 # ─── Diagnostics + threshold sliders + cluster size chart ────────────────
@@ -502,19 +582,16 @@ def render_clustering_sidebar(
     state: _brushing.BrushingState,
     stats: Dict[str, Any],
     analysis_folder: str,
-) -> None:
+) -> tuple[str, str, bool]:
     """Render the Clustering control drawer in the sidebar.
 
-    Mirrors the Selector tab drawer pattern (commit 1e74935 / v0.2.4):
-    a single ``st.sidebar.expander("⚙ Clustering controls")`` owns the
+    Mirrors the Selector tab drawer (commit 1e74935 / v0.2.4): a single
+    ``st.sidebar.expander("⚙ Clustering controls")`` owns the
     interaction-mode buttons, undo/redo/clear, seed-group authoring,
-    and the Fit GMM button. The tab body keeps just the headline,
-    summary table, 4-pane scatter, and committed-fit diagnostics.
+    axis pickers, optional 3D toggle, and the Fit GMM button.
 
-    Streamlit doesn't natively scope sidebar content per tab; the
-    radio-based tab switcher in ``streamlit_app.py`` ensures only the
-    active tab's render function runs each rerun, so this expander
-    only appears while the Clustering tab is selected.
+    Returns ``(x_axis, y_axis, show_3d)`` so the tab body renders the
+    same scatter the user just configured.
     """
     seed_groups = _ensure_session_seed_groups()
     with st.sidebar.expander("⚙ Clustering controls", expanded=True):
@@ -523,7 +600,27 @@ def render_clustering_sidebar(
         st.caption("**Seed groups**")
         _render_seed_group_panel(stats, state)
         st.divider()
+
+        # Axis pickers + optional 3D toggle (mirror Selector layout).
+        st.caption("2D scatter axes")
+        x_axis, y_axis = _render_clu_axis_pickers()
+        if "clu.show_3d" not in st.session_state:
+            st.session_state["clu.show_3d"] = False
+        if "clu_show_3d" not in st.session_state:
+            st.session_state["clu_show_3d"] = bool(
+                st.session_state["clu.show_3d"]
+            )
+        show_3d = st.checkbox(
+            "Show 3D RGB",
+            help="Render the 3D R-G-B context pane below the scatter "
+                 "(display only — no lasso events).",
+            key="clu_show_3d",
+            on_change=_on_clu_show_3d_change,
+        )
+        st.divider()
         _render_fit_gmm_button(analysis_folder, seed_groups)
+
+    return x_axis, y_axis, show_3d
 
 
 def render_tab_clustering(
@@ -531,7 +628,15 @@ def render_tab_clustering(
     annotations_path: str,
     analysis_folder: str,
 ) -> None:
-    """Render the Clustering tab."""
+    """Render the Clustering tab.
+
+    Layout (mirrors Selector for consistency):
+        sidebar drawer  ⚙ — mode / seed groups / axes / 3D toggle / Fit
+        body           — 2D scatter ‖ raw image preview
+                         (optional 3D pane below)
+                         seed group summary table
+                         committed-fit thresholds + size chart
+    """
     if not analysis_folder:
         st.warning("Set analysis_folder in sidebar to enable the Clustering tab.")
         return
@@ -570,8 +675,10 @@ def render_tab_clustering(
         f"Re-commit in Selector if its filter / lasso changed since."
     )
 
-    # Sidebar drawer (mode buttons + seed group editor + Fit GMM).
-    render_clustering_sidebar(state, stats, analysis_folder)
+    # Sidebar drawer (mode buttons + seed group editor + axes + Fit GMM).
+    x_axis, y_axis, show_3d = render_clustering_sidebar(
+        state, stats, analysis_folder,
+    )
 
     # Cluster assignment (if previously committed) drives the scatter colors.
     labels = _load_committed_clustering(analysis_folder)
@@ -581,8 +688,41 @@ def render_tab_clustering(
             int(k): int(v) for k, v in labels.get("assignments", {}).items()
         }
 
-    # Tab body: seed group summary table (full-width here, not the
-    # sidebar) → 4-pane scatter → committed-fit diagnostics.
+    arrays = _build_clu_scatter_arrays(stats, state, x_axis, y_axis)
+
+    # Side-by-side: configurable 2D scatter on the left, raw image
+    # preview on the right. Mirrors the Selector body layout.
+    body_l, body_r = st.columns([1, 1])
+    with body_l:
+        if arrays is None:
+            st.info(
+                "Selector commit kept zero domains. Loosen filters or "
+                "re-commit a non-empty Selected set in tab 2."
+            )
+        else:
+            _render_clu_2d_scatter(
+                arrays, state, cluster_assign, x_axis, y_axis, height=520,
+            )
+            st.caption(f"Selected (lasso): {len(state.selected_ids):,}")
+    with body_r:
+        focus = _focus_domain_id(state)
+        render_image_preview(
+            raw_images_dir=raw_images_dir,
+            annotations_path=annotations_path,
+            domain_id=focus,
+            n_selected=len(state.selected_ids),
+            height=520,
+        )
+
+    # Optional 3D pane below the side-by-side row.
+    if show_3d and arrays is not None:
+        st.divider()
+        _render_clu_3d_rgb(arrays, state, cluster_assign, height=520)
+
+    st.divider()
+
+    # Seed group summary table — full-width in the body where there's
+    # room (the sidebar version was too cramped).
     seed_groups = _ensure_session_seed_groups()
     if seed_groups:
         with st.expander(
@@ -593,13 +733,10 @@ def render_tab_clustering(
             )
             st.dataframe(df, width="stretch", height=200)
 
-    _render_4pane_scatter(stats, cluster_assign, state)
-
     # If a fit is on disk, expose thresholds + size chart.
     if labels:
         clustering_entry = manifest.steps.get("clustering")
         if clustering_entry and clustering_entry.completed_at:
-            st.divider()
             st.caption(f"Last fit: {clustering_entry.completed_at}")
         st.divider()
         _render_per_cluster_thresholds(analysis_folder, labels)
