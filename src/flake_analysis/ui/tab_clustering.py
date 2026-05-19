@@ -454,11 +454,11 @@ def render_tab_clustering(
     _brushing.render_wheel_capture()
 
     st.info(
-        "Clustering operates on the **selector-accepted domain set** "
-        "(committed in tab 2). Default mode is Single-pick — click a point "
+        "Clustering operates on the **selector-committed domain set** "
+        "(tab 2 → Commit). Default mode is Single-pick — click a point "
         "to identify it. Switch to Lasso: New / Add / Subtract to build "
-        "seed groups, then click + Add to attach the brush buffer to a "
-        "named group."
+        "seed groups, then click + Add to attach the lasso to a named "
+        "group."
     )
 
     # Prereq gate
@@ -481,10 +481,10 @@ def render_tab_clustering(
     n_sel = int(stats["sel_count"])
     pct_sel = (100.0 * n_sel / n_total) if n_total else 0.0
     st.success(
-        f"✅ Working on selector-accepted set: **{n_sel:,} / {n_total:,} "
+        f"✅ Working on selector-committed set: **{n_sel:,} / {n_total:,} "
         f"domains ({pct_sel:.1f}%)** "
         f"· last commit {selector_entry.completed_at}. "
-        f"Re-commit Selector if you changed filters there."
+        f"Re-commit in Selector if its filter / lasso changed since."
     )
 
     # Mode controls + Undo/Redo/Clear

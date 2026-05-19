@@ -711,20 +711,41 @@ def _focus_domain_id(state: _brushing.BrushingState) -> Optional[int]:
 def _commit_selection(
     analysis_folder: str,
     params: Dict[str, Optional[float]],
+    state: _brushing.BrushingState,
     *,
     button_key: str,
 ) -> None:
     """Render the Commit button + run the selector pipeline step on click.
 
-    Factored out so the same button can appear at the bottom of the
-    sidebar drawer AND at the bottom of the tab body — they share the
-    underlying ``params`` dict computed from the slider state. The
-    distinct ``button_key`` keeps Streamlit happy with two widgets.
+    Commit semantics (clarified per user feedback "commit 시 selected
+    된 게 commit 되어야지"):
+
+    * **Filter pass = Accepted.** Domains passing the 5-metric filter.
+    * **Lasso brush = Selected.** Domains explicitly picked via lasso.
+    * **What gets committed:**
+        - If the brush set is empty → all Accepted domains are written
+          as ``selected=True`` in selection.parquet (legacy behavior;
+          a "filter-only" commit).
+        - If the brush set is non-empty → the intersection
+          (Accepted ∩ Selected) is written as ``selected=True``,
+          everything else ``selected=False``. The intersection prevents
+          the user from accidentally committing brushed domains that
+          their own filter just rejected.
+
+    The pipeline call (which writes the filter-pass result) runs first,
+    then we open the parquet and tighten ``selected`` to the
+    intersection if a brush set exists. Pipeline params + manifest
+    entry are unchanged so the upstream contract for Clustering /
+    Explorer holds.
     """
     if not st.button(
         "✅ Commit selection",
         type="primary",
-        help="Write 03_selector/selection.parquet and update manifest",
+        help=(
+            "Write 03_selector/selection.parquet. If you've lassoed a "
+            "subset, that brush ∩ filter is committed; otherwise the "
+            "full filter-accepted set is committed."
+        ),
         key=button_key,
     ):
         return
@@ -742,10 +763,25 @@ def _commit_selection(
             progress_callback=cb,
             **params,
         )
+
+        # Apply the brush intersection on top of the filter pass.
+        # Pipeline-written selection.parquet has columns
+        # ``domain_id`` / ``selected``; we tighten ``selected`` to
+        # accept ∩ brush when the brush set is non-empty.
+        sel_path = Path(str(result["output_path"]))
+        n_committed = int(result["selected_count"])
+        if state.selected_ids:
+            df = pd.read_parquet(sel_path)
+            brush_arr = np.fromiter(state.selected_ids, dtype=np.int64)
+            in_brush = df["domain_id"].astype(np.int64).isin(brush_arr)
+            df["selected"] = df["selected"].astype(bool) & in_brush
+            df.to_parquet(sel_path, index=False)
+            n_committed = int(df["selected"].sum())
+
         progress_bar.progress(1.0, "Done")
         st.success(
-            f"Selection committed: {result['selected_count']:,} / "
-            f"{result['total_count']:,} domains -> {result['output_path']}"
+            f"Committed {n_committed:,} / {result['total_count']:,} "
+            f"domains → {sel_path.name}"
         )
         st.rerun()
     except Exception as e:
@@ -809,16 +845,22 @@ def render_selector_sidebar(
         pct = (100.0 * n_accepted / n_total) if n_total else 0.0
         selected_ids = state.selected_ids
 
-        # Compact one-line counters — `st.metric` clamps to its column
-        # width and the sidebar (~280px) makes the big-font numbers
-        # ellipsize ("15,..."). Markdown lets the numbers stay full
-        # width and wrap naturally if the user shrinks the drawer.
+        # Compact one-line counters. "Accepted" = filter pass.
+        # "Selected" = lasso brush set (what gets committed if non-empty,
+        # otherwise the full Accepted set is committed).
         n_rejected = n_total - n_accepted
+        n_brush = len(selected_ids)
+        will_commit = (
+            n_brush
+            if n_brush > 0
+            else n_accepted
+        )
         st.markdown(
             f"**Accepted** {n_accepted:,} / {n_total:,} "
             f"<span style='color:#43a047'>({pct:.1f}%)</span>  \n"
             f"**Rejected** {n_rejected:,}  \n"
-            f"**Brush selected** {len(selected_ids):,}",
+            f"**Selected** (lasso) {n_brush:,}  \n"
+            f"**Will commit** {will_commit:,} domains",
             unsafe_allow_html=True,
         )
 
@@ -849,7 +891,8 @@ def render_selector_sidebar(
 
         # Mirrored Commit button at the bottom of the drawer.
         _commit_selection(
-            analysis_folder, params, button_key="selector_commit_sidebar",
+            analysis_folder, params, state,
+            button_key="selector_commit_sidebar",
         )
 
     return params, accept_mask, x_axis, y_axis, show_3d
@@ -883,10 +926,11 @@ def render_tab_selector(
     _brushing.render_wheel_capture()
 
     st.info(
-        "Default mode is Single-pick: left-click a point to focus one domain. "
-        "Switch to Lasso: New / Add / Subtract from the sidebar drawer to "
-        "brush selections (New replaces, Add unions, Subtract removes). "
-        "Pop open the Flake list expander to row-click for image preview."
+        "**Workflow:** filter (5-metric sliders) narrows the candidate set to "
+        "**Accepted**; lasso further picks individual domains as **Selected**. "
+        "**Commit** writes Selected to ``selection.parquet`` (or, if no lasso "
+        "is active, all Accepted). Clustering / Explorer downstream consume "
+        "what was committed here."
     )
 
     stats = _load_stats_npz(analysis_folder)
@@ -927,7 +971,7 @@ def render_tab_selector(
             )
         else:
             _render_2d_scatter(arrays, state, x_axis, y_axis, height=520)
-            st.caption(f"Brush selected: {len(selected_ids):,}")
+            st.caption(f"Selected (lasso): {len(selected_ids):,}")
 
     with body_col_r:
         focus = _focus_domain_id(state)
@@ -962,5 +1006,6 @@ def render_tab_selector(
     if selector_entry and selector_entry.completed_at:
         st.caption(f"Last commit: {selector_entry.completed_at}")
     _commit_selection(
-        analysis_folder, params, button_key="selector_commit_body",
+        analysis_folder, params, state,
+        button_key="selector_commit_body",
     )
