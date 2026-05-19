@@ -334,6 +334,15 @@ _BTN_UNDO = "Undo"
 _BTN_REDO = "Redo"
 _BTN_CLEAR = "Clear"
 
+# Compact labels for the narrow-sidebar layout. The keyboard-shortcut JS
+# matches by ``innerText`` so we use these only when ``compact=True`` and
+# the shortcut layer is disabled in the sidebar context anyway.
+_BTN_SINGLE_C = "Single"
+_BTN_LASSO_REPLACE_C = "Replace"
+_BTN_LASSO_ADD_C = "Add"
+_BTN_LASSO_SUBTRACT_C = "Subtract"
+_BTN_ZOOM_C = "Zoom"
+
 
 def _is_active_single(state: BrushingState) -> bool:
     return state.interaction_mode == INTERACTION_SINGLE
@@ -347,16 +356,143 @@ def _is_active_zoom(state: BrushingState) -> bool:
     return state.interaction_mode == INTERACTION_ZOOM
 
 
-def render_mode_controls(state: BrushingState, key_prefix: str) -> None:
+def _render_mode_controls_compact(
+    state: BrushingState, key_prefix: str,
+) -> None:
+    """Sidebar-friendly mode controls — 2-column grid + stacked history row.
+
+    The narrow sidebar (~280px) can't hold 5 mode buttons in a single row
+    without each label wrapping vertically. This compact variant uses a
+    2x3 grid with shorter labels and stacks the Undo/Redo/Clear row + the
+    status caption underneath.
+    """
+    # Mode grid: 2 cols × 3 rows (Single / Replace / Add / Subtract / Zoom / blank).
+    row1 = st.columns(2)
+    with row1[0]:
+        if st.button(
+            _BTN_SINGLE_C,
+            key=f"{key_prefix}_mode_single",
+            type="primary" if _is_active_single(state) else "secondary",
+            help="Left-click selects one point; left-drag pans (S)",
+            use_container_width=True,
+        ):
+            set_interaction_mode(state, INTERACTION_SINGLE)
+            st.rerun()
+    with row1[1]:
+        if st.button(
+            f"L: {_BTN_LASSO_REPLACE_C}",
+            key=f"{key_prefix}_mode_lasso_replace",
+            type="primary" if _is_active_lasso(state, MODE_REPLACE) else "secondary",
+            help="Lasso drag replaces selection (L)",
+            use_container_width=True,
+        ):
+            set_interaction_mode(state, INTERACTION_LASSO)
+            state.mode = MODE_REPLACE
+            st.rerun()
+
+    row2 = st.columns(2)
+    with row2[0]:
+        if st.button(
+            f"L: {_BTN_LASSO_ADD_C}",
+            key=f"{key_prefix}_mode_lasso_add",
+            type="primary" if _is_active_lasso(state, MODE_ADD) else "secondary",
+            help="Lasso adds to current selection (A)",
+            use_container_width=True,
+        ):
+            set_interaction_mode(state, INTERACTION_LASSO)
+            state.mode = MODE_ADD
+            st.rerun()
+    with row2[1]:
+        if st.button(
+            f"L: {_BTN_LASSO_SUBTRACT_C}",
+            key=f"{key_prefix}_mode_lasso_subtract",
+            type="primary" if _is_active_lasso(state, MODE_SUBTRACT) else "secondary",
+            help="Lasso subtracts from current selection (D)",
+            use_container_width=True,
+        ):
+            set_interaction_mode(state, INTERACTION_LASSO)
+            state.mode = MODE_SUBTRACT
+            st.rerun()
+
+    row3 = st.columns(2)
+    with row3[0]:
+        if st.button(
+            _BTN_ZOOM_C,
+            key=f"{key_prefix}_mode_zoom",
+            type="primary" if _is_active_zoom(state) else "secondary",
+            help="Box drag zooms in (Z)",
+            use_container_width=True,
+        ):
+            set_interaction_mode(state, INTERACTION_ZOOM)
+            st.rerun()
+
+    if _is_active_single(state):
+        active_label = "Single-pick"
+    elif _is_active_zoom(state):
+        active_label = "Zoom"
+    else:
+        active_label = f"Lasso · {state.mode}"
+    st.caption(
+        f"**{active_label}** · selected={len(state.selected_ids):,} · "
+        f"history={len(state.history)} · redo={len(state.redo_stack)}"
+    )
+
+    # History row: 3 equal columns (no caption — already shown above).
+    h_cols = st.columns(3)
+    with h_cols[0]:
+        if st.button(
+            _BTN_UNDO,
+            key=f"{key_prefix}_undo",
+            help="Undo last selection change (Ctrl/Cmd+Z)",
+            disabled=not state.history,
+            use_container_width=True,
+        ):
+            undo(state)
+            st.rerun()
+    with h_cols[1]:
+        if st.button(
+            _BTN_REDO,
+            key=f"{key_prefix}_redo",
+            help="Redo (Ctrl/Cmd+Shift+Z)",
+            disabled=not state.redo_stack,
+            use_container_width=True,
+        ):
+            redo(state)
+            st.rerun()
+    with h_cols[2]:
+        if st.button(
+            _BTN_CLEAR,
+            key=f"{key_prefix}_clear",
+            help="Clear current selection (Esc)",
+            disabled=not state.selected_ids,
+            use_container_width=True,
+        ):
+            clear_selection(state)
+            st.rerun()
+
+
+def render_mode_controls(
+    state: BrushingState, key_prefix: str, *, compact: bool = False,
+) -> None:
     """Render interaction-mode buttons + Undo/Redo/Clear + status caption.
 
-    Top row: Single-pick / Lasso: Replace / Lasso: Add / Lasso: Subtract.
-    Bottom row: Undo / Redo / Clear / status caption.
+    Wide layout (``compact=False``): mode buttons in a single 5-column
+    row plus a caption column. Used in tab-body contexts where there's
+    plenty of horizontal room.
 
-    The buttons use stable ASCII labels (see ``_BTN_*``) so the keyboard
-    shortcut JS (``render_keyboard_shortcuts``) can match them by
-    ``innerText`` reliably.
+    Compact layout (``compact=True``): mode buttons in a 2-column grid
+    (3 rows) with shorter labels — sized for the ~280px sidebar drawer
+    where 5 columns made each label wrap character-by-character.
+
+    The button labels in wide mode are the stable ASCII strings
+    (``_BTN_SINGLE`` etc.) that the keyboard-shortcut JS matches against
+    by ``innerText``. The compact labels drop the shortcut hints since
+    the shortcut layer is disabled in the sidebar anyway.
     """
+    if compact:
+        _render_mode_controls_compact(state, key_prefix)
+        return
+
     # Row 1: interaction-mode buttons.
     cols = st.columns([1, 1, 1, 1, 1, 2])
     with cols[0]:

@@ -99,23 +99,36 @@ _METRIC_DEFS = (
 
 
 def _render_filter_controls() -> Dict[str, Optional[float]]:
-    """Render 5-metric range sliders. Returns params dict.
+    """Render 5-metric range sliders + numeric inputs. Returns params dict.
 
-    Each slider returns a ``(min, max)`` tuple. We persist the canonical
-    user values in non-widget keys ``filter.<metric>_min`` /
-    ``filter.<metric>_max`` (commit bfad752): on every render we read
-    from those keys to seed the slider's ``value=`` arg, then write the
-    new tuple back so the next rerun rehydrates correctly. Streamlit GCs
-    widget-owned keys (``sel_<metric>_range``) when the script run that
-    instantiated them rebuilds the widget — a mode-button click triggers
-    such a rerun, which is why we mirror values into the ``filter.*``
-    keys to survive the rebuild.
+    Each metric exposes both a range slider (coarse drag) and two
+    ``number_input`` boxes (precise typing). Slider and inputs share the
+    same canonical store keys (``filter.<metric>_min`` /
+    ``filter.<metric>_max``) so editing either widget syncs the other on
+    the next rerun.
+
+    Two-key persistence pattern (commit bfad752):
+        * ``filter.<metric>_<min|max>``  — canonical, non-widget, GC-safe.
+        * ``sel_<metric>_range``          — slider widget key.
+        * ``sel_<metric>_<min|max>_input`` — number-input widget keys.
+
+    On every render we hydrate the widgets from the canonical store,
+    then mirror the post-edit values back. Streamlit GCs widget-owned
+    keys whenever the script run that instantiated them rebuilds the
+    widget (e.g. mode-button click), so the canonical store is what
+    actually survives reruns.
 
     Sentinel-None semantics: when ``mn`` equals the metric's default
     minimum (i.e. the user has not pushed the lower bound up), we set
     ``params[<metric>_min] = None`` so :func:`_apply_filter` skips that
     bound entirely. Same for the max bound. This keeps the "user hasn't
     touched this bound" signal that the pipeline expects.
+
+    Conflict resolution: if the user edits the slider and the number
+    input in the same rerun (impossible — Streamlit only emits one
+    change at a time), we'd prefer the slider; in practice the user
+    edits one at a time and the canonical store reflects the latest
+    edit before the other widget hydrates.
     """
     st.subheader("5-metric filter")
 
@@ -135,6 +148,7 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
         if cur_min > cur_max:
             cur_min, cur_max = cur_max, cur_min
 
+        # Range slider (coarse).
         mn, mx = st.slider(
             label,
             min_value=float(lo),
@@ -144,11 +158,49 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
             format=fmt,
             key=f"sel_{key}_range",
         )
-        st.session_state[store_min] = float(mn)
-        st.session_state[store_max] = float(mx)
+        # Numeric inputs (precise typing). Step matches the slider.
+        in_cols = st.columns(2)
+        with in_cols[0]:
+            mn_typed = st.number_input(
+                "min",
+                min_value=float(lo),
+                max_value=float(hi),
+                value=float(mn),
+                step=float(step),
+                format=fmt,
+                key=f"sel_{key}_min_input",
+                label_visibility="collapsed",
+            )
+        with in_cols[1]:
+            mx_typed = st.number_input(
+                "max",
+                min_value=float(lo),
+                max_value=float(hi),
+                value=float(mx),
+                step=float(step),
+                format=fmt,
+                key=f"sel_{key}_max_input",
+                label_visibility="collapsed",
+            )
 
-        params[f"{key}_min"] = float(mn) if mn != mn_default else None
-        params[f"{key}_max"] = float(mx) if mx != mx_default else None
+        # Reconcile slider vs. number-input edits. Whichever differs
+        # from the canonical store wins; if both differ (only possible
+        # if the user typed a value into the input then dragged the
+        # slider — Streamlit serialises these), the slider wins because
+        # its tuple was rendered first.
+        eff_min, eff_max = float(mn), float(mx)
+        if abs(mn_typed - cur_min) > 1e-9 and abs(mn - cur_min) <= 1e-9:
+            eff_min = float(mn_typed)
+        if abs(mx_typed - cur_max) > 1e-9 and abs(mx - cur_max) <= 1e-9:
+            eff_max = float(mx_typed)
+        if eff_min > eff_max:
+            eff_min, eff_max = eff_max, eff_min
+
+        st.session_state[store_min] = float(eff_min)
+        st.session_state[store_max] = float(eff_max)
+
+        params[f"{key}_min"] = float(eff_min) if eff_min != mn_default else None
+        params[f"{key}_max"] = float(eff_max) if eff_max != mx_default else None
 
     return params
 
@@ -159,6 +211,8 @@ def _clear_filter_session_keys() -> None:
         st.session_state[f"filter.{key}_min"] = float(mn_default)
         st.session_state[f"filter.{key}_max"] = float(mx_default)
         st.session_state.pop(f"sel_{key}_range", None)
+        st.session_state.pop(f"sel_{key}_min_input", None)
+        st.session_state.pop(f"sel_{key}_max_input", None)
 
 
 # ─── Axis pickers ───────────────────────────────────────────────────────
@@ -651,7 +705,10 @@ def render_selector_sidebar(
     """
     with st.sidebar.expander("⚙ Selector controls", expanded=True):
         # Mode controls + Undo/Redo/Clear (selection history).
-        _brushing.render_mode_controls(state, "selector")
+        # compact=True reflows the 5-button row into a 2x3 grid + stacked
+        # history row so labels don't wrap character-by-character in the
+        # narrow ~280px sidebar.
+        _brushing.render_mode_controls(state, "selector", compact=True)
 
         # Filter presets.
         col_a, col_b = st.columns(2)
