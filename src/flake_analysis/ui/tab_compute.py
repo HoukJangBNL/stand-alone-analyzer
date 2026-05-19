@@ -34,40 +34,42 @@ def render_tab_compute(
         )
 
     if run_all:
-        # Run All combines step-level meta-progress (1/3, 2/3, 3/3) with the
-        # per-step inner progress emitted by flake_analysis.core. The combined pct
-        # is ``(step_idx + inner_pct) / total_steps`` so the bar fills
-        # smoothly across the whole pipeline.
-        overall = st.progress(0.0, "Starting...")
-        status = st.empty()
-        TOTAL = 3
+        # Three separate progress bars — one per step. Each shows its own
+        # 0% → 100% so the user can see which step is currently active and
+        # how far each one got. The earlier "combined" single-bar UX was
+        # ambiguous about which step was running.
+        st.markdown("**1. Background**")
+        bg_bar = st.progress(0.0, "Pending...")
+        st.markdown("**2. Domain Stats**")
+        ds_bar = st.progress(0.0, "Pending...")
+        st.markdown("**3. Domain Proximity**")
+        dp_bar = st.progress(0.0, "Pending...")
 
-        def make_combined(step_idx: int):
+        def make_cb(bar):
             def cb(pct: float, msg: str) -> None:
-                combined = (step_idx + pct) / TOTAL
-                label = f"Step {step_idx + 1}/{TOTAL}: {msg}"
-                overall.progress(combined, label)
-                status.caption(label)
+                bar.progress(pct, msg)
             return cb
 
         try:
             run_background_step(
                 raw_images_dir=raw_images_dir,
                 analysis_folder=analysis_folder,
-                progress_callback=make_combined(0),
+                progress_callback=make_cb(bg_bar),
             )
+            bg_bar.progress(1.0, "Done")
             run_domain_stats_step(
                 raw_images_dir=raw_images_dir,
                 annotations_path=annotations_path,
                 analysis_folder=analysis_folder,
-                progress_callback=make_combined(1),
+                progress_callback=make_cb(ds_bar),
             )
+            ds_bar.progress(1.0, "Done")
             run_domain_proximity_step(
                 annotations_path=annotations_path,
                 analysis_folder=analysis_folder,
-                progress_callback=make_combined(2),
+                progress_callback=make_cb(dp_bar),
             )
-            overall.progress(1.0, "All compute steps completed.")
+            dp_bar.progress(1.0, "Done")
             st.success("All 3 compute steps completed.")
             st.rerun()
         except Exception as e:
