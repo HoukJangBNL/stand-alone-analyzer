@@ -146,80 +146,97 @@ def _render_seed_group_panel(
     stats: Dict[str, Any],
     state: _brushing.BrushingState,
 ) -> None:
-    """Seed group management UI: Add / Remove / Rename / Clear All."""
+    """Seed group management UI — vertical layout for the sidebar drawer.
+
+    Three small sections (Add / Edit / Clear), each on its own row so
+    labels don't collide in the narrow ~280px drawer width. The summary
+    table moves to the tab body where there's room for it; the sidebar
+    just shows a compact "N groups, M total domains" caption.
+    """
     seed_groups = _ensure_session_seed_groups()
-    st.subheader("Seed groups")
+    selected_ids = state.selected_ids
 
     if seed_groups:
-        df = _seed_groups_to_table(
-            seed_groups, stats["repr_rgbs"], stats["flake_ids"]
-        )
-        st.dataframe(df, width="stretch", height=200)
+        n_groups = len(seed_groups)
+        n_total = sum(len(g.get("domain_ids", [])) for g in seed_groups)
+        st.caption(f"**{n_groups}** group(s) · **{n_total:,}** total domain(s)")
     else:
-        st.caption("No seed groups yet. Brush domains in the scatter, then click + Add.")
+        st.caption("No seed groups yet. Lasso domains then click + Add.")
 
-    selected_ids = state.selected_ids
-    st.caption(f"Brush buffer: {len(selected_ids)} domain(s) ready to add (mode={state.mode}).")
+    st.caption(
+        f"Lasso buffer: **{len(selected_ids):,}** domain(s) "
+        f"(mode={state.mode})"
+    )
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        new_name = st.text_input(
-            "New group name",
-            key="cluster_new_name",
-            placeholder="e.g. graphite",
-        )
-        if st.button("+ Add", key="cluster_add_group"):
-            if not new_name:
-                st.warning("Enter a group name first.")
-            elif not selected_ids:
-                st.warning("Brush some domains in the scatter first.")
-            elif any(g.get("name") == new_name for g in seed_groups):
-                st.warning(f"Group '{new_name}' already exists.")
-            else:
-                seed_groups.append({
-                    "name": new_name,
-                    "domain_ids": sorted(int(i) for i in selected_ids),
-                })
-                _brushing.clear_selection(state)
-                st.rerun()
-
-    names = [g["name"] for g in seed_groups]
-    with col2:
-        if names:
-            target = st.selectbox(
-                "Group", names, key="cluster_target_group"
-            )
-            if st.button("− Remove", key="cluster_remove_group"):
-                seed_groups[:] = [g for g in seed_groups if g["name"] != target]
-                st.rerun()
+    # Add row.
+    new_name = st.text_input(
+        "New group name",
+        key="cluster_new_name",
+        placeholder="e.g. graphite",
+    )
+    if st.button("+ Add group", key="cluster_add_group", use_container_width=True):
+        if not new_name:
+            st.warning("Enter a group name first.")
+        elif not selected_ids:
+            st.warning("Lasso some domains first.")
+        elif any(g.get("name") == new_name for g in seed_groups):
+            st.warning(f"Group '{new_name}' already exists.")
         else:
-            st.caption("(no groups to remove)")
-
-    with col3:
-        if names:
-            target_r = st.selectbox(
-                "Rename target", names, key="cluster_rename_target"
-            )
-            new_n = st.text_input(
-                "New name", key="cluster_rename_new"
-            )
-            if st.button("✏ Rename", key="cluster_rename_btn"):
-                if not new_n:
-                    st.warning("Enter a new name.")
-                else:
-                    for g in seed_groups:
-                        if g["name"] == target_r:
-                            g["name"] = new_n
-                            break
-                    st.rerun()
-        else:
-            st.caption("(no groups to rename)")
-
-    with col4:
-        if st.button("↺ Clear All", key="cluster_clear_all"):
-            seed_groups.clear()
+            seed_groups.append({
+                "name": new_name,
+                "domain_ids": sorted(int(i) for i in selected_ids),
+            })
             _brushing.clear_selection(state)
             st.rerun()
+
+    # Edit row (rename / remove a target group).
+    names = [g["name"] for g in seed_groups]
+    if names:
+        target = st.selectbox(
+            "Edit group",
+            names,
+            key="cluster_target_group",
+        )
+        new_n = st.text_input(
+            "Rename to",
+            key="cluster_rename_new",
+            placeholder="(leave blank to remove)",
+        )
+        edit_cols = st.columns(2)
+        with edit_cols[0]:
+            if st.button(
+                "✏ Rename",
+                key="cluster_rename_btn",
+                use_container_width=True,
+                disabled=not new_n,
+            ):
+                for g in seed_groups:
+                    if g["name"] == target:
+                        g["name"] = new_n
+                        break
+                st.rerun()
+        with edit_cols[1]:
+            if st.button(
+                "− Remove",
+                key="cluster_remove_group",
+                use_container_width=True,
+            ):
+                seed_groups[:] = [
+                    g for g in seed_groups if g["name"] != target
+                ]
+                st.rerun()
+    else:
+        st.caption("(add a group to enable edit / remove)")
+
+    if st.button(
+        "↺ Clear all groups",
+        key="cluster_clear_all",
+        use_container_width=True,
+        disabled=not seed_groups,
+    ):
+        seed_groups.clear()
+        _brushing.clear_selection(state)
+        st.rerun()
 
 
 # ─── 4-pane scatter ──────────────────────────────────────────────────────
@@ -439,6 +456,76 @@ def _render_cluster_sizes(labels: Dict[str, Any]) -> None:
 
 # ─── Top-level renderer ──────────────────────────────────────────────────
 
+def _render_fit_gmm_button(
+    analysis_folder: str, seed_groups: List[Dict[str, Any]]
+) -> None:
+    """Fit GMM button — sidebar drawer only."""
+    can_fit = len(seed_groups) >= 2
+    if not can_fit:
+        st.caption("Need ≥2 seed groups to fit.")
+
+    if not st.button(
+        "▶ Fit GMM",
+        type="primary",
+        disabled=not can_fit,
+        key="clu_fit",
+        use_container_width=True,
+    ):
+        return
+
+    progress_bar = st.progress(0.0, "Starting...")
+    status = st.empty()
+
+    def cb(pct: float, msg: str) -> None:
+        progress_bar.progress(pct, msg)
+        status.caption(msg)
+
+    try:
+        result = run_clustering_step(
+            analysis_folder=analysis_folder,
+            seed_groups=seed_groups,
+            progress_callback=cb,
+        )
+        progress_bar.progress(1.0, "Done")
+        _render_diagnostics(result)
+        st.success(
+            f"GMM fitted: {result.get('n_clusters', '?')} clusters · "
+            f"assigned={result.get('n_assigned', '?')} · "
+            f"unassigned={result.get('n_unassigned', '?')}"
+        )
+        st.rerun()
+    except Exception as e:
+        st.error(str(e))
+
+
+def render_clustering_sidebar(
+    state: _brushing.BrushingState,
+    stats: Dict[str, Any],
+    analysis_folder: str,
+) -> None:
+    """Render the Clustering control drawer in the sidebar.
+
+    Mirrors the Selector tab drawer pattern (commit 1e74935 / v0.2.4):
+    a single ``st.sidebar.expander("⚙ Clustering controls")`` owns the
+    interaction-mode buttons, undo/redo/clear, seed-group authoring,
+    and the Fit GMM button. The tab body keeps just the headline,
+    summary table, 4-pane scatter, and committed-fit diagnostics.
+
+    Streamlit doesn't natively scope sidebar content per tab; the
+    radio-based tab switcher in ``streamlit_app.py`` ensures only the
+    active tab's render function runs each rerun, so this expander
+    only appears while the Clustering tab is selected.
+    """
+    seed_groups = _ensure_session_seed_groups()
+    with st.sidebar.expander("⚙ Clustering controls", expanded=True):
+        _brushing.render_mode_controls(state, "clustering", compact=True)
+        st.divider()
+        st.caption("**Seed groups**")
+        _render_seed_group_panel(stats, state)
+        st.divider()
+        _render_fit_gmm_button(analysis_folder, seed_groups)
+
+
 def render_tab_clustering(
     raw_images_dir: str,
     annotations_path: str,
@@ -450,15 +537,11 @@ def render_tab_clustering(
         return
 
     state = _brushing.get_brushing_state("clustering")
-    _brushing.render_keyboard_shortcuts()
-    _brushing.render_wheel_capture()
 
     st.info(
         "Clustering operates on the **selector-committed domain set** "
-        "(tab 2 → Commit). Default mode is Single-pick — click a point "
-        "to identify it. Switch to Lasso: New / Add / Subtract to build "
-        "seed groups, then click + Add to attach the lasso to a named "
-        "group."
+        "(tab 2 → Commit). Build seed groups in the sidebar drawer, "
+        "then click ▶ Fit GMM."
     )
 
     # Prereq gate
@@ -487,13 +570,8 @@ def render_tab_clustering(
         f"Re-commit in Selector if its filter / lasso changed since."
     )
 
-    # Mode controls + Undo/Redo/Clear
-    _brushing.render_mode_controls(state, "clustering")
-
-    # Seed group authoring
-    _render_seed_group_panel(stats, state)
-
-    st.divider()
+    # Sidebar drawer (mode buttons + seed group editor + Fit GMM).
+    render_clustering_sidebar(state, stats, analysis_folder)
 
     # Cluster assignment (if previously committed) drives the scatter colors.
     labels = _load_committed_clustering(analysis_folder)
@@ -503,51 +581,25 @@ def render_tab_clustering(
             int(k): int(v) for k, v in labels.get("assignments", {}).items()
         }
 
-    # 4-pane scatter
-    _render_4pane_scatter(stats, cluster_assign, state)
-
-    st.divider()
-
-    # Fit GMM
+    # Tab body: seed group summary table (full-width here, not the
+    # sidebar) → 4-pane scatter → committed-fit diagnostics.
     seed_groups = _ensure_session_seed_groups()
-    can_fit = len(seed_groups) >= 2
-    if not can_fit:
-        st.caption("Need at least 2 seed groups before fitting.")
-
-    if st.button(
-        "▶ Fit GMM",
-        type="primary",
-        disabled=not can_fit,
-        key="clu_fit",
-    ):
-        progress_bar = st.progress(0.0, "Starting...")
-        status = st.empty()
-
-        def cb(pct: float, msg: str) -> None:
-            progress_bar.progress(pct, msg)
-            status.caption(msg)
-
-        try:
-            result = run_clustering_step(
-                analysis_folder=analysis_folder,
-                seed_groups=seed_groups,
-                progress_callback=cb,
+    if seed_groups:
+        with st.expander(
+            f"Seed groups ({len(seed_groups)})", expanded=True
+        ):
+            df = _seed_groups_to_table(
+                seed_groups, stats["repr_rgbs"], stats["flake_ids"]
             )
-            progress_bar.progress(1.0, "Done")
-            _render_diagnostics(result)
-            st.success(
-                f"GMM fitted: {result.get('n_clusters', '?')} clusters · "
-                f"assigned={result.get('n_assigned', '?')} · "
-                f"unassigned={result.get('n_unassigned', '?')}"
-            )
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
+            st.dataframe(df, width="stretch", height=200)
+
+    _render_4pane_scatter(stats, cluster_assign, state)
 
     # If a fit is on disk, expose thresholds + size chart.
     if labels:
         clustering_entry = manifest.steps.get("clustering")
         if clustering_entry and clustering_entry.completed_at:
+            st.divider()
             st.caption(f"Last fit: {clustering_entry.completed_at}")
         st.divider()
         _render_per_cluster_thresholds(analysis_folder, labels)

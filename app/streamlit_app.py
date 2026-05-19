@@ -53,17 +53,28 @@ raw_images_dir, annotations_path, analysis_folder = render_sidebar()
 
 st.title("Stand-Alone Analyzer")
 
-tab_names = ["1. Compute", "2. Selector", "3. Clustering", "4. Explorer"]
-tabs = st.tabs(tab_names)
+# Use a top-level radio selector instead of ``st.tabs`` so that only
+# the active tab's body and its sidebar drawer render. ``st.tabs``
+# evaluates every tab body each rerun, which made the Selector tab's
+# sidebar drawer leak into the Clustering / Explorer views (user
+# feedback: "셀렉터에서 쓰던 사이드바가 그대로 넘어오는데 탭마다
+# 다르게 되어야 하지 않을까"). Radio also persists the active tab via
+# its session_state key so reruns don't bounce the user back to "1.
+# Compute".
+TAB_NAMES = ("1. Compute", "2. Selector", "3. Clustering", "4. Explorer")
+active_tab = st.radio(
+    "Active tab",
+    TAB_NAMES,
+    horizontal=True,
+    label_visibility="collapsed",
+    key="active_tab",
+)
 
-with tabs[0]:
+if active_tab == TAB_NAMES[0]:
     render_tab_compute(raw_images_dir, annotations_path, analysis_folder)
-
-with tabs[1]:
+elif active_tab == TAB_NAMES[1]:
     render_tab_selector(raw_images_dir, annotations_path, analysis_folder)
-
-with tabs[2]:
+elif active_tab == TAB_NAMES[2]:
     render_tab_clustering(raw_images_dir, annotations_path, analysis_folder)
-
-with tabs[3]:
+elif active_tab == TAB_NAMES[3]:
     render_tab_explorer(raw_images_dir, annotations_path, analysis_folder)
