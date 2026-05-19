@@ -1,6 +1,33 @@
 """stand-alone-analyzer Streamlit entry point (M2 PR 2.5 — Explorer tab wired)."""
 from __future__ import annotations
+import os
+import sys
 import streamlit as st
+
+# Print version + commit at startup so the user can confirm which build is
+# running. Goes to the streamlit terminal, not the browser. Suppressed if
+# STAND_ALONE_NO_BANNER=1.
+if not os.environ.get("STAND_ALONE_NO_BANNER"):
+    try:
+        from flake_analysis import __version__ as _ver
+    except Exception:
+        _ver = "?"
+    _commit = "?"
+    try:
+        import subprocess
+        _commit = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        pass
+    print(
+        f"[stand-alone-analyzer] starting v{_ver} (commit {_commit})",
+        file=sys.stderr,
+        flush=True,
+    )
 
 from flake_analysis.ui.sidebar import render_sidebar
 from flake_analysis.ui.tab_clustering import render_tab_clustering
