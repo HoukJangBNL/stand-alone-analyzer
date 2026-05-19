@@ -128,9 +128,17 @@ def _seed_groups_to_table(
     rgb: np.ndarray,
     ids: np.ndarray,
 ) -> pd.DataFrame:
-    """5-column summary: name, count, mean_r, mean_g, mean_b."""
+    """Per-row seed group summary with the palette colour leading.
+
+    Columns: ``color`` (hex code from :data:`CLUSTER_PALETTE`, matched
+    to the scatter so the user can match a row to its visual cluster),
+    ``name``, ``count``, ``mean_r/g/b``. The colour comes from the row
+    index (matches :func:`_seed_colors_for_ids`) so the dataframe and
+    scatter agree.
+    """
     rows: List[Dict[str, Any]] = []
-    for g in seed_groups:
+    for g_idx, g in enumerate(seed_groups):
+        color = CLUSTER_PALETTE[g_idx % len(CLUSTER_PALETTE)]
         ids_g = list(g.get("domain_ids", []))
         if ids_g:
             mask = np.isin(ids, ids_g)
@@ -140,14 +148,16 @@ def _seed_groups_to_table(
         if idx.size > 0:
             mean_rgb = rgb[idx].mean(axis=0)
             rows.append({
+                "color": color,
                 "name": g.get("name", "?"),
                 "count": int(len(ids_g)),
-                "mean_r": round(float(mean_rgb[0]), 1),
-                "mean_g": round(float(mean_rgb[1]), 1),
-                "mean_b": round(float(mean_rgb[2]), 1),
+                "mean_r": round(float(mean_rgb[0]), 3),
+                "mean_g": round(float(mean_rgb[1]), 3),
+                "mean_b": round(float(mean_rgb[2]), 3),
             })
         else:
             rows.append({
+                "color": color,
                 "name": g.get("name", "?"),
                 "count": int(len(ids_g)),
                 "mean_r": 0.0,
@@ -375,23 +385,76 @@ def _cluster_colors_for_ids(
     return np.full(len(ids), NEUTRAL_GRAY)
 
 
+def _seed_colors_for_ids(
+    ids: np.ndarray, seed_groups: List[Dict[str, Any]]
+) -> np.ndarray:
+    """Colour each domain id by its seed-group membership.
+
+    Each named group gets its slot in :data:`CLUSTER_PALETTE` (so the
+    pre-fit seed colours and the post-fit cluster colours are
+    visually consistent). Domains not in any group stay neutral gray.
+    The first group keyed by name (sorted by insertion order) gets
+    palette[0] etc.; if a domain appears in multiple groups (rare,
+    user-error case), the LAST group wins so the visible colour
+    matches the table's "owning" row.
+    """
+    color_arr = np.full(len(ids), NEUTRAL_GRAY, dtype=object)
+    if not seed_groups:
+        return color_arr
+    id_to_idx = {int(fid): i for i, fid in enumerate(ids)}
+    for g_idx, g in enumerate(seed_groups):
+        c = CLUSTER_PALETTE[g_idx % len(CLUSTER_PALETTE)]
+        for d in g.get("domain_ids", []):
+            i = id_to_idx.get(int(d))
+            if i is not None:
+                color_arr[i] = c
+    return color_arr
+
+
+def _edit_group_member_ids(
+    seed_groups: List[Dict[str, Any]],
+) -> Set[int]:
+    """Domain ids belonging to the group currently picked in the
+    "Edit group" selectbox. Empty set when no group is picked or the
+    selectbox hasn't been rendered yet."""
+    target = st.session_state.get("cluster_target_group")
+    if not target:
+        return set()
+    for g in seed_groups:
+        if g.get("name") == target:
+            return {int(d) for d in g.get("domain_ids", [])}
+    return set()
+
+
 def _render_clu_2d_scatter(
     arrays: Dict[str, np.ndarray],
     state: _brushing.BrushingState,
     cluster_assign: Optional[Dict[int, int]],
+    seed_groups: List[Dict[str, Any]],
+    edit_group_ids: Set[int],
     x_axis: str,
     y_axis: str,
     *,
     height: int = 520,
 ) -> None:
-    """Configurable 2D scatter for the Clustering tab body."""
+    """Configurable 2D scatter for the Clustering tab body.
+
+    Colour priority: cluster assignment (post-Fit) → seed-group
+    membership (pre-Fit) → neutral gray. Highlight ring (orange) goes
+    on the union of the user's lasso brush and the currently picked
+    "Edit group" so the user can see exactly which points belong to
+    the group they're about to rename / remove.
+    """
     x_sub = arrays["x_sub"]
     y_sub = arrays["y_sub"]
     ids_sub = arrays["ids_sub"]
     n_total = int(arrays["n_total"])
     n_visible = int(arrays["n_visible"])
 
-    base_colors = _cluster_colors_for_ids(ids_sub, cluster_assign)
+    if cluster_assign:
+        base_colors = _cluster_colors_for_ids(ids_sub, cluster_assign)
+    else:
+        base_colors = _seed_colors_for_ids(ids_sub, seed_groups)
 
     if n_total > n_visible:
         st.caption(
@@ -404,7 +467,8 @@ def _render_clu_2d_scatter(
             f"domains (selected ids always kept)."
         )
 
-    selected = state.selected_ids
+    # Union: lasso brush + edit-group members → orange highlight ring.
+    highlight = set(state.selected_ids) | set(edit_group_ids)
     dragmode = _brushing.get_dragmode(state)
     interaction = state.interaction_mode
     if interaction == _brushing.INTERACTION_SINGLE:
@@ -418,7 +482,7 @@ def _render_clu_2d_scatter(
     st.caption(f"{x_axis} vs {y_axis} ({pane_hint})")
     fig = _brushing.make_2d_scatter(
         x_sub, y_sub, ids_sub,
-        base_colors=base_colors, selected_ids=selected,
+        base_colors=base_colors, selected_ids=highlight,
         x_label=x_axis, y_label=y_axis,
         height=height,
         dragmode=dragmode,
@@ -434,17 +498,24 @@ def _render_clu_3d_rgb(
     arrays: Dict[str, np.ndarray],
     state: _brushing.BrushingState,
     cluster_assign: Optional[Dict[int, int]],
+    seed_groups: List[Dict[str, Any]],
+    edit_group_ids: Set[int],
     *,
     height: int = 520,
 ) -> None:
-    """3D R-G-B context pane (display only)."""
+    """3D R-G-B context pane (display only). Same colour / highlight
+    logic as the 2D scatter."""
     rgb_sub = arrays["rgb_sub"]
     ids_sub = arrays["ids_sub"]
-    base_colors = _cluster_colors_for_ids(ids_sub, cluster_assign)
+    if cluster_assign:
+        base_colors = _cluster_colors_for_ids(ids_sub, cluster_assign)
+    else:
+        base_colors = _seed_colors_for_ids(ids_sub, seed_groups)
+    highlight = set(state.selected_ids) | set(edit_group_ids)
     st.caption("3D R-G-B (display only)")
     fig3d = _brushing.make_3d_scatter(
         rgb_sub, ids_sub,
-        base_colors=base_colors, selected_ids=state.selected_ids,
+        base_colors=base_colors, selected_ids=highlight,
         height=height,
     )
     _brushing.render_scatter(fig3d, key="clu_pane_3d", on_select=False)
@@ -689,6 +760,9 @@ def render_tab_clustering(
         }
 
     arrays = _build_clu_scatter_arrays(stats, state, x_axis, y_axis)
+    seed_groups = _ensure_session_seed_groups()
+    edit_group_ids = _edit_group_member_ids(seed_groups)
+    edit_target = st.session_state.get("cluster_target_group")
 
     # Side-by-side: configurable 2D scatter on the left, raw image
     # preview on the right. Mirrors the Selector body layout.
@@ -701,9 +775,16 @@ def render_tab_clustering(
             )
         else:
             _render_clu_2d_scatter(
-                arrays, state, cluster_assign, x_axis, y_axis, height=520,
+                arrays, state, cluster_assign, seed_groups, edit_group_ids,
+                x_axis, y_axis, height=520,
             )
-            st.caption(f"Selected (lasso): {len(state.selected_ids):,}")
+            cap_parts = [f"Selected (lasso): {len(state.selected_ids):,}"]
+            if edit_target and edit_group_ids:
+                cap_parts.append(
+                    f"Editing group **{edit_target}** "
+                    f"({len(edit_group_ids):,} domains, orange ring)"
+                )
+            st.caption(" · ".join(cap_parts))
     with body_r:
         focus = _focus_domain_id(state)
         render_image_preview(
@@ -717,21 +798,45 @@ def render_tab_clustering(
     # Optional 3D pane below the side-by-side row.
     if show_3d and arrays is not None:
         st.divider()
-        _render_clu_3d_rgb(arrays, state, cluster_assign, height=520)
+        _render_clu_3d_rgb(
+            arrays, state, cluster_assign, seed_groups, edit_group_ids,
+            height=520,
+        )
 
     st.divider()
 
     # Seed group summary table — full-width in the body where there's
     # room (the sidebar version was too cramped).
-    seed_groups = _ensure_session_seed_groups()
     if seed_groups:
         with st.expander(
             f"Seed groups ({len(seed_groups)})", expanded=True
         ):
             df = _seed_groups_to_table(
-                seed_groups, stats["repr_rgbs"], stats["flake_ids"]
+                seed_groups, stats["repr_rgbs"], stats["flake_ids"],
             )
-            st.dataframe(df, width="stretch", height=200)
+            # Style: paint the ``color`` cell with its hex value as
+            # background (swatch), bold the ``name`` of the edit
+            # target so the user can match a scatter colour back to
+            # the table row.
+            def _style_color_swatch(val: str) -> str:
+                return (
+                    f"background-color: {val}; color: {val};"
+                )
+
+            def _style_edit_target(s: pd.Series) -> List[str]:
+                if edit_target and s.get("name") == edit_target:
+                    return ["font-weight: 700; background-color: #fff3cd;"] * len(s)
+                return [""] * len(s)
+
+            # ``Styler.applymap`` was deprecated in pandas 2.1+; use
+            # the cell-wise ``map`` method.
+            styler = df.style
+            cell_map = getattr(styler, "map", None) or styler.applymap
+            styled = (
+                cell_map(_style_color_swatch, subset=["color"])
+                .apply(_style_edit_target, axis=1)
+            )
+            st.dataframe(styled, width="stretch", height=240)
 
     # If a fit is on disk, expose thresholds + size chart.
     if labels:
