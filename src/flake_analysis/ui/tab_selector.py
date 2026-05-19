@@ -225,6 +225,10 @@ def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
             state.focus_id = None
             return True
         return False
+    if state.interaction_mode == _brushing.INTERACTION_ZOOM:
+        # Zoom mode emits no selection events; Plotly handles the
+        # viewport change internally via dragmode="zoom".
+        return False
     return _brushing.handle_selection_event(event, state)
 
 
@@ -326,11 +330,12 @@ def _render_2d_scatter(
     selected = state.selected_ids
     dragmode = _brushing.get_dragmode(state)
     interaction = state.interaction_mode
-    pane_hint = (
-        "click to select · drag to pan · scroll to zoom"
-        if interaction == _brushing.INTERACTION_SINGLE
-        else "lasso/box to brush · scroll to zoom"
-    )
+    if interaction == _brushing.INTERACTION_SINGLE:
+        pane_hint = "click to select · drag to pan · scroll to zoom"
+    elif interaction == _brushing.INTERACTION_ZOOM:
+        pane_hint = "drag a box to zoom in · scroll to zoom · double-click resets"
+    else:
+        pane_hint = "lasso to brush · scroll to zoom"
 
     # Embed interaction mode + axis pair in the chart key so Streamlit
     # treats axis swaps + dragmode flips as fresh widgets and doesn't

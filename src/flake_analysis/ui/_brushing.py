@@ -59,7 +59,8 @@ HISTORY_MAX = 20
 
 INTERACTION_SINGLE = "single"
 INTERACTION_LASSO = "lasso"
-ALL_INTERACTION_MODES = (INTERACTION_SINGLE, INTERACTION_LASSO)
+INTERACTION_ZOOM = "zoom"
+ALL_INTERACTION_MODES = (INTERACTION_SINGLE, INTERACTION_LASSO, INTERACTION_ZOOM)
 
 
 # ─── Plotly defaults ─────────────────────────────────────────────────────
@@ -238,8 +239,13 @@ def get_dragmode(state: BrushingState) -> str:
 
     * ``"pan"`` for single-pick (left-drag pans, left-click selects 1 pt)
     * ``"lasso"`` for lasso mode (left-drag draws lasso)
+    * ``"zoom"`` for zoom mode (left-drag draws box → zoom in)
     """
-    return "lasso" if state.interaction_mode == INTERACTION_LASSO else "pan"
+    if state.interaction_mode == INTERACTION_LASSO:
+        return "lasso"
+    if state.interaction_mode == INTERACTION_ZOOM:
+        return "zoom"
+    return "pan"
 
 
 # ─── Selection event extraction ─────────────────────────────────────────
@@ -324,6 +330,7 @@ _BTN_SINGLE = "Single-pick (S)"
 _BTN_LASSO_REPLACE = "Lasso: Replace"
 _BTN_LASSO_ADD = "Lasso: Add (A)"
 _BTN_LASSO_SUBTRACT = "Lasso: Subtract (D)"
+_BTN_ZOOM = "Zoom (Z)"
 _BTN_UNDO = "Undo"
 _BTN_REDO = "Redo"
 _BTN_CLEAR = "Clear"
@@ -337,6 +344,10 @@ def _is_active_lasso(state: BrushingState, sub_mode: str) -> bool:
     return state.interaction_mode == INTERACTION_LASSO and state.mode == sub_mode
 
 
+def _is_active_zoom(state: BrushingState) -> bool:
+    return state.interaction_mode == INTERACTION_ZOOM
+
+
 def render_mode_controls(state: BrushingState, key_prefix: str) -> None:
     """Render interaction-mode buttons + Undo/Redo/Clear + status caption.
 
@@ -348,7 +359,7 @@ def render_mode_controls(state: BrushingState, key_prefix: str) -> None:
     ``innerText`` reliably.
     """
     # Row 1: interaction-mode buttons.
-    cols = st.columns([1, 1, 1, 1, 2])
+    cols = st.columns([1, 1, 1, 1, 1, 2])
     with cols[0]:
         if st.button(
             _BTN_SINGLE,
@@ -363,7 +374,7 @@ def render_mode_controls(state: BrushingState, key_prefix: str) -> None:
             _BTN_LASSO_REPLACE,
             key=f"{key_prefix}_mode_lasso_replace",
             type="primary" if _is_active_lasso(state, MODE_REPLACE) else "secondary",
-            help="Lasso/box drag replaces selection (L or R)",
+            help="Lasso drag replaces selection (L)",
         ):
             set_interaction_mode(state, INTERACTION_LASSO)
             state.mode = MODE_REPLACE
@@ -389,11 +400,21 @@ def render_mode_controls(state: BrushingState, key_prefix: str) -> None:
             state.mode = MODE_SUBTRACT
             st.rerun()
     with cols[4]:
-        active_label = (
-            "Single-pick"
-            if _is_active_single(state)
-            else f"Lasso · {state.mode}"
-        )
+        if st.button(
+            _BTN_ZOOM,
+            key=f"{key_prefix}_mode_zoom",
+            type="primary" if _is_active_zoom(state) else "secondary",
+            help="Box drag zooms in (Z)",
+        ):
+            set_interaction_mode(state, INTERACTION_ZOOM)
+            st.rerun()
+    with cols[5]:
+        if _is_active_single(state):
+            active_label = "Single-pick"
+        elif _is_active_zoom(state):
+            active_label = "Zoom"
+        else:
+            active_label = f"Lasso · {state.mode}"
         st.caption(
             f"Mode: **{active_label}** · "
             f"selected={len(state.selected_ids):,} · "
@@ -635,12 +656,25 @@ def render_scatter(
                 key=key,
             )
 
-    # Lasso mode — original behavior.
+    if interaction_mode == INTERACTION_ZOOM:
+        # Zoom mode: no selection events. Plotly draws a zoom box from the
+        # left-drag and applies it as the new viewport. Modebar reset
+        # (autoscale) restores full view.
+        return st.plotly_chart(
+            fig,
+            config=SHARED_PLOTLY_CONFIG,
+            use_container_width=True,
+            key=key,
+        )
+
+    # Lasso mode — restrict to lasso only so the box drag is dedicated to
+    # the Zoom mode (a separate interaction_mode) instead of being a
+    # second way to brush.
     return st.plotly_chart(
         fig,
         config=SHARED_PLOTLY_CONFIG,
         on_select="rerun",
-        selection_mode=("lasso", "box"),
+        selection_mode=("lasso",),
         use_container_width=True,
         key=key,
     )
@@ -718,6 +752,9 @@ _KEYBOARD_JS = """
         clickByLabel('Lasso: Add (A)');
       } else if (lower === 'd') {
         clickByLabel('Lasso: Subtract (D)');
+      } else if (lower === 'z') {
+        // Z → enter zoom mode (left-drag draws a zoom box).
+        clickByLabel('Zoom (Z)');
       } else if (lower === 'b') {
         // B → toggle boundary overlay in the image preview. The
         // button's label flips between "Boundary on (B)" and
@@ -748,6 +785,7 @@ def render_keyboard_shortcuts() -> None:
     ``L``                        Lasso mode (defaults to Replace; press again to reset to Replace)
     ``A``                        Lasso sub-mode: Add
     ``D``                        Lasso sub-mode: Delete/Subtract
+    ``Z``                        Zoom mode (left-drag draws zoom box)
     ``B``                        Toggle image-preview boundary overlay
     ``?``                        Open the keyboard shortcuts cheat-sheet
     ``Esc``                      Clear selection
@@ -801,6 +839,7 @@ _SHORTCUTS_MARKDOWN = """
 - `L` — Lasso mode (Replace)
 - `A` — Lasso: Add to current selection
 - `D` — Lasso: Subtract from current selection
+- `Z` — Zoom mode (left-drag draws a zoom box)
 
 **Selection**
 

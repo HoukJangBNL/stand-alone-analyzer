@@ -236,6 +236,9 @@ def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
             state.focus_id = None
             return True
         return False
+    if state.interaction_mode == _brushing.INTERACTION_ZOOM:
+        # Zoom mode: Plotly handles the viewport change; no selection events.
+        return False
     return _brushing.handle_selection_event(event, state)
 
 
