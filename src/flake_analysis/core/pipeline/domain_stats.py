@@ -213,12 +213,25 @@ def run_domain_stats(
     # which does not match the user's hardcoded output_path. Resolve by
     # writing the canonical artifact at output_path explicitly.
     flake_ids = np.array([f.flake_id for f in flakes], dtype=np.int64)
+    # Persist sam2 score from each flake's metadata so the Selector tab can
+    # filter on it. RLEFlake exposes the FlakeMetadata as ``_metadata``;
+    # fixture/test objects sometimes use a public ``metadata`` attribute.
+    def _flake_score(f) -> float:
+        meta = getattr(f, "_metadata", None) or getattr(f, "metadata", None)
+        if meta is None:
+            return 1.0
+        try:
+            return float(getattr(meta, "score", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            return 1.0
+    sam2 = np.array([_flake_score(f) for f in flakes], dtype=np.float32)
     np.savez(
         output_path,
         repr_rgbs=result["repr_rgbs"],
         std_pcts=result["std_pcts"],
         areas=result["areas"],
         flake_ids=flake_ids,
+        sam2=sam2,
     )
     msg.info(
         f"[pipeline.domain_stats] wrote {len(flake_ids)} domain rows to {output_path}"

@@ -233,7 +233,9 @@ def compute_and_cache_stats_from_flakes(
         data = np.load(cache_file, allow_pickle=True)
 
         # flake_ids 키가 있는 새 캐시만 사용 (레거시 mask_paths 캐시는 miss)
-        if "flake_ids" in data:
+        # Also require sam2 — older caches predate the sam2 column and we need
+        # to invalidate them so the rewrite below populates sam2.
+        if "flake_ids" in data and "sam2" in data:
             cached_ids = set(data["flake_ids"])
             current_ids = {f.flake_id for f in flakes}
 
@@ -256,7 +258,7 @@ def compute_and_cache_stats_from_flakes(
                     "areas": areas,
                 }
 
-        msg.info("[STATS] Cache mismatch, recomputing...")
+        msg.info("[STATS] Cache mismatch (or pre-sam2 cache), recomputing...")
 
     # Load or compute median background
     median_background = None
