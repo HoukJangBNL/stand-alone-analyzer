@@ -275,22 +275,53 @@ def build_image_preview_figure(
     crop: Image.Image,
     crop_mask: Optional[np.ndarray],
     show_boundary: bool,
+    *,
+    full_image: Optional[Image.Image] = None,
+    crop_box: Optional[Tuple[int, int, int, int]] = None,
 ):
-    """Build a Plotly Figure displaying ``crop`` with optional boundary.
+    """Build a Plotly Figure for a raw image preview with bbox-zoomed viewport.
+
+    When ``full_image`` and ``crop_box`` are supplied (preferred), the
+    figure shows the *entire* raw image but starts zoomed in to the
+    crop_box region. Zooming out reveals the rest of the FOV instead of
+    just empty padding around the cropped tile (the previous behavior).
+
+    Falling back to the legacy ``crop``-only signature still works for
+    callers that haven't migrated yet.
 
     Pure function (no Streamlit calls) so it can be smoke-tested.
-
-    The y-axis is reversed by ``px.imshow`` so the image origin sits in
-    the top-left exactly like a normal raster viewer; contour points
-    therefore overlay in image-pixel coordinates without a manual flip.
     """
     import plotly.express as px
     import plotly.graph_objects as go
 
-    arr = np.asarray(crop)
+    if full_image is not None and crop_box is not None:
+        arr = np.asarray(full_image)
+        x0, y0, x1, y1 = crop_box
+        # Contour offset converts crop-coord points back into image coords.
+        contour_offset = (x0, y0)
+        # Initial viewport — Plotly y-axis is reversed for px.imshow, so
+        # the higher y value (y1, bottom of image) is the lower bound.
+        initial_xrange = [x0, x1]
+        initial_yrange = [y1, y0]
+    else:
+        arr = np.asarray(crop)
+        contour_offset = (0, 0)
+        initial_xrange = None
+        initial_yrange = None
+
     fig = px.imshow(arr)
-    fig.update_xaxes(showticklabels=False, showgrid=False, zeroline=False)
-    fig.update_yaxes(showticklabels=False, showgrid=False, zeroline=False)
+    fig.update_xaxes(
+        showticklabels=False,
+        showgrid=False,
+        zeroline=False,
+        range=initial_xrange,
+    )
+    fig.update_yaxes(
+        showticklabels=False,
+        showgrid=False,
+        zeroline=False,
+        range=initial_yrange,
+    )
     fig.update_layout(
         margin=dict(l=0, r=0, t=0, b=0),
         dragmode="pan",
@@ -298,9 +329,10 @@ def build_image_preview_figure(
     )
 
     if show_boundary and crop_mask is not None:
+        ox, oy = contour_offset
         for contour in contours_for_mask(crop_mask):
-            xs = contour[:, 0].tolist()
-            ys = contour[:, 1].tolist()
+            xs = (contour[:, 0] + ox).tolist()
+            ys = (contour[:, 1] + oy).tolist()
             fig.add_trace(
                 go.Scatter(
                     x=xs,
@@ -390,7 +422,21 @@ def render_image_preview(
             st.session_state[_BOUNDARY_KEY] = not show_boundary
             st.rerun()
 
-    fig = build_image_preview_figure(crop, crop_mask, show_boundary)
+    # Show the full raw image so the user can zoom out into the rest of
+    # the FOV, rather than into empty padding around just the cropped tile.
+    full_image: Optional[Image.Image] = None
+    crop_box = info.get("crop_box")
+    try:
+        full_image = Image.open(info["image_path"])
+    except Exception:
+        full_image = None
+    fig = build_image_preview_figure(
+        crop,
+        crop_mask,
+        show_boundary,
+        full_image=full_image,
+        crop_box=tuple(crop_box) if crop_box is not None else None,
+    )
 
     suffix = f" (focus of {n_selected} selected)" if n_selected > 1 else ""
     st.caption(
