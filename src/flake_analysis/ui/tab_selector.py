@@ -1,21 +1,28 @@
-"""Selector tab — single 2D scatter (axis-pickable) + filter + flake list.
+"""Selector tab — sidebar-driven controls + side-by-side scatter / image preview.
 
 The 5-metric filter is the actual selection contract; the lasso/box
 brushing is for cross-pane inspection only and does not modify metric
 ranges.
 
-v0.2.1 layout overhaul:
+v0.2.2 layout overhaul (UX consultant Plan A — three quick wins):
 
-* The historic 4-pane (3D RGB + R-G + R-B + G-B) was replaced by a
-  single 2D scatter with X / Y axis dropdowns. The 3D pane never
-  supported lasso/click selection so removing it is not a functional
-  regression and the user can pick any pair of axes (R/G/B, std_*,
-  area, sam2) from one chart.
-* The raw image preview was moved out of the right column and now sits
-  full-width directly below the scatter at a larger height (600 px) so
-  morphology inspection is the focal point.
-* The flake list moved to the bottom and grew Export buttons for the
-  filtered list and the brush-selected subset (CSV download).
+* **5-metric range sliders** replace the 5×2 grid of ``number_input``
+  pairs. One ``st.slider`` per metric returns ``(min, max)`` and the
+  area footprint shrinks to ~1/5 of the previous 10-widget block.
+  Canonical values still live in non-widget keys (``filter.<metric>_min``
+  / ``filter.<metric>_max``) so values survive mode-button reruns
+  (commit bfad752 regression coverage).
+* **Side-by-side scatter + raw image preview** via ``st.columns([1, 1])``.
+  The 3D R-G-B pane is gated behind a "Show 3D RGB" checkbox (default
+  OFF) and renders below the side-by-side row when enabled.
+* **Sidebar drawer for controls**: mode / undo-redo / filter presets /
+  range sliders / axis pickers / live counters / Commit (mirrored) all
+  move to ``st.sidebar.expander("⚙ Selector controls", expanded=True)``.
+  The tab body now holds only the scatter, image preview, optional 3D
+  pane, the (collapsed) flake list, and a tab-body Commit button.
+* **Flake list collapsed by default** in an ``st.expander("Flake list",
+  expanded=False)`` so the user can pop it open for row-click navigation
+  without it dominating the page.
 
 Mockup reference: ``04_tab_selector.html``.
 """
@@ -92,31 +99,29 @@ _METRIC_DEFS = (
 
 
 def _render_filter_controls() -> Dict[str, Optional[float]]:
-    """Render 5-metric × min/max sliders. Returns params dict.
+    """Render 5-metric range sliders. Returns params dict.
 
-    Pre-seeds session_state with defaults exactly once per session so the
-    sliders bind purely by ``key=``. Passing ``value=`` AND ``key=`` made
-    Streamlit reset the widget back to the default on every rerun (e.g.
-    when the user clicks a mode button), wiping any filter ranges the
-    user had typed in. Pre-seeding keeps user edits sticky across reruns.
+    Each slider returns a ``(min, max)`` tuple. We persist the canonical
+    user values in non-widget keys ``filter.<metric>_min`` /
+    ``filter.<metric>_max`` (commit bfad752): on every render we read
+    from those keys to seed the slider's ``value=`` arg, then write the
+    new tuple back so the next rerun rehydrates correctly. Streamlit GCs
+    widget-owned keys (``sel_<metric>_range``) when the script run that
+    instantiated them rebuilds the widget — a mode-button click triggers
+    such a rerun, which is why we mirror values into the ``filter.*``
+    keys to survive the rebuild.
+
+    Sentinel-None semantics: when ``mn`` equals the metric's default
+    minimum (i.e. the user has not pushed the lower bound up), we set
+    ``params[<metric>_min] = None`` so :func:`_apply_filter` skips that
+    bound entirely. Same for the max bound. This keeps the "user hasn't
+    touched this bound" signal that the pipeline expects.
     """
     st.subheader("5-metric filter")
 
-    # We persist filter values in NON-widget keys (``filter.<metric>_min``)
-    # because Streamlit garbage-collects widget keys (``sel_<metric>_min``)
-    # whenever the script run that owned them does not re-instantiate the
-    # widget. Mode-button clicks trigger a rerun whose ScriptRunner pass
-    # apparently treats the about-to-be-rebuilt sliders as "not yet seen",
-    # so it discards the prior widget state entry — the user's typed value
-    # vanishes. Mirroring the value into a plain ``filter.*`` key sidesteps
-    # that GC: we read from ``filter.*`` to populate the widget's value=
-    # argument, and on every render we copy the widget output back into
-    # ``filter.*`` so subsequent reruns can rehydrate.
-
-    cols = st.columns(5)
     params: Dict[str, Optional[float]] = {}
 
-    for i, (key, label, lo, hi, mn_default, mx_default, step, fmt) in enumerate(_METRIC_DEFS):
+    for key, label, lo, hi, mn_default, mx_default, step, fmt in _METRIC_DEFS:
         store_min = f"filter.{key}_min"
         store_max = f"filter.{key}_max"
         if store_min not in st.session_state:
@@ -124,32 +129,26 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
         if store_max not in st.session_state:
             st.session_state[store_max] = float(mx_default)
 
-        with cols[i]:
-            st.caption(label)
-            mn = st.number_input(
-                f"{key} min",
-                min_value=float(lo),
-                max_value=float(hi),
-                value=float(st.session_state[store_min]),
-                step=float(step),
-                format=fmt,
-                key=f"sel_{key}_min",
-            )
-            mx = st.number_input(
-                f"{key} max",
-                min_value=float(lo),
-                max_value=float(hi),
-                value=float(st.session_state[store_max]),
-                step=float(step),
-                format=fmt,
-                key=f"sel_{key}_max",
-            )
-            # Persist back so the next rerun rehydrates from filter.*
-            st.session_state[store_min] = float(mn)
-            st.session_state[store_max] = float(mx)
+        cur_min = float(st.session_state[store_min])
+        cur_max = float(st.session_state[store_max])
+        # Streamlit raises if value=(a, b) violates a <= b; clamp defensively.
+        if cur_min > cur_max:
+            cur_min, cur_max = cur_max, cur_min
 
-            params[f"{key}_min"] = mn if mn != mn_default else None
-            params[f"{key}_max"] = mx if mx != mx_default else None
+        mn, mx = st.slider(
+            label,
+            min_value=float(lo),
+            max_value=float(hi),
+            value=(cur_min, cur_max),
+            step=float(step),
+            format=fmt,
+            key=f"sel_{key}_range",
+        )
+        st.session_state[store_min] = float(mn)
+        st.session_state[store_max] = float(mx)
+
+        params[f"{key}_min"] = float(mn) if mn != mn_default else None
+        params[f"{key}_max"] = float(mx) if mx != mx_default else None
 
     return params
 
@@ -159,8 +158,7 @@ def _clear_filter_session_keys() -> None:
     for key, _label, _lo, _hi, mn_default, mx_default, _step, _fmt in _METRIC_DEFS:
         st.session_state[f"filter.{key}_min"] = float(mn_default)
         st.session_state[f"filter.{key}_max"] = float(mx_default)
-        st.session_state.pop(f"sel_{key}_min", None)
-        st.session_state.pop(f"sel_{key}_max", None)
+        st.session_state.pop(f"sel_{key}_range", None)
 
 
 # ─── Axis pickers ───────────────────────────────────────────────────────
@@ -265,13 +263,15 @@ def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
 
 
 def _render_axis_pickers() -> tuple[str, str]:
-    """Render X / Y axis dropdowns. Returns the picked axis names.
+    """Render X / Y axis dropdowns side-by-side in two columns.
 
     Defaults: X=R, Y=G (matches the most informative pane from the legacy
-    4-pane layout). The widgets occupy the leftmost two columns of a
-    [1, 1, 6] grid so they don't dominate the row.
+    4-pane layout). Designed to be called inside the sidebar drawer where
+    we have a narrow 2-column layout, hence ``[1, 1]`` instead of the
+    earlier ``[1, 1, 6]`` (which had a wide spacer column for the tab
+    body).
     """
-    pick_cols = st.columns([1, 1, 6])
+    pick_cols = st.columns(2)
     with pick_cols[0]:
         x_axis = st.selectbox(
             "X-axis",
@@ -289,30 +289,27 @@ def _render_axis_pickers() -> tuple[str, str]:
     return x_axis, y_axis
 
 
-def _render_2d_scatter(
+def _build_scatter_arrays(
     stats: Dict[str, np.ndarray],
     accept_mask: np.ndarray,
     state: _brushing.BrushingState,
     x_axis: str,
     y_axis: str,
-) -> None:
-    """Single 2D scatter with linked brushing on (x_axis, y_axis).
+) -> Optional[Dict[str, np.ndarray]]:
+    """Compute the visible-and-downsampled arrays used by the 2D + 3D panes.
 
-    Color encoding: green=accepted, red=rejected.
-    Lasso/box-selected points get an orange ring overlay.
+    Both the 2D scatter and the (optional) 3D RGB pane operate on the
+    same accepted-+-selected subset of domains, downsampled identically
+    so a point that appears in one pane appears in the other. Pulling
+    this work out of ``_render_2d_scatter`` lets the 3D pane reuse the
+    arrays without recomputing or risking a divergent downsample.
 
-    The chart's ``dragmode`` follows ``state.interaction_mode``:
-    ``pan`` for single-pick (left-drag pans, click selects 1 pt) and
-    ``lasso`` for lasso mode.
+    Returns ``None`` when nothing is visible (caller renders an info
+    message instead of empty charts).
     """
     flake_ids_all = stats["flake_ids"].astype(np.int64)
     n_total = len(flake_ids_all)
 
-    # Restrict the scatter to ACCEPTED domains only. The user filters with
-    # the 5-metric sliders precisely to focus inspection on the accepted
-    # subset; rejected domains were cluttering the view.
-    # Selected rejected domains are still shown (must_include_ids) so the
-    # user can see what they brushed even after tightening filters.
     visible_mask = accept_mask.copy()
     if state.selected_ids:
         sel_arr = np.fromiter(state.selected_ids, dtype=np.int64)
@@ -321,30 +318,52 @@ def _render_2d_scatter(
     visible_idx = np.where(visible_mask)[0]
     n_visible = len(visible_idx)
     if n_visible == 0:
-        st.info(
-            "No domains pass the current filter. "
-            "Loosen the metric ranges (or click ✓ Select All) to see anything."
-        )
-        return
+        return None
 
     flake_ids = flake_ids_all[visible_idx]
     x_full = _values_for_axis(stats, x_axis)[visible_idx]
     y_full = _values_for_axis(stats, y_axis)[visible_idx]
     accepted_visible = accept_mask[visible_idx]
+    rgb_visible = stats["repr_rgbs"][visible_idx]
 
     sub_idx = _downsample_indices(
         n_visible,
         flake_ids=flake_ids,
         must_include_ids=state.selected_ids,
     )
-    x_sub = x_full[sub_idx]
-    y_sub = y_full[sub_idx]
-    ids_sub = flake_ids[sub_idx]
-    accepted_sub = accepted_visible[sub_idx]
+    return {
+        "x_sub": x_full[sub_idx],
+        "y_sub": y_full[sub_idx],
+        "ids_sub": flake_ids[sub_idx],
+        "accepted_sub": accepted_visible[sub_idx],
+        "rgb_sub": rgb_visible[sub_idx],
+        "n_total": np.int64(n_total),
+        "n_visible": np.int64(n_visible),
+    }
 
-    # Accepted = green; the only non-accepted dots that remain are
-    # selected-but-now-rejected ones — render them in faded amber so
-    # they're visibly distinct from clean accepted points.
+
+def _render_2d_scatter(
+    arrays: Dict[str, np.ndarray],
+    state: _brushing.BrushingState,
+    x_axis: str,
+    y_axis: str,
+    *,
+    height: int = 520,
+) -> None:
+    """Render the configurable 2D scatter alone (no 3D companion).
+
+    The 3D pane is now optional and rendered separately by
+    :func:`_render_3d_rgb` so the side-by-side scatter / image-preview
+    layout introduced in v0.2.2 stays clean.
+    """
+    n_total = int(arrays["n_total"])
+    n_visible = int(arrays["n_visible"])
+    x_sub = arrays["x_sub"]
+    y_sub = arrays["y_sub"]
+    ids_sub = arrays["ids_sub"]
+    accepted_sub = arrays["accepted_sub"]
+
+    # Accepted = green; selected-but-now-rejected = amber.
     base_colors = np.where(accepted_sub, "#43a047", "#fbc02d")
 
     if n_total > n_visible:
@@ -374,38 +393,42 @@ def _render_2d_scatter(
     # replay stale lasso payloads onto the rebuilt figure (Task 1 fix).
     suffix = f"{interaction}_{x_axis}_{y_axis}"
 
-    # Two side-by-side panels: 3D RGB (display only — no lasso events) on
-    # the left, the user-configurable 2D scatter on the right. The 3D
-    # plot orients the user in RGB space; the 2D plot is where actual
-    # selection happens.
-    col_3d, col_2d = st.columns([1, 1])
+    st.caption(f"{x_axis} vs {y_axis} ({pane_hint})")
+    fig = _brushing.make_2d_scatter(
+        x_sub, y_sub, ids_sub,
+        base_colors=base_colors, selected_ids=selected,
+        x_label=x_axis, y_label=y_axis,
+        height=height,
+        dragmode=dragmode,
+    )
+    evt = _brushing.render_scatter(
+        fig, key=f"sel_pane_xy_{suffix}", interaction_mode=interaction,
+    )
+    if _dispatch_event(evt, state):
+        st.rerun()
 
-    rgb_sub_3d = stats["repr_rgbs"][visible_idx][sub_idx]
-    with col_3d:
-        st.caption("3D R-G-B (display only)")
-        fig3d = _brushing.make_3d_scatter(
-            rgb_sub_3d, ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-            height=500,
-        )
-        _brushing.render_scatter(
-            fig3d, key=f"sel_pane_3d_{suffix}", on_select=False,
-        )
 
-    with col_2d:
-        st.caption(f"{x_axis} vs {y_axis} ({pane_hint})")
-        fig = _brushing.make_2d_scatter(
-            x_sub, y_sub, ids_sub,
-            base_colors=base_colors, selected_ids=selected,
-            x_label=x_axis, y_label=y_axis,
-            height=500,
-            dragmode=dragmode,
-        )
-        evt = _brushing.render_scatter(
-            fig, key=f"sel_pane_xy_{suffix}", interaction_mode=interaction,
-        )
-        if _dispatch_event(evt, state):
-            st.rerun()
+def _render_3d_rgb(
+    arrays: Dict[str, np.ndarray],
+    state: _brushing.BrushingState,
+    *,
+    height: int = 520,
+) -> None:
+    """Render the 3D R-G-B context pane (display only, no events)."""
+    rgb_sub = arrays["rgb_sub"]
+    ids_sub = arrays["ids_sub"]
+    accepted_sub = arrays["accepted_sub"]
+    base_colors = np.where(accepted_sub, "#43a047", "#fbc02d")
+
+    st.caption("3D R-G-B (display only)")
+    fig3d = _brushing.make_3d_scatter(
+        rgb_sub, ids_sub,
+        base_colors=base_colors, selected_ids=state.selected_ids,
+        height=height,
+    )
+    _brushing.render_scatter(
+        fig3d, key="sel_pane_3d", on_select=False,
+    )
 
 
 # ─── Flake list table ────────────────────────────────────────────────────
@@ -562,12 +585,153 @@ def _focus_domain_id(state: _brushing.BrushingState) -> Optional[int]:
     return min(state.selected_ids)
 
 
+def _commit_selection(
+    analysis_folder: str,
+    params: Dict[str, Optional[float]],
+    *,
+    button_key: str,
+) -> None:
+    """Render the Commit button + run the selector pipeline step on click.
+
+    Factored out so the same button can appear at the bottom of the
+    sidebar drawer AND at the bottom of the tab body — they share the
+    underlying ``params`` dict computed from the slider state. The
+    distinct ``button_key`` keeps Streamlit happy with two widgets.
+    """
+    if not st.button(
+        "✅ Commit selection",
+        type="primary",
+        help="Write 03_selector/selection.parquet and update manifest",
+        key=button_key,
+    ):
+        return
+
+    progress_bar = st.progress(0.0, "Starting...")
+    status = st.empty()
+
+    def cb(pct: float, msg: str) -> None:
+        progress_bar.progress(pct, msg)
+        status.caption(msg)
+
+    try:
+        result = run_selector_step(
+            analysis_folder=analysis_folder,
+            progress_callback=cb,
+            **params,
+        )
+        progress_bar.progress(1.0, "Done")
+        st.success(
+            f"Selection committed: {result['selected_count']:,} / "
+            f"{result['total_count']:,} domains -> {result['output_path']}"
+        )
+        st.rerun()
+    except Exception as e:
+        st.error(str(e))
+
+
+def render_selector_sidebar(
+    state: _brushing.BrushingState,
+    stats: Dict[str, np.ndarray],
+    analysis_folder: str,
+) -> tuple[Dict[str, Optional[float]], np.ndarray, str, str, bool]:
+    """Render the Selector control drawer in the sidebar.
+
+    Adds an ``st.sidebar.expander("⚙ Selector controls", expanded=True)``
+    that owns: mode buttons, undo/redo/clear, filter presets, the
+    5-metric range sliders, axis pickers, live counters, the "Show 3D
+    RGB" toggle, and a mirrored Commit button.
+
+    Returns ``(params, accept_mask, x_axis, y_axis, show_3d)`` so the
+    tab body can render the scatter + image preview side-by-side using
+    the same filter + axis state the user just configured.
+
+    Streamlit doesn't natively scope sidebar content per tab; this
+    helper is invoked only from :func:`render_tab_selector`, so other
+    tabs never inject this expander.
+    """
+    with st.sidebar.expander("⚙ Selector controls", expanded=True):
+        # Mode controls + Undo/Redo/Clear (selection history).
+        _brushing.render_mode_controls(state, "selector")
+
+        # Filter presets.
+        col_a, col_b = st.columns(2)
+        with col_a:
+            if st.button(
+                "✓ Select All",
+                help="Clear all bounds (accept everything)",
+                key="selector_select_all",
+            ):
+                _clear_filter_session_keys()
+                st.rerun()
+        with col_b:
+            if st.button(
+                "↺ Reset filter",
+                help="Reset filter widgets to defaults",
+                key="selector_reset_filter",
+            ):
+                _clear_filter_session_keys()
+                st.rerun()
+
+        # 5-metric range sliders.
+        params = _render_filter_controls()
+
+        # Live accept/reject preview computed from the just-rendered
+        # filter so the counters reflect the user's most recent edit.
+        accept_mask = _apply_filter(stats, params)
+        n_total = int(len(accept_mask))
+        n_accepted = int(accept_mask.sum())
+        pct = (100.0 * n_accepted / n_total) if n_total else 0.0
+        selected_ids = state.selected_ids
+
+        metric_cols = st.columns(3)
+        with metric_cols[0]:
+            st.metric("Accepted", f"{n_accepted:,} / {n_total:,}", f"{pct:.1f}%")
+        with metric_cols[1]:
+            st.metric("Rejected", f"{n_total - n_accepted:,}")
+        with metric_cols[2]:
+            st.metric("Brush selected", f"{len(selected_ids):,}")
+
+        st.divider()
+
+        # Axis pickers.
+        st.caption("2D scatter axes")
+        x_axis, y_axis = _render_axis_pickers()
+
+        # Optional 3D RGB pane.
+        show_3d = st.checkbox(
+            "Show 3D RGB",
+            value=False,
+            help="Render the 3D R-G-B context pane below the scatter "
+                 "(display only — no lasso events).",
+            key="selector_show_3d",
+        )
+
+        st.divider()
+
+        # Mirrored Commit button at the bottom of the drawer.
+        _commit_selection(
+            analysis_folder, params, button_key="selector_commit_sidebar",
+        )
+
+    return params, accept_mask, x_axis, y_axis, show_3d
+
+
 def render_tab_selector(
     raw_images_dir: str,
     annotations_path: str,
     analysis_folder: str,
 ) -> None:
-    """Render the Selector tab."""
+    """Render the Selector tab.
+
+    v0.2.2 layout:
+
+    * Sidebar drawer holds all controls (mode, undo/redo/clear, filter
+      presets, range sliders, axis pickers, counters, 3D toggle,
+      mirrored Commit).
+    * Tab body shows: top help banner → scatter ‖ raw image preview
+      side-by-side → optional 3D RGB pane → flake list (collapsed) →
+      tab-body Commit.
+    """
     if not analysis_folder:
         st.warning("Set analysis_folder in sidebar to enable the Selector tab.")
         return
@@ -585,7 +749,8 @@ def render_tab_selector(
             "Default mode is Single-pick: left-click a point to focus one domain. "
             "Press L (or click Lasso: Replace) for lasso brushing — "
             "use sub-modes Replace/Add/Subtract (R/A/D) to combine selections. "
-            "Click a row in the flake list at the bottom to drive the image preview."
+            "All controls live in the sidebar drawer (⚙ Selector controls). "
+            "Pop open the Flake list expander to row-click for image preview."
         )
     with help_col:
         _brushing.render_help_button(key="selector_help_btn")
@@ -607,96 +772,61 @@ def render_tab_selector(
 
     st.success(f"✅ Domain Stats ready (last run: {stats_entry.completed_at})")
 
-    # Mode controls + Undo / Redo / Clear (selection history)
-    _brushing.render_mode_controls(state, "selector")
-
-    # Filter preset buttons
-    col_a, col_b, _spacer = st.columns([1, 1, 5])
-    with col_a:
-        if st.button("✓ Select All", help="Clear all bounds (accept everything)"):
-            _clear_filter_session_keys()
-            st.rerun()
-    with col_b:
-        if st.button("↺ Reset filter", help="Reset filter widgets to defaults"):
-            _clear_filter_session_keys()
-            st.rerun()
-
-    # 5-metric filter widgets
-    params = _render_filter_controls()
-
-    # Live accept/reject preview
-    accept_mask = _apply_filter(stats, params)
-    n_total = int(len(accept_mask))
-    n_accepted = int(accept_mask.sum())
-    pct = (100.0 * n_accepted / n_total) if n_total else 0.0
-    selected_ids = state.selected_ids
-
-    metric_cols = st.columns(3)
-    with metric_cols[0]:
-        st.metric("Accepted", f"{n_accepted:,} / {n_total:,}", f"{pct:.1f}%")
-    with metric_cols[1]:
-        st.metric("Rejected", f"{n_total - n_accepted:,}")
-    with metric_cols[2]:
-        st.metric("Brush selected", f"{len(selected_ids):,}")
-
-    st.divider()
-
-    # Axis pickers + single 2D scatter (linked brushing)
-    x_axis, y_axis = _render_axis_pickers()
-    _render_2d_scatter(stats, accept_mask, state, x_axis, y_axis)
-
-    st.caption(f"Brush selected: {len(selected_ids):,}")
-
-    st.divider()
-
-    # Raw image preview — full width, larger height (was implicit ~300).
-    focus = _focus_domain_id(state)
-    render_image_preview(
-        raw_images_dir=raw_images_dir,
-        annotations_path=annotations_path,
-        domain_id=focus,
-        n_selected=len(selected_ids),
-        height=600,
+    # All controls live in the sidebar drawer; this returns the live
+    # filter params + accept_mask + axis picks + 3D-toggle so the body
+    # can render the scatter + image preview without recomputing.
+    params, accept_mask, x_axis, y_axis, show_3d = render_selector_sidebar(
+        state, stats, analysis_folder,
     )
 
+    selected_ids = state.selected_ids
+    arrays = _build_scatter_arrays(stats, accept_mask, state, x_axis, y_axis)
+
+    # Side-by-side: configurable 2D scatter on the left, raw image
+    # preview on the right. Both at height=520 so they line up.
+    body_col_l, body_col_r = st.columns([1, 1])
+    with body_col_l:
+        if arrays is None:
+            st.info(
+                "No domains pass the current filter. "
+                "Loosen the metric ranges (or click ✓ Select All) to see anything."
+            )
+        else:
+            _render_2d_scatter(arrays, state, x_axis, y_axis, height=520)
+            st.caption(f"Brush selected: {len(selected_ids):,}")
+
+    with body_col_r:
+        focus = _focus_domain_id(state)
+        render_image_preview(
+            raw_images_dir=raw_images_dir,
+            annotations_path=annotations_path,
+            domain_id=focus,
+            n_selected=len(selected_ids),
+            height=520,
+        )
+
+    # Optional 3D RGB pane below the side-by-side row. Rendered below
+    # rather than as a third column because (a) 3D plots benefit from
+    # full width, (b) it keeps the side-by-side scatter / image layout
+    # uncluttered when the toggle is off (the default).
+    if show_3d and arrays is not None:
+        st.divider()
+        _render_3d_rgb(arrays, state, height=520)
+
     st.divider()
 
-    # Flake list at the bottom + Export buttons.
-    st.subheader("Flake list")
+    # Flake list collapsed by default — pop it open for row-click navigation.
     df_filtered = build_flake_list_df(stats, accept_mask, selected_ids)
-    _render_export_buttons(df_filtered, state)
-    _render_flake_list(df_filtered, state)
+    with st.expander("Flake list", expanded=False):
+        _render_export_buttons(df_filtered, state)
+        _render_flake_list(df_filtered, state)
 
     st.divider()
 
-    # Commit
+    # Tab-body Commit button (mirror of the sidebar drawer's Commit).
     selector_entry = manifest.steps.get("selector")
     if selector_entry and selector_entry.completed_at:
         st.caption(f"Last commit: {selector_entry.completed_at}")
-
-    if st.button(
-        "✅ Commit selection",
-        type="primary",
-        help="Write 03_selector/selection.parquet and update manifest",
-    ):
-        progress_bar = st.progress(0.0, "Starting...")
-        status = st.empty()
-
-        def cb(pct: float, msg: str) -> None:
-            progress_bar.progress(pct, msg)
-            status.caption(msg)
-
-        try:
-            result = run_selector_step(
-                analysis_folder=analysis_folder,
-                progress_callback=cb,
-                **params,
-            )
-            progress_bar.progress(1.0, "Done")
-            st.success(
-                f"Selection committed: {result['selected_count']:,} / "
-                f"{result['total_count']:,} domains -> {result['output_path']}"
-            )
-            st.rerun()
-        except Exception as e:
-            st.error(str(e))
+    _commit_selection(
+        analysis_folder, params, button_key="selector_commit_body",
+    )
