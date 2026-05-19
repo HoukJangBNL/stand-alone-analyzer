@@ -100,16 +100,30 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
     when the user clicks a mode button), wiping any filter ranges the
     user had typed in. Pre-seeding keeps user edits sticky across reruns.
     """
+    import sys as _sys
     st.subheader("5-metric filter")
 
+    # DEBUG: dump filter widget state on entry, so we can see whether the
+    # values survived the rerun triggered by a mode-button click.
+    pre_state = {f"sel_{k}_min": st.session_state.get(f"sel_{k}_min", "<missing>") for k, *_ in _METRIC_DEFS}
+    pre_state.update({f"sel_{k}_max": st.session_state.get(f"sel_{k}_max", "<missing>") for k, *_ in _METRIC_DEFS})
+    print(f"[DEBUG _render_filter_controls] ENTRY session_state={pre_state}",
+          file=_sys.stderr, flush=True)
+
     # Pre-seed defaults once.
+    seeded = []
     for key, _label, _lo, _hi, mn_default, mx_default, _step, _fmt in _METRIC_DEFS:
         kmn = f"sel_{key}_min"
         kmx = f"sel_{key}_max"
         if kmn not in st.session_state:
             st.session_state[kmn] = float(mn_default)
+            seeded.append(kmn)
         if kmx not in st.session_state:
             st.session_state[kmx] = float(mx_default)
+            seeded.append(kmx)
+    if seeded:
+        print(f"[DEBUG _render_filter_controls] SEEDED {seeded}",
+              file=_sys.stderr, flush=True)
 
     cols = st.columns(5)
     params: Dict[str, Optional[float]] = {}
