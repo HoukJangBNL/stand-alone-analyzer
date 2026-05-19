@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from flake_core.pipeline.domain_stats import run_domain_stats as core_run_domain_stats
+from flake_analysis.core.pipeline.domain_stats import run_domain_stats as core_run_domain_stats
 
 from flake_analysis.state.manifest import (
     StepEntry,

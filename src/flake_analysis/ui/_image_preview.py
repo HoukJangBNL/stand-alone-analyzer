@@ -1,8 +1,8 @@
 """Image preview helper — load raw image + crop to a domain bbox.
 
 Used by ``tab_selector`` to show the raw imagery context for a single
-focused domain. Wraps ``flake_core.annotations.AnnotationsCache`` when
-available, with a json.loads fallback that does not require flake_core.
+focused domain. Wraps ``flake_analysis.core.annotations.AnnotationsCache`` when
+available, with a json.loads fallback that does not require flake_analysis.core.
 
 v0.1.4: switched from ``st.image`` to a Plotly ``px.imshow`` figure so the
 user gets mouse-wheel zoom, click-drag pan, and a native modebar reset.
@@ -36,7 +36,7 @@ def load_annotations_index(
     """Return (annotation_by_id, image_by_id) mappings.
 
     Falls back to ``json.loads`` of the file directly. We keep this
-    independent of ``flake_core`` so the preview helper still works in
+    independent of ``flake_analysis.core`` so the preview helper still works in
     test environments without the full annotations cache machinery.
 
     Parameters

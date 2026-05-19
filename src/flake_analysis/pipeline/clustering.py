@@ -1,13 +1,13 @@
 """App-level pipeline wrapper for Clustering commit.
 
-Wraps ``flake_core.pipeline.clustering.run_clustering`` and updates
+Wraps ``flake_analysis.core.pipeline.clustering.run_clustering`` and updates
 ``manifest.json`` with the clustering StepEntry (params, params_hash,
 upstream input_hashes, output paths, reproducibility).
 
 Per plan v1 r9 §M2 PR 2.4 + §7.1 frozen labels.json schema.
 
 Notes on the core API contract (read from
-``flake-analysis-core/src/flake_core/pipeline/clustering.py``):
+``src/flake_analysis/core/pipeline/clustering.py``):
 
 * The core ``run_clustering`` signature does NOT take ``feature_cols``
   or ``covariance_type`` — RGB-only fitting is the v1 contract.
@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pandas as pd
 
-from flake_core.pipeline.clustering import run_clustering as core_run_clustering
+from flake_analysis.core.pipeline.clustering import run_clustering as core_run_clustering
 
 from flake_analysis.state.hashing import params_hash
 from flake_analysis.state.manifest import StepEntry, load_manifest, save_manifest

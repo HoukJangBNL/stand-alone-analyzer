@@ -1,6 +1,6 @@
 """App-level pipeline wrapper for Selector commit.
 
-Wraps ``flake_core.pipeline.selector.run_selector`` and updates
+Wraps ``flake_analysis.core.pipeline.selector.run_selector`` and updates
 ``manifest.json`` with the selector StepEntry (params, params_hash,
 upstream input_hashes, output paths).
 
@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from flake_core.pipeline.selector import run_selector as core_run_selector
+from flake_analysis.core.pipeline.selector import run_selector as core_run_selector
 
 from flake_analysis.state.hashing import params_hash
 from flake_analysis.state.manifest import StepEntry, load_manifest, save_manifest

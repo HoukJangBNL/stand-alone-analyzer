@@ -1,13 +1,13 @@
 """App-level pipeline wrapper for Background generation.
 
-Calls flake_core.pipeline.background.run_background, then updates manifest.
+Calls flake_analysis.core.pipeline.background.run_background, then updates manifest.
 """
 from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from flake_core.pipeline.background import run_background as core_run_background
+from flake_analysis.core.pipeline.background import run_background as core_run_background
 
 from flake_analysis.state.manifest import (
     StepEntry,

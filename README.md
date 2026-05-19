@@ -4,21 +4,22 @@ A Streamlit app for interactive 2D material flake analysis.
 
 Loads pre-computed segmentation masks (COCO + RLE) and provides a 4-tab pipeline GUI for background generation, color analysis, manual clustering, and label-based filtering.
 
-Built on top of [flake-analysis-core](https://github.com/HoukJangBNL/flake-analysis-core).
+The algorithm core (`flake_analysis.core`) was previously published as a
+separate package, [`flake-analysis-core`](https://github.com/HoukJangBNL/flake-analysis-core).
+It was merged into this repo in v0.2.0 to simplify install (single clone,
+single venv).
 
 ## Status
 
-`v0.1.0` — beta. Single-user desktop tool. No DB, no SSH, no GPU.
+`v0.2.0` — beta. Single-user desktop tool. No DB, no SSH, no GPU.
 
 ## Quick start
 
 ```bash
 # Clone and install
-git clone https://github.com/HoukJangBNL/flake-analysis-core.git
 git clone https://github.com/HoukJangBNL/stand-alone-analyzer.git
 cd stand-alone-analyzer
 python -m venv .venv && source .venv/bin/activate
-pip install -e ../flake-analysis-core
 pip install -e ".[dev]"
 
 # Run

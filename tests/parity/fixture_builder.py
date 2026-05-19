@@ -11,7 +11,7 @@ Layout produced::
             annotations.json   (COCO with N images x 2 RLE-encoded blobs)
 
 The ``segmentation/`` subdir matches the layout expected by
-``flake_core.pipeline.domain_stats.run_domain_stats`` (the parent of the
+``flake_analysis.core.pipeline.domain_stats.run_domain_stats`` (the parent of the
 annotations.json file becomes ``analysis_type``).
 
 Color design

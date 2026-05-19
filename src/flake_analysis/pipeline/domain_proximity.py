@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
-from flake_core.pipeline.domain_proximity import (
+from flake_analysis.core.pipeline.domain_proximity import (
     run_domain_proximity as core_run_domain_proximity,
 )
 

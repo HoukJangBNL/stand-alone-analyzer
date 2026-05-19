@@ -1,6 +1,6 @@
 """Verify each app-level pipeline wrapper forwards ``progress_callback`` to the
-flake_core pipeline wrappers underneath. We don't reach for the inner emission
-points here; we trust the flake_core suite for that. We just check that the
+flake_analysis.core pipeline wrappers underneath. We don't reach for the inner emission
+points here; we trust the flake_analysis.core suite for that. We just check that the
 sequence is non-empty, monotonic, and ends at 1.0.
 
 Plan: end-to-end progress visibility (v0.1.0 -> v0.1.1).

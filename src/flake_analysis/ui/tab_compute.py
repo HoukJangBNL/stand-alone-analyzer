@@ -35,7 +35,7 @@ def render_tab_compute(
 
     if run_all:
         # Run All combines step-level meta-progress (1/3, 2/3, 3/3) with the
-        # per-step inner progress emitted by flake_core. The combined pct
+        # per-step inner progress emitted by flake_analysis.core. The combined pct
         # is ``(step_idx + inner_pct) / total_steps`` so the bar fills
         # smoothly across the whole pipeline.
         overall = st.progress(0.0, "Starting...")

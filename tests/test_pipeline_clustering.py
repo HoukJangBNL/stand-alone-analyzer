@@ -2,7 +2,7 @@
 
 Per plan v1 r9 §M2 PR 2.4 + §7.1 frozen labels.json schema.
 
-The wrapper integrates with ``flake_core.pipeline.clustering.run_clustering``;
+The wrapper integrates with ``flake_analysis.core.pipeline.clustering.run_clustering``;
 these tests build a synthetic 3-cluster fixture (visually distinct RGB
 blobs) and verify:
   * All four output files are written
