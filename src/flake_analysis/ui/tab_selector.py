@@ -92,8 +92,25 @@ _METRIC_DEFS = (
 
 
 def _render_filter_controls() -> Dict[str, Optional[float]]:
-    """Render 5-metric × min/max sliders. Returns params dict."""
+    """Render 5-metric × min/max sliders. Returns params dict.
+
+    Pre-seeds session_state with defaults exactly once per session so the
+    sliders bind purely by ``key=``. Passing ``value=`` AND ``key=`` made
+    Streamlit reset the widget back to the default on every rerun (e.g.
+    when the user clicks a mode button), wiping any filter ranges the
+    user had typed in. Pre-seeding keeps user edits sticky across reruns.
+    """
     st.subheader("5-metric filter")
+
+    # Pre-seed defaults once.
+    for key, _label, _lo, _hi, mn_default, mx_default, _step, _fmt in _METRIC_DEFS:
+        kmn = f"sel_{key}_min"
+        kmx = f"sel_{key}_max"
+        if kmn not in st.session_state:
+            st.session_state[kmn] = float(mn_default)
+        if kmx not in st.session_state:
+            st.session_state[kmx] = float(mx_default)
+
     cols = st.columns(5)
     params: Dict[str, Optional[float]] = {}
 
@@ -104,7 +121,6 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
                 f"{key} min",
                 min_value=float(lo),
                 max_value=float(hi),
-                value=float(mn_default),
                 step=float(step),
                 format=fmt,
                 key=f"sel_{key}_min",
@@ -113,7 +129,6 @@ def _render_filter_controls() -> Dict[str, Optional[float]]:
                 f"{key} max",
                 min_value=float(lo),
                 max_value=float(hi),
-                value=float(mx_default),
                 step=float(step),
                 format=fmt,
                 key=f"sel_{key}_max",

@@ -290,36 +290,47 @@ def handle_selection_event(event: Any, state: BrushingState) -> bool:
 
     Returns True if state was modified (caller should not rerun otherwise).
     """
-    ids = _extract_ids_from_event(event)
-    # DEBUG: trace what Plotly actually returns. Logged to streamlit's
-    # terminal so we can correlate "looks like everything got selected"
-    # with the actual id count + sample of returned ids.
     import sys as _sys
-    if ids is None:
-        print("[DEBUG handle_selection_event] no selection (ids is None)", file=_sys.stderr, flush=True)
-    elif not ids:
-        print("[DEBUG handle_selection_event] empty selection (0 ids)", file=_sys.stderr, flush=True)
-    else:
-        sample = sorted(list(ids))[:5]
-        print(
-            f"[DEBUG handle_selection_event] mode={state.mode} "
-            f"prior_selected={len(state.selected_ids)} "
-            f"lasso_returned={len(ids)} "
-            f"sample={sample}",
-            file=_sys.stderr,
-            flush=True,
-        )
-    if ids is None:
-        return False
-    if not ids:
-        return False
-    apply_lasso(state, ids)
+
+    # DEEP DEBUG: dump the full event shape so we can see whether Plotly is
+    # even firing selection (vs only zooming).
     print(
-        f"[DEBUG handle_selection_event] AFTER apply_lasso "
-        f"new_selected_count={len(state.selected_ids)}",
+        f"[DEBUG handle_selection_event] raw event type={type(event).__name__} "
+        f"mode={state.mode} prior_selected={len(state.selected_ids)} "
+        f"interaction_mode={state.interaction_mode}",
         file=_sys.stderr,
         flush=True,
     )
+    try:
+        if isinstance(event, dict):
+            keys = list(event.keys())
+        else:
+            keys = [k for k in dir(event) if not k.startswith("_")]
+        print(f"[DEBUG handle_selection_event] event keys/attrs={keys[:20]}",
+              file=_sys.stderr, flush=True)
+        # Selection field
+        sel = event.get("selection") if isinstance(event, dict) else getattr(event, "selection", None)
+        print(f"[DEBUG handle_selection_event] selection={type(sel).__name__} "
+              f"value={(sel if sel is None else (list(sel.keys()) if isinstance(sel, dict) else dir(sel)[:8]))}",
+              file=_sys.stderr, flush=True)
+    except Exception as _e:
+        print(f"[DEBUG handle_selection_event] introspect error: {_e}", file=_sys.stderr, flush=True)
+
+    ids = _extract_ids_from_event(event)
+    if ids is None:
+        print("[DEBUG handle_selection_event] no selection (ids is None) — IGNORING",
+              file=_sys.stderr, flush=True)
+        return False
+    if not ids:
+        print("[DEBUG handle_selection_event] empty selection (0 ids) — IGNORING",
+              file=_sys.stderr, flush=True)
+        return False
+    sample = sorted(list(ids))[:5]
+    print(f"[DEBUG handle_selection_event] lasso_returned={len(ids)} sample={sample}",
+          file=_sys.stderr, flush=True)
+    apply_lasso(state, ids)
+    print(f"[DEBUG handle_selection_event] AFTER apply_lasso new_selected={len(state.selected_ids)}",
+          file=_sys.stderr, flush=True)
     return True
 
 
