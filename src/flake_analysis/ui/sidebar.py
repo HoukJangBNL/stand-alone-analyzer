@@ -67,40 +67,41 @@ def render_sidebar() -> Tuple[str, str, str]:
 
         st.subheader("Project Paths")
 
-        # 1. analysis_folder — primary input. Determines what the manifest knows.
-        analysis_folder = st.text_input(
+        # Streamlit forbids passing both ``value=`` and using ``key=`` whose
+        # entry is also written by app code. Pre-seed session_state BEFORE
+        # the widgets are constructed (and only when keys don't yet exist),
+        # then let the widgets read from session_state purely via key=.
+        if "analysis_folder" not in st.session_state:
+            st.session_state["analysis_folder"] = ""
+
+        # Pre-seed raw_images_dir / annotations_path from the manifest once
+        # per session (only if the user hasn't entered anything yet). After
+        # this initial population the widgets own the values via their keys.
+        af_raw, af_ann = _autofill_from_manifest(
+            st.session_state.get("analysis_folder", "")
+        )
+        if "raw_images_dir" not in st.session_state:
+            st.session_state["raw_images_dir"] = af_raw or ""
+        if "annotations_path" not in st.session_state:
+            st.session_state["annotations_path"] = af_ann or ""
+
+        # 1. analysis_folder — primary input.
+        st.text_input(
             "analysis_folder/",
-            value=st.session_state.get("analysis_folder", ""),
             key="analysis_folder",
             help="Where outputs are written. If a manifest.json exists here, "
                  "the other two fields auto-fill below.",
         )
+        analysis_folder = st.session_state["analysis_folder"]
 
-        # Auto-fill from manifest (if available). The widgets below pick up the
-        # default value, but the user is free to override. Streamlit only honors
-        # ``value=`` for keys that are not already in session_state, so we set
-        # session_state directly when those keys are still empty.
-        af_raw, af_ann = _autofill_from_manifest(analysis_folder)
-        if af_raw and not st.session_state.get("raw_images_dir"):
-            st.session_state["raw_images_dir"] = af_raw
-        if af_ann and not st.session_state.get("annotations_path"):
-            st.session_state["annotations_path"] = af_ann
-
-        autofilled = bool(af_raw or af_ann)
-        if autofilled:
+        if af_raw or af_ann:
             st.caption("✓ raw_images / annotations.json auto-filled from manifest")
 
-        # 2 + 3. raw_images / annotations — pre-populated from manifest when available.
-        raw_images_dir = st.text_input(
-            "raw_images/",
-            value=st.session_state.get("raw_images_dir", ""),
-            key="raw_images_dir",
-        )
-        annotations_path = st.text_input(
-            "annotations.json",
-            value=st.session_state.get("annotations_path", ""),
-            key="annotations_path",
-        )
+        # 2 + 3. raw_images / annotations.
+        st.text_input("raw_images/", key="raw_images_dir")
+        st.text_input("annotations.json", key="annotations_path")
+        raw_images_dir = st.session_state["raw_images_dir"]
+        annotations_path = st.session_state["annotations_path"]
 
         # Backfill: legacy manifests (pre-v0.2.0) have null top-level path
         # fields. If the user is providing those paths via the sidebar,

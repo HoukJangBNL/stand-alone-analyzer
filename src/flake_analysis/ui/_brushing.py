@@ -821,8 +821,14 @@ def render_keyboard_shortcuts() -> None:
     ``window.parent.document`` access, the visible buttons remain the
     primary control surface.
     """
-    import streamlit.components.v1 as components
-    components.html(_KEYBOARD_JS, height=0)
+    # No-op: the JS injection used st.components.v1.html, which Streamlit
+    # is deprecating after 2026-06-01 and which was already blocked by
+    # iframe cross-origin sandboxing in many Streamlit deployments. The
+    # visible mode buttons remain the canonical control surface; the
+    # cheat-sheet dialog (`?` button) lists the shortcuts the buttons
+    # accept. Keeping this as a stable no-op so existing call sites still
+    # work without raising deprecation warnings on every render.
+    return None
 
 
 # ─── Wheel-zoom capture (best-effort) ───────────────────────────────────
@@ -925,5 +931,8 @@ def render_wheel_capture() -> None:
     surrounding page scroll. Subject to the same iframe sandbox caveat as
     :func:`render_keyboard_shortcuts`.
     """
-    import streamlit.components.v1 as components
-    components.html(_WHEEL_CAPTURE_JS, height=0)
+    # No-op: see render_keyboard_shortcuts. Same iframe-sandbox + deprecation
+    # rationale. Plotly's own scrollZoom still works inside the chart; the
+    # difference is just that the page itself may also scroll, which is the
+    # legacy default browser behavior.
+    return None
