@@ -502,9 +502,15 @@ def make_2d_scatter(
         # Build the overlay: prominent orange ring + filled gold core,
         # rendered on top of the base. SVG Scatter (not Scattergl) so the
         # marker line actually renders.
+        # IMPORTANT: the overlay must NOT participate in lasso/box selection.
+        # If it did, every selected point would re-appear inside any lasso
+        # that even brushed the overlay, so a Replace lasso could not
+        # actually shrink the selection — the user saw "all flakes
+        # re-activated". Setting selectedpoints=[] hard-disables the
+        # overlay's selection participation; hoverinfo="skip" stops the
+        # overlay from claiming hover events from base markers.
         sel_x = np.asarray(x)[is_selected]
         sel_y = np.asarray(y)[is_selected]
-        sel_ids = np.asarray(ids)[is_selected]
         overlay = go.Scatter(
             x=sel_x,
             y=sel_y,
@@ -515,11 +521,8 @@ def make_2d_scatter(
                 line=dict(width=2.5, color="#ff5722"),  # bold orange ring
                 opacity=1.0,
             ),
-            customdata=sel_ids,
-            hovertemplate=(
-                f"id=%{{customdata}} (selected)<br>"
-                f"{x_label}=%{{x:.3f}}<br>{y_label}=%{{y:.3f}}<extra></extra>"
-            ),
+            hoverinfo="skip",
+            selectedpoints=[],
             name="selected",
             showlegend=False,
         )
@@ -584,11 +587,7 @@ def make_3d_scatter(
                 line=dict(width=1.5, color="#ff5722"),
                 opacity=1.0,
             ),
-            customdata=sel_ids,
-            hovertemplate=(
-                "domain_id=%{customdata} (selected)<br>"
-                "R=%{x:.3f}, G=%{y:.3f}, B=%{z:.3f}<extra></extra>"
-            ),
+            hoverinfo="skip",
             name="selected",
             showlegend=False,
         )
