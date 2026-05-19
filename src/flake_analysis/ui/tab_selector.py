@@ -269,27 +269,58 @@ def _render_2d_scatter(
     ``pan`` for single-pick (left-drag pans, click selects 1 pt) and
     ``lasso`` for lasso mode.
     """
-    flake_ids = stats["flake_ids"].astype(np.int64)
-    n = len(flake_ids)
+    flake_ids_all = stats["flake_ids"].astype(np.int64)
+    n_total = len(flake_ids_all)
+
+    # Restrict the scatter to ACCEPTED domains only. The user filters with
+    # the 5-metric sliders precisely to focus inspection on the accepted
+    # subset; rejected domains were cluttering the view.
+    # Selected rejected domains are still shown (must_include_ids) so the
+    # user can see what they brushed even after tightening filters.
+    visible_mask = accept_mask.copy()
+    if state.selected_ids:
+        sel_arr = np.fromiter(state.selected_ids, dtype=np.int64)
+        visible_mask = visible_mask | np.isin(flake_ids_all, sel_arr)
+
+    visible_idx = np.where(visible_mask)[0]
+    n_visible = len(visible_idx)
+    if n_visible == 0:
+        st.info(
+            "No domains pass the current filter. "
+            "Loosen the metric ranges (or click ✓ Select All) to see anything."
+        )
+        return
+
+    flake_ids = flake_ids_all[visible_idx]
+    x_full = _values_for_axis(stats, x_axis)[visible_idx]
+    y_full = _values_for_axis(stats, y_axis)[visible_idx]
+    accepted_visible = accept_mask[visible_idx]
 
     sub_idx = _downsample_indices(
-        n,
+        n_visible,
         flake_ids=flake_ids,
         must_include_ids=state.selected_ids,
     )
-    x_full = _values_for_axis(stats, x_axis)
-    y_full = _values_for_axis(stats, y_axis)
     x_sub = x_full[sub_idx]
     y_sub = y_full[sub_idx]
     ids_sub = flake_ids[sub_idx]
-    accepted_sub = accept_mask[sub_idx]
+    accepted_sub = accepted_visible[sub_idx]
 
-    base_colors = np.where(accepted_sub, "#43a047", "#e53935")
+    # Accepted = green; the only non-accepted dots that remain are
+    # selected-but-now-rejected ones — render them in faded amber so
+    # they're visibly distinct from clean accepted points.
+    base_colors = np.where(accepted_sub, "#43a047", "#fbc02d")
 
-    if n > _MAX_POINTS:
+    if n_total > n_visible:
+        rejected_count = n_total - n_visible
         st.caption(
-            f"Showing {_MAX_POINTS:,} of {n:,} domains "
-            f"(seeded random downsample for plot perf)."
+            f"Showing {n_visible:,} accepted of {n_total:,} domains "
+            f"({rejected_count:,} rejected hidden)."
+        )
+    if n_visible > _MAX_POINTS:
+        st.caption(
+            f"Downsampled to {_MAX_POINTS:,} of {n_visible:,} accepted domains "
+            f"(selected ids always kept)."
         )
 
     selected = state.selected_ids
