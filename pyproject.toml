@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stand-alone-analyzer"
-version = "0.2.10"
+version = "0.2.11"
 description = "Streamlit app for interactive 2D material flake analysis"
 readme = "README.md"
 license = "MIT"

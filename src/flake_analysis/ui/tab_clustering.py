@@ -51,6 +51,37 @@ def _ensure_session_seed_groups() -> List[Dict[str, Any]]:
     return st.session_state[SEED_GROUPS_KEY]
 
 
+# Sentinel: tracks which analysis_folder we already auto-loaded the
+# disk seed groups for, so swapping projects auto-loads again but
+# editing-then-revisiting doesn't clobber the user's in-progress edits.
+_AUTOLOAD_KEY = "clustering.seed_groups_autoloaded_for"
+
+
+def _maybe_autoload_seed_groups(analysis_folder: str) -> bool:
+    """If the session has no seed groups yet, hydrate from disk.
+
+    Returns True when an auto-load actually happened (so the caller
+    can rerun and reflect the new state). Idempotent per
+    ``analysis_folder`` — switching projects re-arms the autoload,
+    revisiting the same project doesn't overwrite in-flight edits.
+    """
+    last = st.session_state.get(_AUTOLOAD_KEY)
+    if last == analysis_folder:
+        return False
+    current = st.session_state.get(SEED_GROUPS_KEY)
+    if current:
+        # User already has unsaved edits — don't clobber. Mark this
+        # folder as "handled" so we won't re-attempt next rerun.
+        st.session_state[_AUTOLOAD_KEY] = analysis_folder
+        return False
+    disk = _load_committed_seed_groups(analysis_folder)
+    st.session_state[_AUTOLOAD_KEY] = analysis_folder
+    if not disk:
+        return False
+    st.session_state[SEED_GROUPS_KEY] = list(disk)
+    return True
+
+
 # ─── Data loading ────────────────────────────────────────────────────────
 
 def _load_inputs(analysis_folder: str) -> Optional[Dict[str, Any]]:
@@ -105,6 +136,47 @@ def _load_committed_assignments(
     if not p.exists():
         return None
     return pd.read_parquet(p)
+
+
+def _load_committed_seed_groups(
+    analysis_folder: str,
+) -> Optional[List[Dict[str, Any]]]:
+    """Return the seed groups persisted by the last Fit GMM, or None."""
+    p = Path(analysis_folder) / "04_clustering" / "seed_groups.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _seeds_from_assignments(
+    labels: Dict[str, Any],
+    assignments_df: pd.DataFrame,
+    live_thresholds: Dict[int, float],
+) -> List[Dict[str, Any]]:
+    """Convert the committed cluster assignment into seed groups.
+
+    Useful when the user wants to iterate: take the post-fit clustering
+    (filtered by the current live thresholds), feed it back as fresh
+    seed groups for the next Fit. Each cluster becomes one named group
+    using the names from ``labels.groups``.
+    """
+    groups_meta = labels.get("groups", [])
+    id_to_name = {int(g["id"]): str(g.get("name", f"cluster {g['id']}")) for g in groups_meta}
+
+    out: List[Dict[str, Any]] = []
+    for cid in sorted(id_to_name):
+        thresh = float(live_thresholds.get(cid, 0.5))
+        sub = assignments_df[
+            (assignments_df["cluster_label"] == cid)
+            & (assignments_df["max_posterior"] >= thresh)
+        ]
+        ids = sorted(int(d) for d in sub["domain_id"].tolist())
+        if ids:
+            out.append({"name": id_to_name[cid], "domain_ids": ids})
+    return out
 
 
 def _downsample_indices(
@@ -186,6 +258,11 @@ def _seed_groups_to_table(
 def _render_seed_group_panel(
     stats: Dict[str, Any],
     state: _brushing.BrushingState,
+    *,
+    analysis_folder: str = "",
+    labels: Optional[Dict[str, Any]] = None,
+    assignments_df: Optional[pd.DataFrame] = None,
+    live_thresholds: Optional[Dict[int, float]] = None,
 ) -> None:
     """Seed group management UI — vertical layout for the sidebar drawer.
 
@@ -278,6 +355,46 @@ def _render_seed_group_panel(
         seed_groups.clear()
         _brushing.clear_selection(state)
         st.rerun()
+
+    # Disk re-load + cluster import.
+    has_disk_seeds = (
+        analysis_folder
+        and (Path(analysis_folder) / "04_clustering" / "seed_groups.json").exists()
+    )
+    can_import_clusters = (
+        labels is not None
+        and assignments_df is not None
+        and "max_posterior" in (assignments_df.columns if assignments_df is not None else [])
+    )
+    if has_disk_seeds or can_import_clusters:
+        st.caption("From disk:")
+    if has_disk_seeds:
+        if st.button(
+            "↻ Reload last fit's seeds",
+            key="cluster_reload_seeds",
+            help="Replace current seed groups with the seeds saved by "
+                 "the last Fit GMM (04_clustering/seed_groups.json).",
+            use_container_width=True,
+        ):
+            disk = _load_committed_seed_groups(analysis_folder) or []
+            st.session_state[SEED_GROUPS_KEY] = list(disk)
+            _brushing.clear_selection(state)
+            st.rerun()
+    if can_import_clusters:
+        if st.button(
+            "⇪ Import clusters → seeds",
+            key="cluster_import_clusters",
+            help="Replace current seed groups with the post-fit cluster "
+                 "members (filtered by live thresholds). Lets you iterate: "
+                 "fit, threshold, then re-fit on the cleaned-up clusters.",
+            use_container_width=True,
+        ):
+            new_seeds = _seeds_from_assignments(
+                labels or {}, assignments_df, live_thresholds or {},
+            )
+            st.session_state[SEED_GROUPS_KEY] = new_seeds
+            _brushing.clear_selection(state)
+            st.rerun()
 
 
 # ─── 4-pane scatter ──────────────────────────────────────────────────────
@@ -802,7 +919,28 @@ def render_clustering_sidebar(
         _brushing.render_mode_controls(state, "clustering", compact=True)
         st.divider()
         st.caption("**Seed groups**")
-        _render_seed_group_panel(stats, state)
+        # Compute the live thresholds first so the cluster-import
+        # button reflects the slider state. We call this twice (once
+        # here for the import button, again below where the slider
+        # widgets live) — values come from the same canonical store
+        # so they stay consistent.
+        if labels is not None:
+            live_thresh = {
+                int(g["id"]): float(
+                    st.session_state.get(
+                        f"clu.thresh.{int(g['id'])}",
+                        float((labels.get("thresholds") or {}).get(str(int(g["id"])), 0.5)),
+                    )
+                )
+                for g in labels.get("groups", [])
+            }
+        _render_seed_group_panel(
+            stats, state,
+            analysis_folder=analysis_folder,
+            labels=labels,
+            assignments_df=assignments_df,
+            live_thresholds=live_thresh,
+        )
         st.divider()
 
         # Axis pickers + optional 3D toggle (mirror Selector layout).
@@ -889,6 +1027,19 @@ def render_tab_clustering(
         f"· last commit {selector_entry.completed_at}. "
         f"Re-commit in Selector if its filter / lasso changed since."
     )
+
+    # Auto-hydrate seed groups from the last fit on first visit per
+    # analysis_folder. The user's edits aren't clobbered: we only load
+    # when the in-memory list is empty (idempotent flag inside).
+    if _maybe_autoload_seed_groups(analysis_folder):
+        # Note: ``st.toast(icon=...)`` only accepts a single emoji
+        # character, not the "↻" arrow we use elsewhere — fall back
+        # to a plain message so the toast still surfaces.
+        st.toast(
+            "Loaded seed groups from the last fit. Edit in the sidebar.",
+            icon="🔄",
+        )
+        st.rerun()
 
     # Cluster assignment (if previously committed) drives the scatter colors.
     labels = _load_committed_clustering(analysis_folder)
