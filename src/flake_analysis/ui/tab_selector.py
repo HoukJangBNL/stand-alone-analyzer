@@ -352,29 +352,62 @@ def _dispatch_event(event, state: _brushing.BrushingState) -> bool:
     return _brushing.handle_selection_event(event, state)
 
 
+def _on_x_axis_change() -> None:
+    st.session_state["axis.x"] = st.session_state["selector_x_axis"]
+
+
+def _on_y_axis_change() -> None:
+    st.session_state["axis.y"] = st.session_state["selector_y_axis"]
+
+
+def _on_show_3d_change() -> None:
+    st.session_state["selector.show_3d"] = bool(
+        st.session_state["selector_show_3d"]
+    )
+
+
 def _render_axis_pickers() -> tuple[str, str]:
     """Render X / Y axis dropdowns side-by-side in two columns.
 
     Defaults: X=R, Y=G (matches the most informative pane from the legacy
-    4-pane layout). Designed to be called inside the sidebar drawer where
-    we have a narrow 2-column layout, hence ``[1, 1]`` instead of the
-    earlier ``[1, 1, 6]`` (which had a wide spacer column for the tab
-    body).
+    4-pane layout).
+
+    Persistence: callback-based sync to the canonical store
+    (``axis.x`` / ``axis.y``). When Streamlit GCs the widget key after a
+    mode-button rerun, we re-seed the widget key from the canonical
+    store BEFORE the widget renders so the dropdown shows the
+    user's pick (user-reported regression: "B-G 한 상태에서 Subtract
+    누르니까 R-G 로 돌아가네"). We must NOT force-overwrite the widget
+    key when it already exists, otherwise we'd clobber the value the
+    user just submitted in this same rerun.
     """
+    if "axis.x" not in st.session_state:
+        st.session_state["axis.x"] = AVAILABLE_AXES[0]
+    if "axis.y" not in st.session_state:
+        st.session_state["axis.y"] = AVAILABLE_AXES[1]
+
+    # Re-seed widget keys ONLY when missing (post-GC rehydration). If
+    # the widget key already exists it's the source of truth for this
+    # rerun and the on_change callback will mirror it back.
+    if "selector_x_axis" not in st.session_state:
+        st.session_state["selector_x_axis"] = st.session_state["axis.x"]
+    if "selector_y_axis" not in st.session_state:
+        st.session_state["selector_y_axis"] = st.session_state["axis.y"]
+
     pick_cols = st.columns(2)
     with pick_cols[0]:
         x_axis = st.selectbox(
             "X-axis",
             AVAILABLE_AXES,
-            index=0,
             key="selector_x_axis",
+            on_change=_on_x_axis_change,
         )
     with pick_cols[1]:
         y_axis = st.selectbox(
             "Y-axis",
             AVAILABLE_AXES,
-            index=1,
             key="selector_y_axis",
+            on_change=_on_y_axis_change,
         )
     return x_axis, y_axis
 
@@ -795,13 +828,21 @@ def render_selector_sidebar(
         st.caption("2D scatter axes")
         x_axis, y_axis = _render_axis_pickers()
 
-        # Optional 3D RGB pane.
+        # Optional 3D RGB pane. Same canonical-store pattern as the axis
+        # pickers — re-seed the widget key only when missing so a user
+        # toggle within this rerun isn't clobbered.
+        if "selector.show_3d" not in st.session_state:
+            st.session_state["selector.show_3d"] = False
+        if "selector_show_3d" not in st.session_state:
+            st.session_state["selector_show_3d"] = bool(
+                st.session_state["selector.show_3d"]
+            )
         show_3d = st.checkbox(
             "Show 3D RGB",
-            value=False,
             help="Render the 3D R-G-B context pane below the scatter "
                  "(display only — no lasso events).",
             key="selector_show_3d",
+            on_change=_on_show_3d_change,
         )
 
         st.divider()

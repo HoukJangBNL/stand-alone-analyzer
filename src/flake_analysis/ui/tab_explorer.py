@@ -289,17 +289,26 @@ def _render_neighbor_filter() -> Dict[str, Any]:
 
 
 def _render_render_toggles() -> None:
-    """2x2 render toggles (Plan v34 defaults). Rendering itself M3."""
+    """2x2 render toggles (Plan v34 defaults). Rendering itself M3.
+
+    Pre-seed each widget key once with its default so Streamlit doesn't
+    re-apply ``value=`` on later reruns and snap the toggle back to
+    default after a rerun GC's the widget key (same class of bug as the
+    Selector axis pickers).
+    """
+    for k, default in zip(TOGGLE_KEYS, TOGGLE_DEFAULTS):
+        if k not in st.session_state:
+            st.session_state[k] = bool(default)
     with st.expander("Render toggles (Plan v34 defaults)", expanded=False):
         c1, c2, c3, c4 = st.columns(4)
         with c1:
-            st.checkbox("Flake bbox", value=TOGGLE_DEFAULTS[0], key=TOGGLE_KEYS[0])
+            st.checkbox("Flake bbox", key=TOGGLE_KEYS[0])
         with c2:
-            st.checkbox("Flake outline", value=TOGGLE_DEFAULTS[1], key=TOGGLE_KEYS[1])
+            st.checkbox("Flake outline", key=TOGGLE_KEYS[1])
         with c3:
-            st.checkbox("Island bbox", value=TOGGLE_DEFAULTS[2], key=TOGGLE_KEYS[2])
+            st.checkbox("Island bbox", key=TOGGLE_KEYS[2])
         with c4:
-            st.checkbox("Island outline", value=TOGGLE_DEFAULTS[3], key=TOGGLE_KEYS[3])
+            st.checkbox("Island outline", key=TOGGLE_KEYS[3])
         st.caption(
             "Toggles stored in session_state. Bbox/outline rendering "
             "deferred to M3 polish."
