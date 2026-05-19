@@ -13,6 +13,7 @@ from flake_analysis.state.manifest import (
     StepEntry,
     load_manifest,
     save_manifest,
+    stamp_top_level,
 )
 from flake_analysis.state.paths import step_dir
 from flake_analysis.state.hashing import dir_mtime_max, params_hash
@@ -60,6 +61,11 @@ def run_background_step(
 
     # Update manifest
     manifest = load_manifest(analysis_folder)
+    stamp_top_level(
+        manifest,
+        analysis_folder=analysis_folder,
+        raw_images_dir=raw_images_dir,
+    )
     manifest.steps["background"] = StepEntry(
         completed_at=datetime.now(timezone.utc).isoformat(),
         params=params,

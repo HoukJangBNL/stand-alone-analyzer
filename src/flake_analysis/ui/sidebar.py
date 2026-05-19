@@ -15,7 +15,12 @@ from typing import Tuple
 
 import streamlit as st
 
-from flake_analysis.state.manifest import load_manifest, step_status
+from flake_analysis.state.manifest import (
+    load_manifest,
+    save_manifest,
+    stamp_top_level,
+    step_status,
+)
 from flake_analysis.state.paths import PIPELINE_STEPS
 
 
@@ -92,6 +97,28 @@ def render_sidebar() -> Tuple[str, str, str]:
             value=st.session_state.get("annotations_path", ""),
             key="annotations_path",
         )
+
+        # Backfill: legacy manifests (pre-v0.2.0) have null top-level path
+        # fields. If the user is providing those paths via the sidebar,
+        # fill them into the manifest now so subsequent renders auto-fill.
+        if analysis_folder and (raw_images_dir or annotations_path):
+            try:
+                m = load_manifest(analysis_folder)
+                missing = (
+                    (raw_images_dir and not m.raw_images_dir)
+                    or (annotations_path and not m.annotations_path)
+                    or m.analysis_folder is None
+                )
+                if missing:
+                    stamp_top_level(
+                        m,
+                        analysis_folder=analysis_folder,
+                        raw_images_dir=raw_images_dir or None,
+                        annotations_path=annotations_path or None,
+                    )
+                    save_manifest(m, analysis_folder)
+            except Exception:
+                pass  # Don't fail the sidebar if manifest write errors out.
 
         if st.button("🔄 Reload manifest"):
             # Force re-fetch on next render. Clear the auto-filled keys so the

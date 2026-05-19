@@ -14,7 +14,12 @@ from typing import Any, Callable, Dict, Optional
 from flake_analysis.core.pipeline.selector import run_selector as core_run_selector
 
 from flake_analysis.state.hashing import params_hash
-from flake_analysis.state.manifest import StepEntry, load_manifest, save_manifest
+from flake_analysis.state.manifest import (
+    StepEntry,
+    load_manifest,
+    save_manifest,
+    stamp_top_level,
+)
 from flake_analysis.state.paths import step_dir
 
 
@@ -80,6 +85,7 @@ def run_selector_step(
         **params,
     )
 
+    stamp_top_level(manifest, analysis_folder=analysis_folder)
     manifest.steps["selector"] = StepEntry(
         completed_at=datetime.now(timezone.utc).isoformat(),
         params=params,

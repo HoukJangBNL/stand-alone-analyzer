@@ -12,6 +12,7 @@ from flake_analysis.state.manifest import (
     StepEntry,
     load_manifest,
     save_manifest,
+    stamp_top_level,
 )
 from flake_analysis.state.paths import step_dir
 from flake_analysis.state.hashing import file_mtime, params_hash
@@ -64,6 +65,11 @@ def run_domain_proximity_step(
     )
 
     manifest = load_manifest(analysis_folder)
+    stamp_top_level(
+        manifest,
+        analysis_folder=analysis_folder,
+        annotations_path=annotations_path,
+    )
     manifest.steps["domain_proximity"] = StepEntry(
         completed_at=datetime.now(timezone.utc).isoformat(),
         params=params,

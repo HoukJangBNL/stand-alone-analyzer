@@ -59,6 +59,42 @@ def save_manifest(manifest: Manifest, analysis_folder: str | Path) -> None:
     tmp.replace(p)
 
 
+def stamp_top_level(
+    manifest: Manifest,
+    *,
+    analysis_folder: str | Path,
+    raw_images_dir: Optional[str | Path] = None,
+    annotations_path: Optional[str | Path] = None,
+) -> Manifest:
+    """Fill in the manifest top-level path/timestamp fields.
+
+    Step wrappers should call this before ``save_manifest`` so the manifest
+    records absolute paths to inputs and the analysis folder. Existing
+    non-null values are preserved (so the first step that runs sets the
+    paths and later steps don't overwrite them with stale values).
+
+    Stamps ``created_at`` once on first save (when None).
+    Stamps ``flake_core_version`` once based on the running package.
+    """
+    from datetime import datetime, timezone
+
+    if manifest.analysis_folder is None and analysis_folder is not None:
+        manifest.analysis_folder = str(analysis_folder)
+    if manifest.raw_images_dir is None and raw_images_dir is not None:
+        manifest.raw_images_dir = str(raw_images_dir)
+    if manifest.annotations_path is None and annotations_path is not None:
+        manifest.annotations_path = str(annotations_path)
+    if manifest.created_at is None:
+        manifest.created_at = datetime.now(timezone.utc).isoformat()
+    if manifest.flake_core_version is None:
+        try:
+            from flake_analysis import __version__ as _v
+            manifest.flake_core_version = _v
+        except Exception:
+            manifest.flake_core_version = None
+    return manifest
+
+
 def step_status(manifest: Manifest, step: str) -> str:
     """Return one of: 'not_started', 'done', 'stale'.
 

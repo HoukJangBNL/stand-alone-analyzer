@@ -37,7 +37,12 @@ import pandas as pd
 from flake_analysis.core.pipeline.clustering import run_clustering as core_run_clustering
 
 from flake_analysis.state.hashing import params_hash
-from flake_analysis.state.manifest import StepEntry, load_manifest, save_manifest
+from flake_analysis.state.manifest import (
+    StepEntry,
+    load_manifest,
+    save_manifest,
+    stamp_top_level,
+)
 from flake_analysis.state.paths import step_dir
 
 
@@ -140,6 +145,7 @@ def run_clustering_step(
     )
 
     fitted_at = datetime.now(timezone.utc).isoformat()
+    stamp_top_level(manifest, analysis_folder=analysis_folder)
     manifest.steps["clustering"] = StepEntry(
         completed_at=fitted_at,
         params=params,

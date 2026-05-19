@@ -26,7 +26,12 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from flake_analysis.state.hashing import params_hash
-from flake_analysis.state.manifest import StepEntry, load_manifest, save_manifest
+from flake_analysis.state.manifest import (
+    StepEntry,
+    load_manifest,
+    save_manifest,
+    stamp_top_level,
+)
 from flake_analysis.state.paths import step_dir
 
 
@@ -101,6 +106,7 @@ def save_explorer_state(
     if sel_path is not None:
         outputs["selected_flakes_parquet"] = "06_explorer/selected_flakes.parquet"
 
+    stamp_top_level(manifest, analysis_folder=analysis_folder)
     manifest.steps["explorer"] = StepEntry(
         completed_at=saved_at,
         params=params,
