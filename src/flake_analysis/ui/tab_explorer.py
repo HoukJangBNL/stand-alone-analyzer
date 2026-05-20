@@ -400,9 +400,17 @@ def _build_grid_layout(
 
     Tries to parse ``ix###_iy###`` from each image's raw filename. If
     every name parses, the returned grid spans the actual coordinate
-    extents (origin = top-left, row 0 at the top). If any name fails,
-    falls back to the square ``divmod(i, sqrt(n))`` layout used in
-    earlier versions.
+    extents.
+
+    Y-axis convention (v0.2.17): ``iy=0`` is mapped to the **bottom**
+    row of the mosaic — i.e. larger ``iy`` values render higher up.
+    Row index in the returned mapping = ``(max_iy - iy)`` so the user-
+    facing scan-grid origin matches their wafer convention. The chart
+    y-axis still uses top-left = (0, 0) for plotly's image rendering;
+    the row flip happens here so callers can stay axis-agnostic.
+
+    If any filename fails to parse, falls back to the square
+    ``divmod(i, sqrt(n))`` layout used in earlier versions.
     """
     coords: Dict[int, Tuple[int, int]] = {}
     parsed_all = True
@@ -420,8 +428,15 @@ def _build_grid_layout(
         grid_w = (max(cols) - min(cols) + 1)
         grid_h = (max(rows) - min(rows) + 1)
         cmin, rmin = min(cols), min(rows)
-        # Normalise to (0..grid_w-1, 0..grid_h-1).
-        coords = {iid: (c - cmin, r - rmin) for iid, (c, r) in coords.items()}
+        rmax = max(rows)
+        # Normalise to (0..grid_w-1) for cols. Flip rows so that
+        # iy=rmin lands at the BOTTOM of the mosaic (row = grid_h-1)
+        # and iy=rmax lands at the top (row = 0). Cataloger scans
+        # bottom-to-top in iy, so this matches the user's wafer view.
+        coords = {
+            iid: (c - cmin, rmax - r)
+            for iid, (c, r) in coords.items()
+        }
         return int(grid_w), int(grid_h), coords
 
     # Fallback: square layout in image_id sort order.
@@ -583,11 +598,48 @@ def _render_substrate_grid(
     # Width-side budget assumes ~960 px chart width (Streamlit ~60% column).
     cell_w_budget = max(1, 960 // max(1, grid_w))
     cell_px_for_lod = max(cell_w_budget, cell_h_budget)
-    lod = _choose_lod(cell_px_for_lod)
+    auto_lod = _choose_lod(cell_px_for_lod)
+
+    # LOD picker — Plotly's wheel/box zoom doesn't bubble back to
+    # Streamlit (no relayout event), so we expose an explicit selector
+    # so the user can manually drop into a higher-detail tier when
+    # they zoom in. ``Auto`` picks based on the current cell-px budget.
+    lod_options = ["Auto", "lod0 (64×40)", "lod1 (192×120)", "lod2 (480×300)", "raw"]
+    if "explorer.lod_choice" not in st.session_state:
+        st.session_state["explorer.lod_choice"] = "Auto"
+    lod_choice = st.selectbox(
+        "Mosaic detail",
+        lod_options,
+        index=lod_options.index(st.session_state["explorer.lod_choice"]),
+        key="explorer_lod_choice",
+        help="Auto picks LOD by cell size. Override to force a tier "
+             "(higher detail = slower, raw = read each image fresh).",
+    )
+    st.session_state["explorer.lod_choice"] = lod_choice
+    if lod_choice == "Auto":
+        lod = auto_lod
+    elif lod_choice.startswith("lod0"):
+        lod = 0
+    elif lod_choice.startswith("lod1"):
+        lod = 1
+    elif lod_choice.startswith("lod2"):
+        lod = 2
+    else:
+        lod = _RAW_LOD
 
     # Cell aspect ratio mirrors the LOD pyramid (8:5 = 1.6:1).
+    # When the user manually picks a higher LOD than Auto would have
+    # chosen, scale the cell up to match the LOD's native size so the
+    # extra pixels actually have somewhere to go (otherwise a 480×300
+    # thumbnail downsampled into a 64×40 cell wastes the work).
     cell_aspect = 8 / 5
-    cell_h = max(8, int(round(cell_h_budget)))
+    if lod_choice != "Auto":
+        # Native LOD size — up to 4× current budget, hard cap 480 wide
+        # so the chart stays in the viewport.
+        lod_native_h = {0: 40, 1: 120, 2: 300, _RAW_LOD: 300}.get(lod, 40)
+        cell_h = max(8, min(int(round(lod_native_h)), 4 * cell_h_budget))
+    else:
+        cell_h = max(8, int(round(cell_h_budget)))
     cell_w = max(8, int(round(cell_h * cell_aspect)))
 
     # Pass / fail per image_id.
@@ -721,8 +773,20 @@ def _render_substrate_grid(
         dragmode="pan",
     )
 
+    # Enable wheel + modebar zoom. Default ``st.plotly_chart`` ships
+    # with the modebar visible only on hover; we keep that but also
+    # turn on ``scrollZoom`` so the wheel zooms in/out without needing
+    # the toolbar. ``displaylogo=False`` removes the Plotly logo.
+    chart_config = {
+        "scrollZoom": True,
+        "displayModeBar": True,
+        "displaylogo": False,
+        "modeBarButtonsToRemove": ["toImage", "autoScale2d", "lasso2d", "select2d"],
+    }
+
     selection = st.plotly_chart(
         fig,
+        config=chart_config,
         width="stretch",
         on_select="rerun",
         key="explorer_grid",
