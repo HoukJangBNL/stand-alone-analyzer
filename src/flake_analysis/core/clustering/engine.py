@@ -62,8 +62,9 @@ class InteractiveClusteringEngine:
         thresholds: Optional[List[float]] = None,
         max_iter: int = 100,
         tol: float = 1e-4,
+        fit_scope: str = "seeds",
     ) -> InteractiveClusterResult:
-        """Fit GMM initialized from seed groups, apply Filter 1.
+        """Fit GMM on the seed-defined subset, then score everyone.
 
         Args:
             repr_rgbs: (N, 3) array of representative RGB values per flake.
@@ -77,15 +78,29 @@ class InteractiveClusteringEngine:
                 ``rgb_threshold`` when provided.
             max_iter: Maximum EM iterations.
             tol: EM convergence tolerance.
+            fit_scope: ``"seeds"`` (default, recommended) trains the GMM on
+                the union of seed-group members only — covariances stay tight
+                around the user's seeds, and non-seed selector-passing domains
+                far from any seed get low posteriors and are auto-rejected by
+                Filter 1. ``"all"`` is the legacy behaviour: train on every
+                ``repr_rgbs`` row, with seeds providing only ``means_init``.
+                Use "all" if you have very few seeds and need EM to discover
+                the broader distribution; default to "seeds" otherwise.
 
         Returns:
             InteractiveClusterResult with labels, probabilities, centers.
 
         Raises:
-            ValueError: If fewer than 2 seed groups provided.
+            ValueError: If fewer than 1 seed group provided, ``fit_scope`` is
+                unrecognised, or the seeded subset is too small for the
+                requested ``k``.
         """
         if len(seed_groups) < 1:
             raise ValueError(f"Need at least 1 seed group, got {len(seed_groups)}")
+        if fit_scope not in ("seeds", "all"):
+            raise ValueError(
+                f"fit_scope must be 'seeds' or 'all', got {fit_scope!r}"
+            )
 
         k = len(seed_groups)
         self._repr_rgbs = repr_rgbs
@@ -103,9 +118,35 @@ class InteractiveClusteringEngine:
             seed_rgbs = repr_rgbs[indices]
             means_init[i] = seed_rgbs.mean(axis=0)
 
-        msg.info(f"Fitting {k}-component GMM from seed means on {len(repr_rgbs)} flakes")
+        # Build the actual fit-input array. ``"seeds"`` uses only the
+        # union of seed members so EM cannot drag covariances toward
+        # non-seed selector-passing domains (user feedback: "시드 근처
+        # 가 아닌데도 selection 됐으면 다 피팅이 되고 있잖아"). ``"all"``
+        # falls back to the legacy behaviour for compatibility.
+        if fit_scope == "seeds":
+            seed_idx_concat = np.unique(np.concatenate(
+                [np.asarray(g, dtype=np.int64) for g in seed_groups]
+                or [np.array([], dtype=np.int64)]
+            ))
+            if seed_idx_concat.size < k:
+                raise ValueError(
+                    f"fit_scope='seeds' needs at least {k} unique seed "
+                    f"members (got {seed_idx_concat.size}); add more "
+                    f"domains to your seed groups or pass fit_scope='all'."
+                )
+            fit_input = repr_rgbs[seed_idx_concat]
+            msg.info(
+                f"Fitting {k}-component GMM on seeds only "
+                f"({fit_input.shape[0]} domains); will score all "
+                f"{len(repr_rgbs)} via predict_proba"
+            )
+        else:
+            fit_input = repr_rgbs
+            msg.info(
+                f"Fitting {k}-component GMM on full set "
+                f"({fit_input.shape[0]} domains, legacy fit_scope='all')"
+            )
 
-        # Fit GMM with seed-initialized means
         self._gmm = GaussianMixture(
             n_components=k,
             covariance_type="full",
@@ -115,9 +156,11 @@ class InteractiveClusteringEngine:
             n_init=1,
             random_state=42,
         )
-        self._gmm.fit(repr_rgbs)
+        self._gmm.fit(fit_input)
 
-        # Compute posteriors for all flakes
+        # Compute posteriors for ALL flakes (the seeds drove the fit;
+        # non-seed selector-passing domains get scored against the
+        # seed-tightened model and are filtered by threshold).
         self._raw_posteriors = self._gmm.predict_proba(repr_rgbs)
 
         msg.info(f"GMM converged in {self._gmm.n_iter_} iterations")

@@ -106,6 +106,7 @@ def run_clustering(
     rgb_threshold: float = 0.5,
     max_iter: int = 100,
     tol: float = 1e-4,
+    fit_scope: str = "seeds",
     progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Fit GMM with manual seed groups and persist labels + model.
@@ -230,6 +231,7 @@ def run_clustering(
         rgb_threshold=rgb_threshold,
         max_iter=max_iter,
         tol=tol,
+        fit_scope=fit_scope,
     )
 
     if progress_callback is not None:
@@ -324,6 +326,7 @@ def run_clustering(
         "max_iter": max_iter,
         "tol": tol,
         "random_state": 42,
+        "fit_scope": fit_scope,
     }
     return {
         "labels_path": labels_path,

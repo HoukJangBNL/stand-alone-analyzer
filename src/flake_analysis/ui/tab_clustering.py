@@ -855,10 +855,39 @@ def _render_cluster_sizes(labels: Dict[str, Any]) -> None:
 def _render_fit_gmm_button(
     analysis_folder: str, seed_groups: List[Dict[str, Any]]
 ) -> None:
-    """Fit GMM button — sidebar drawer only."""
+    """Fit GMM button + ``fit_scope`` selector — sidebar drawer only.
+
+    Fit scope choices:
+      * **Seeds-only (recommended)** — GMM trains on the union of
+        seed members so covariances stay tight around the user's
+        seeds. Non-seed selector-passing domains far from any seed
+        get low posteriors and are auto-rejected by the threshold.
+        Resolves "시드 근처가 아닌데도 selection 됐으면 다 피팅이
+        되고 있잖아".
+      * **All selected** — legacy behaviour: EM runs over every
+        selector-passing domain, with seeds providing only
+        ``means_init``. Useful when seeds are sparse and you need
+        EM to discover the broader distribution.
+    """
     can_fit = len(seed_groups) >= 2
     if not can_fit:
         st.caption("Need ≥2 seed groups to fit.")
+
+    # fit_scope canonical-store + widget (mode-button rerun safe).
+    if "clu.fit_scope" not in st.session_state:
+        st.session_state["clu.fit_scope"] = "seeds"
+    if "clu_fit_scope" not in st.session_state:
+        st.session_state["clu_fit_scope"] = st.session_state["clu.fit_scope"]
+    scope_label = st.radio(
+        "Fit on",
+        options=["Seeds only (recommended)", "All selected (legacy)"],
+        index=0 if st.session_state["clu_fit_scope"] == "seeds" else 1,
+        key="clu_fit_scope_radio",
+        horizontal=False,
+    )
+    fit_scope = "seeds" if scope_label.startswith("Seeds") else "all"
+    st.session_state["clu.fit_scope"] = fit_scope
+    st.session_state["clu_fit_scope"] = fit_scope
 
     if not st.button(
         "▶ Fit GMM",
@@ -880,12 +909,14 @@ def _render_fit_gmm_button(
         result = run_clustering_step(
             analysis_folder=analysis_folder,
             seed_groups=seed_groups,
+            fit_scope=fit_scope,
             progress_callback=cb,
         )
         progress_bar.progress(1.0, "Done")
         _render_diagnostics(result)
         st.success(
-            f"GMM fitted: {result.get('n_clusters', '?')} clusters · "
+            f"GMM fitted on **{fit_scope}**: "
+            f"{result.get('n_clusters', '?')} clusters · "
             f"assigned={result.get('n_assigned', '?')} · "
             f"unassigned={result.get('n_unassigned', '?')}"
         )
