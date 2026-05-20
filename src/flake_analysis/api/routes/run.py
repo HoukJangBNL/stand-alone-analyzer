@@ -58,7 +58,9 @@ async def run_thumbnails(
             async for event in bridge.stream():
                 yield emit_sse_event(event["type"], event)
         finally:
-            await task
-            await lock_cm.__aexit__(None, None, None)
+            try:
+                await task
+            finally:
+                await lock_cm.__aexit__(None, None, None)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
