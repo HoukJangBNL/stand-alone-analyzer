@@ -1,10 +1,15 @@
 """Project lifecycle endpoints per backend design §1.1."""
 from __future__ import annotations
+import os
+from pathlib import Path
 from fastapi import APIRouter, Depends
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.schemas.projects import (
     CreateProjectRequest,
     ProjectHandle,
+    ValidatePathsRequest,
+    ValidatePathsResponse,
+    PathStatus,
 )
 from flake_analysis.api.deps import _resolve_project_id
 
@@ -35,4 +40,36 @@ async def get_active_project(
     return ProjectHandle(
         project_id="local",
         analysis_folder=analysis_folder,
+    )
+
+@router.post("/validate-paths")
+async def validate_paths(
+    req: ValidatePathsRequest,
+    user: User = Depends(get_current_user),
+) -> ValidatePathsResponse:
+    """Validate paths for existence, type, and permissions."""
+    def check_path(path_str: str | None) -> PathStatus | None:
+        if path_str is None:
+            return None
+
+        p = Path(path_str).resolve()
+        exists = p.exists()
+        is_dir = p.is_dir() if exists else False
+        is_file = p.is_file() if exists else False
+        readable = os.access(p, os.R_OK) if exists else False
+        writable = os.access(p, os.W_OK) if exists else False
+
+        return PathStatus(
+            exists=exists,
+            is_dir=is_dir,
+            is_file=is_file,
+            readable=readable,
+            writable=writable,
+            canonical=str(p),
+        )
+
+    return ValidatePathsResponse(
+        analysis_folder=check_path(req.analysis_folder),
+        raw_images_dir=check_path(req.raw_images_dir),
+        annotations_path=check_path(req.annotations_path),
     )
