@@ -25,7 +25,7 @@ class ProgressBridge:
 
     def __init__(self):
         self._queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=128)
-        self._loop = asyncio.get_event_loop()
+        self._loop = asyncio.get_running_loop()
         self._dropped_progress = 0
 
     def _put_progress(self, event: dict) -> None:
