@@ -369,10 +369,21 @@ def _choose_lod(cell_px: int) -> int:
 
 
 def _pick_thumbnail_path(
-    thumbnail_root: Path, raw_stem: str, lod: int
+    thumbnail_root: Path,
+    raw_stem: str,
+    lod: int,
+    *,
+    cache_dir: Optional[str] = None,
 ) -> Path:
-    """Resolve the on-disk WebP path for a given raw stem + LOD."""
-    return thumbnail_root / f"lod{lod}" / f"{raw_stem}.webp"
+    """Resolve the on-disk WebP path for a given raw stem + LOD.
+
+    When ``cache_dir`` is provided (v0.2.16 local-cache redirect),
+    thumbnails live under it instead of the analysis-folder
+    ``00_thumbnails/`` root. ``cache_dir=None`` falls back to the
+    legacy in-folder layout, so v0.2.15 caches keep working.
+    """
+    base = Path(cache_dir) if cache_dir else thumbnail_root
+    return base / f"lod{lod}" / f"{raw_stem}.webp"
 
 
 def _resolve_raw_path(
@@ -438,6 +449,7 @@ def _build_mosaic_array(
     placement: Tuple[Tuple[int, int, int], ...],
     pass_image_ids: Tuple[int, ...],
     _cache_buster: str,
+    cache_dir: Optional[str] = None,
 ) -> np.ndarray:
     """Assemble the ``(grid_h*cell_h, grid_w*cell_w, 3)`` RGB mosaic.
 
@@ -471,7 +483,9 @@ def _build_mosaic_array(
         if lod >= _RAW_LOD:
             tile_path = _resolve_raw_path(raw_images_dir, stem, raw_ext)
         else:
-            tile_path = _pick_thumbnail_path(thumbnail_root, stem, lod)
+            tile_path = _pick_thumbnail_path(
+                thumbnail_root, stem, lod, cache_dir=cache_dir
+            )
 
         try:
             img = Image.open(tile_path).convert("RGB")
@@ -615,6 +629,11 @@ def _render_substrate_grid(
     except Exception:
         cache_buster = ""
 
+    # v0.2.16: when the thumbnails step redirected WebP writes to a
+    # local-disk cache (network-mount projects), index.json carries
+    # the absolute cache root. None ⇒ legacy in-folder layout.
+    cache_dir_str: Optional[str] = thumb_index.get("cache_dir")
+
     mosaic = _build_mosaic_array(
         analysis_folder=analysis_folder,
         raw_images_dir=raw_images_dir,
@@ -627,6 +646,7 @@ def _render_substrate_grid(
         placement=tuple(placement),
         pass_image_ids=pass_image_ids,
         _cache_buster=cache_buster,
+        cache_dir=cache_dir_str,
     )
 
     fig = go.Figure(data=go.Image(z=mosaic))

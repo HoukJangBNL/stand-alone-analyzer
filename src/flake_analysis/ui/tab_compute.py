@@ -1,9 +1,13 @@
 """Compute tab — 4 expanders: Thumbnails / Background / Domain Stats / Domain Proximity.
 
-Per plan v1 r9 §M2 PR 2.2 + v0.2.15 thumbnails LOD pre-render.
+Per plan v1 r9 §M2 PR 2.2 + v0.2.15 thumbnails LOD pre-render
++ v0.2.16 thumbnails local-cache redirect.
 """
 from __future__ import annotations
+import json
+import shutil
 from pathlib import Path
+from typing import Optional
 
 import streamlit as st
 
@@ -12,6 +16,23 @@ from flake_analysis.pipeline.domain_proximity import run_domain_proximity_step
 from flake_analysis.pipeline.domain_stats import run_domain_stats_step
 from flake_analysis.pipeline.thumbnails import run_thumbnails_step
 from flake_analysis.state.manifest import load_manifest
+
+
+def _read_cache_dir_from_index(analysis_folder: str) -> Optional[str]:
+    """Return ``index.json["cache_dir"]`` if present, else ``None``.
+
+    Used to decide whether to show the "cached locally" caption + the
+    "clear cache" cleanup button.
+    """
+    p = Path(analysis_folder) / "00_thumbnails" / "index.json"
+    if not p.exists():
+        return None
+    try:
+        idx = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    cd = idx.get("cache_dir")
+    return str(cd) if cd else None
 
 
 def render_tab_compute(
@@ -155,12 +176,45 @@ def render_tab_compute(
                     f"({result['n_skipped']} cached, "
                     f"{result['n_failed']} failed) → {result['output_dir']}"
                 )
+                # v0.2.16: when WebPs were redirected to a local-disk
+                # cache (network-mount analysis folders), surface the
+                # path so the user knows where the bytes live + that
+                # SMB writes were skipped.
+                cache_dir = result.get("cache_dir")
+                if cache_dir:
+                    st.caption(
+                        f"📁 Cached locally at `{cache_dir}` to skip "
+                        "slow SMB reads/writes."
+                    )
                 st.rerun()
             except Exception as e:
                 st.error(str(e))
 
         if thumb_complete:
             st.caption(f"Last run: {thumb_done.completed_at}")
+            # Persistent caption + cleanup button when the project's
+            # last run wrote to a local cache. Only shown when the
+            # cache directory actually still exists on disk.
+            cache_dir_persisted = _read_cache_dir_from_index(analysis_folder)
+            if cache_dir_persisted and Path(cache_dir_persisted).exists():
+                st.caption(
+                    f"📁 Local thumbnail cache: `{cache_dir_persisted}`"
+                )
+                if st.button(
+                    "🗑 Clear local thumbnail cache",
+                    key="th_clear_cache",
+                    help="Delete this analysis folder's local WebP "
+                         "cache to free disk space. Re-running "
+                         "Thumbnails will rebuild it.",
+                ):
+                    try:
+                        shutil.rmtree(cache_dir_persisted)
+                        st.success(
+                            f"Removed local cache: {cache_dir_persisted}"
+                        )
+                        st.rerun()
+                    except OSError as e:
+                        st.error(f"Failed to remove cache: {e}")
 
     # ─── Section 2: Background ──────────────────────────────
     with st.expander(

@@ -3,13 +3,19 @@
 Exercises the pure helpers (parsing + LOD selection + layout fallback)
 without spinning up Streamlit. The mosaic-array build itself is
 exercised by the Compute → Explorer end-to-end in tests/parity.
+
+v0.2.16 adds ``cache_dir`` kwarg to ``_pick_thumbnail_path`` for the
+local-cache redirect.
 """
 from __future__ import annotations
+
+from pathlib import Path
 
 from flake_analysis.ui.tab_explorer import (
     _build_grid_layout,
     _choose_lod,
     _parse_grid_coord,
+    _pick_thumbnail_path,
 )
 
 
@@ -68,3 +74,18 @@ def test_build_grid_layout_falls_back_to_square_on_unparseable_names():
     # Square layout; first row covers the first grid_w ids.
     assert grid_w * grid_h >= len(image_ids)
     assert coords[0] == (0, 0)
+
+
+def test_pick_thumbnail_path_legacy_in_folder():
+    # No cache_dir → legacy v0.2.15 in-folder layout.
+    root = Path("/some/analysis/00_thumbnails")
+    p = _pick_thumbnail_path(root, "ix003_iy017", 1)
+    assert p == root / "lod1" / "ix003_iy017.webp"
+
+
+def test_pick_thumbnail_path_redirected_cache_dir():
+    # cache_dir set → resolves under the local cache, ignoring root.
+    root = Path("/Volumes/SMB/proj/00_thumbnails")
+    cache = "/Users/me/.cache/stand-alone-analyzer/thumbnails/abcd1234"
+    p = _pick_thumbnail_path(root, "ix003_iy017", 0, cache_dir=cache)
+    assert p == Path(cache) / "lod0" / "ix003_iy017.webp"

@@ -81,4 +81,8 @@ def run_thumbnails_step(
         "n_failed": int(result.get("n_failed", 0)),
         "params": result.get("params", {}),
         "params_hash": result.get("params_hash"),
+        # ``cache_dir`` is set when WebPs were redirected to a local
+        # disk cache (network-mount projects). UI surfaces this so the
+        # user knows where the bytes actually live.
+        "cache_dir": result.get("cache_dir"),
     }
