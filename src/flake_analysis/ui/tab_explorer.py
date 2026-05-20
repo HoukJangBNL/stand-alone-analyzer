@@ -600,22 +600,33 @@ def _render_substrate_grid(
     cell_px_for_lod = max(cell_w_budget, cell_h_budget)
     auto_lod = _choose_lod(cell_px_for_lod)
 
-    # LOD picker — Plotly's wheel/box zoom doesn't bubble back to
+    # LOD picker. Plotly's wheel/box zoom doesn't bubble back to
     # Streamlit (no relayout event), so we expose an explicit selector
-    # so the user can manually drop into a higher-detail tier when
-    # they zoom in. ``Auto`` picks based on the current cell-px budget.
+    # so the user can manually drop into a higher-detail tier. ``Auto``
+    # picks based on the current cell-px budget.
+    #
+    # Streamlit GC pattern: canonical store ``explorer.lod`` survives
+    # mode-button reruns; widget key ``explorer_lod_choice_widget`` is
+    # re-seeded from canonical on every render but only when missing
+    # (post-GC rehydrate) so the user's just-submitted value isn't
+    # clobbered (same pattern as the Selector axis pickers).
     lod_options = ["Auto", "lod0 (64×40)", "lod1 (192×120)", "lod2 (480×300)", "raw"]
-    if "explorer.lod_choice" not in st.session_state:
-        st.session_state["explorer.lod_choice"] = "Auto"
+    if "explorer.lod" not in st.session_state:
+        st.session_state["explorer.lod"] = "Auto"
+    if "explorer_lod_choice_widget" not in st.session_state:
+        st.session_state["explorer_lod_choice_widget"] = (
+            st.session_state["explorer.lod"]
+        )
     lod_choice = st.selectbox(
         "Mosaic detail",
         lod_options,
-        index=lod_options.index(st.session_state["explorer.lod_choice"]),
-        key="explorer_lod_choice",
+        key="explorer_lod_choice_widget",
         help="Auto picks LOD by cell size. Override to force a tier "
-             "(higher detail = slower, raw = read each image fresh).",
+             "(higher detail = slower, raw = read each image fresh). "
+             "Forced tiers also enlarge the chart so the extra pixels "
+             "are visible without zooming.",
     )
-    st.session_state["explorer.lod_choice"] = lod_choice
+    st.session_state["explorer.lod"] = lod_choice
     if lod_choice == "Auto":
         lod = auto_lod
     elif lod_choice.startswith("lod0"):
@@ -628,19 +639,27 @@ def _render_substrate_grid(
         lod = _RAW_LOD
 
     # Cell aspect ratio mirrors the LOD pyramid (8:5 = 1.6:1).
-    # When the user manually picks a higher LOD than Auto would have
-    # chosen, scale the cell up to match the LOD's native size so the
-    # extra pixels actually have somewhere to go (otherwise a 480×300
-    # thumbnail downsampled into a 64×40 cell wastes the work).
+    # When the user manually picks a tier above Auto, scale the cell
+    # up to that LOD's native size so the extra pixels are actually
+    # visible. The chart height + width are also bumped (below) so
+    # the larger cells aren't crammed into the default 500 px box.
     cell_aspect = 8 / 5
     if lod_choice != "Auto":
-        # Native LOD size — up to 4× current budget, hard cap 480 wide
-        # so the chart stays in the viewport.
-        lod_native_h = {0: 40, 1: 120, 2: 300, _RAW_LOD: 300}.get(lod, 40)
-        cell_h = max(8, min(int(round(lod_native_h)), 4 * cell_h_budget))
+        lod_native_h = {0: 40, 1: 120, 2: 300, _RAW_LOD: 600}.get(lod, 40)
+        cell_h = max(8, int(round(lod_native_h)))
     else:
         cell_h = max(8, int(round(cell_h_budget)))
     cell_w = max(8, int(round(cell_h * cell_aspect)))
+
+    # Effective chart height = cell_h × grid_h (auto-fit). For Auto
+    # mode we keep the legacy 500 px ceiling. For forced LODs we let
+    # the chart grow up to a generous ceiling so the user can scroll
+    # the page to inspect the bigger mosaic.
+    if lod_choice == "Auto":
+        effective_height = _MOSAIC_HEIGHT_PX
+    else:
+        # Cap at 4000 px to avoid runaway memory on huge grids.
+        effective_height = min(4000, max(_MOSAIC_HEIGHT_PX, cell_h * grid_h))
 
     # Pass / fail per image_id.
     pass_set: Set[int] = set(filtered["flake_id"].astype(int).tolist())
@@ -761,7 +780,7 @@ def _render_substrate_grid(
                 )
 
     fig.update_layout(
-        height=_MOSAIC_HEIGHT_PX,
+        height=int(effective_height),
         margin=dict(l=10, r=10, t=10, b=10),
         xaxis=dict(visible=False, range=[0, grid_w * cell_w]),
         yaxis=dict(
