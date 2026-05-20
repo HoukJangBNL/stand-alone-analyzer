@@ -155,16 +155,21 @@ def _seeds_from_assignments(
     labels: Dict[str, Any],
     assignments_df: pd.DataFrame,
     live_thresholds: Dict[int, float],
+    max_mahalanobis: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Convert the committed cluster assignment into seed groups.
 
     Useful when the user wants to iterate: take the post-fit clustering
-    (filtered by the current live thresholds), feed it back as fresh
-    seed groups for the next Fit. Each cluster becomes one named group
-    using the names from ``labels.groups``.
+    (filtered by the current live thresholds + distance gate), feed it
+    back as fresh seed groups for the next Fit. Each cluster becomes
+    one named group using the names from ``labels.groups``.
     """
     groups_meta = labels.get("groups", [])
     id_to_name = {int(g["id"]): str(g.get("name", f"cluster {g['id']}")) for g in groups_meta}
+    has_mah = (
+        "nearest_mahalanobis" in assignments_df.columns
+        and max_mahalanobis is not None
+    )
 
     out: List[Dict[str, Any]] = []
     for cid in sorted(id_to_name):
@@ -173,6 +178,8 @@ def _seeds_from_assignments(
             (assignments_df["cluster_label"] == cid)
             & (assignments_df["max_posterior"] >= thresh)
         ]
+        if has_mah:
+            sub = sub[sub["nearest_mahalanobis"] <= float(max_mahalanobis)]
         ids = sorted(int(d) for d in sub["domain_id"].tolist())
         if ids:
             out.append({"name": id_to_name[cid], "domain_ids": ids})
@@ -263,6 +270,7 @@ def _render_seed_group_panel(
     labels: Optional[Dict[str, Any]] = None,
     assignments_df: Optional[pd.DataFrame] = None,
     live_thresholds: Optional[Dict[int, float]] = None,
+    live_max_mahalanobis: Optional[float] = None,
 ) -> None:
     """Seed group management UI — vertical layout for the sidebar drawer.
 
@@ -391,6 +399,7 @@ def _render_seed_group_panel(
         ):
             new_seeds = _seeds_from_assignments(
                 labels or {}, assignments_df, live_thresholds or {},
+                max_mahalanobis=live_max_mahalanobis,
             )
             st.session_state[SEED_GROUPS_KEY] = new_seeds
             _brushing.clear_selection(state)
@@ -546,29 +555,38 @@ def _live_cluster_assign(
     labels: Dict[str, Any],
     assignments_df: Optional[pd.DataFrame],
     live_thresholds: Dict[int, float],
+    max_mahalanobis: Optional[float] = None,
 ) -> Dict[int, int]:
-    """Apply ``live_thresholds`` to assignments to build a preview map.
+    """Apply ``live_thresholds`` + distance gate to assignments.
 
-    Domains whose ``max_posterior`` is below the cluster's live
-    threshold get cluster_id ``-1`` (= neutral gray on the scatter)
-    so the user sees how shrinking / growing the threshold reshapes
-    the colour map without committing to disk. Falls back to the
-    plain assignments dict from ``labels`` when the parquet is not
-    available (older analyses).
+    Two stages mirror the engine's ``_apply_filter1``:
+    1. **Distance gate** — when ``max_mahalanobis`` is given and the
+       parquet has a ``nearest_mahalanobis`` column, drop any domain
+       whose nearest-cluster distance exceeds the cap (label = -1).
+    2. **Posterior threshold** — drop survivors whose ``max_posterior``
+       is below their cluster's slider value.
     """
     if assignments_df is None or "max_posterior" not in assignments_df.columns:
         return {
             int(k): int(v)
             for k, v in (labels.get("assignments") or {}).items()
         }
+    has_mah = (
+        "nearest_mahalanobis" in assignments_df.columns
+        and max_mahalanobis is not None
+    )
     out: Dict[int, int] = {}
     for _, row in assignments_df.iterrows():
         cid = int(row["cluster_label"])
+        did = int(row["domain_id"])
         if cid < 0:
-            out[int(row["domain_id"])] = cid
+            out[did] = cid
+            continue
+        if has_mah and float(row["nearest_mahalanobis"]) > float(max_mahalanobis):
+            out[did] = -1
             continue
         thresh = float(live_thresholds.get(cid, 0.5))
-        out[int(row["domain_id"])] = (
+        out[did] = (
             cid if float(row["max_posterior"]) >= thresh else -1
         )
     return out
@@ -726,6 +744,47 @@ def _render_diagnostics(result: Dict[str, Any]) -> None:
             f"- ⚠ {n_sel} NPZ entries skipped (no longer in selector)"
         )
     st.warning("\n".join(lines))
+
+
+def _render_distance_gate_slider(
+    assignments_df: Optional[pd.DataFrame],
+    initial_max: float = 3.0,
+) -> Optional[float]:
+    """Live Mahalanobis distance gate (sigma units).
+
+    Re-filters domains whose nearest-cluster distance exceeds the cap,
+    without re-fitting the GMM. Returns the chosen cap, or ``None``
+    when the parquet has no ``nearest_mahalanobis`` column (= older
+    fit, gate not applicable).
+    """
+    if (
+        assignments_df is None
+        or "nearest_mahalanobis" not in assignments_df.columns
+    ):
+        st.caption("Distance gate unavailable (re-Fit to enable).")
+        return None
+
+    if "clu.max_mah_live" not in st.session_state:
+        st.session_state["clu.max_mah_live"] = float(initial_max)
+    if "clu_max_mah_live" not in st.session_state:
+        st.session_state["clu_max_mah_live"] = float(
+            st.session_state["clu.max_mah_live"]
+        )
+    cap = st.slider(
+        "Distance gate (σ)",
+        min_value=0.5, max_value=8.0, step=0.1,
+        key="clu_max_mah_live",
+        help="Domains farther than this from every cluster centre "
+             "(in seed Mahalanobis units) are left unassigned. Lower "
+             "= tighter cluster regions.",
+    )
+    st.session_state["clu.max_mah_live"] = float(cap)
+
+    n_in = int((assignments_df["nearest_mahalanobis"] <= cap).sum())
+    n_total = int(len(assignments_df))
+    n_out = n_total - n_in
+    st.caption(f"{n_in:,} inside gate · {n_out:,} unassigned")
+    return float(cap)
 
 
 def _render_per_cluster_thresholds_sidebar(
@@ -889,6 +948,24 @@ def _render_fit_gmm_button(
     st.session_state["clu.fit_scope"] = fit_scope
     st.session_state["clu_fit_scope"] = fit_scope
 
+    # Initial Mahalanobis distance gate baked into the fit. The user can
+    # tighten / loosen this without re-fitting via the live distance
+    # slider rendered alongside the per-cluster threshold sliders.
+    if "clu.max_mah_initial" not in st.session_state:
+        st.session_state["clu.max_mah_initial"] = 3.0
+    if "clu_max_mah_initial" not in st.session_state:
+        st.session_state["clu_max_mah_initial"] = float(
+            st.session_state["clu.max_mah_initial"]
+        )
+    max_mah_initial = st.slider(
+        "Initial distance gate (σ)",
+        min_value=0.5, max_value=6.0, step=0.1,
+        key="clu_max_mah_initial",
+        help="Domains farther than this many seed-σ from every cluster are "
+             "left unassigned (label=-1). 3.0 ≈ 99% Chi² ellipse for 3D RGB.",
+    )
+    st.session_state["clu.max_mah_initial"] = float(max_mah_initial)
+
     if not st.button(
         "▶ Fit GMM",
         type="primary",
@@ -910,6 +987,7 @@ def _render_fit_gmm_button(
             analysis_folder=analysis_folder,
             seed_groups=seed_groups,
             fit_scope=fit_scope,
+            max_mahalanobis=float(max_mah_initial),
             progress_callback=cb,
         )
         progress_bar.progress(1.0, "Done")
@@ -931,7 +1009,7 @@ def render_clustering_sidebar(
     analysis_folder: str,
     labels: Optional[Dict[str, Any]],
     assignments_df: Optional[pd.DataFrame],
-) -> tuple[str, str, bool, Dict[int, float]]:
+) -> tuple[str, str, bool, Dict[int, float], Optional[float]]:
     """Render the Clustering control drawer in the sidebar.
 
     Mirrors the Selector tab drawer (commit 1e74935 / v0.2.4): a single
@@ -940,12 +1018,13 @@ def render_clustering_sidebar(
     axis pickers, optional 3D toggle, the Fit GMM button, AND (when a
     fit is on disk) the per-cluster threshold sliders.
 
-    Returns ``(x_axis, y_axis, show_3d, live_thresholds)`` so the tab
-    body can render the same scatter + use the live thresholds to
-    re-color cluster members on the fly.
+    Returns ``(x_axis, y_axis, show_3d, live_thresholds, live_max_mah)``
+    so the tab body can render the same scatter + use the live filter
+    state to re-color cluster members on the fly.
     """
     seed_groups = _ensure_session_seed_groups()
     live_thresh: Dict[int, float] = {}
+    live_max_mah: Optional[float] = None
     with st.sidebar.expander("⚙ Clustering controls", expanded=True):
         _brushing.render_mode_controls(state, "clustering", compact=True)
         st.divider()
@@ -971,6 +1050,11 @@ def render_clustering_sidebar(
             labels=labels,
             assignments_df=assignments_df,
             live_thresholds=live_thresh,
+            live_max_mahalanobis=(
+                float(st.session_state["clu.max_mah_live"])
+                if "clu.max_mah_live" in st.session_state
+                else None
+            ),
         )
         st.divider()
 
@@ -998,13 +1082,22 @@ def render_clustering_sidebar(
         # separate explicit button.
         if labels is not None:
             st.divider()
+            # Initial gate baked into the fit, when known.
+            initial_gate = float(
+                (labels.get("params") or {}).get("max_mahalanobis", 3.0)
+            ) if labels else 3.0
+            st.caption("**Distance gate (live)**")
+            live_max_mah = _render_distance_gate_slider(
+                assignments_df, initial_max=initial_gate,
+            )
+            st.divider()
             st.caption("**Per-cluster thresholds (live)**")
             live_thresh = _render_per_cluster_thresholds_sidebar(
                 labels, assignments_df,
             )
             _render_threshold_apply_button(analysis_folder, live_thresh)
 
-    return x_axis, y_axis, show_3d, live_thresh
+    return x_axis, y_axis, show_3d, live_thresh, live_max_mah
 
 
 def render_tab_clustering(
@@ -1078,7 +1171,7 @@ def render_tab_clustering(
 
     # Sidebar drawer needs the labels/assignments to render the live
     # threshold sliders, so we load it first.
-    x_axis, y_axis, show_3d, live_thresh = render_clustering_sidebar(
+    x_axis, y_axis, show_3d, live_thresh, live_max_mah = render_clustering_sidebar(
         state, stats, analysis_folder, labels, assignments_df,
     )
 
@@ -1086,6 +1179,7 @@ def render_tab_clustering(
     if labels:
         cluster_assign = _live_cluster_assign(
             labels, assignments_df, live_thresh,
+            max_mahalanobis=live_max_mah,
         )
 
     arrays = _build_clu_scatter_arrays(stats, state, x_axis, y_axis)

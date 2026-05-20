@@ -36,6 +36,10 @@ class InteractiveClusterResult:
     covariances: Optional[np.ndarray] = None   # (K, 3, 3) GMM covariances
     weights: Optional[np.ndarray] = None       # (K,) GMM component weights
     thresholds: Optional[list] = None          # per-cluster probability thresholds
+    # (N,) Mahalanobis distance to the *closest* cluster, recorded so the
+    # UI can drive a live distance-gate slider without re-running GMM.
+    nearest_mahalanobis: Optional[np.ndarray] = None
+    max_mahalanobis: float = 3.0
 
 
 class InteractiveClusteringEngine:
@@ -53,6 +57,11 @@ class InteractiveClusteringEngine:
         self._repr_rgbs: Optional[np.ndarray] = None
         self._raw_posteriors: Optional[np.ndarray] = None  # (N, K) from GMM
         self._thresholds: List[float] = []
+        # (N, K) Mahalanobis distance to each component, computed once per
+        # fit so the live distance-gate threshold can re-filter without
+        # re-running GMM. ``None`` until ``fit`` runs.
+        self._mahalanobis: Optional[np.ndarray] = None
+        self._max_mahalanobis: float = 3.0
 
     def fit(
         self,
@@ -63,6 +72,7 @@ class InteractiveClusteringEngine:
         max_iter: int = 100,
         tol: float = 1e-4,
         fit_scope: str = "seeds",
+        max_mahalanobis: float = 3.0,
     ) -> InteractiveClusterResult:
         """Fit GMM on the seed-defined subset, then score everyone.
 
@@ -160,8 +170,30 @@ class InteractiveClusteringEngine:
 
         # Compute posteriors for ALL flakes (the seeds drove the fit;
         # non-seed selector-passing domains get scored against the
-        # seed-tightened model and are filtered by threshold).
+        # seed-tightened model).
         self._raw_posteriors = self._gmm.predict_proba(repr_rgbs)
+
+        # Per-component Mahalanobis distance ‖x − μ_k‖_{Σ_k^-1} for
+        # each (point, cluster). Drives the distance gate that rejects
+        # points sitting outside *every* seed's covariance ellipsoid —
+        # ``argmax(posteriors)`` alone could not do that because
+        # posteriors sum to 1 (a point far from all clusters still gets
+        # one with probability 1.0). The gate solves the user-reported
+        # issue "100개 데이터 포인트가 모두 그룹에 설정되게 되어 있는
+        # 것 같아".
+        means = self._gmm.means_  # (K, 3)
+        covs = self._gmm.covariances_  # (K, 3, 3) for full covariance
+        n = repr_rgbs.shape[0]
+        k = means.shape[0]
+        mah = np.zeros((n, k), dtype=np.float64)
+        for ci in range(k):
+            inv_cov = np.linalg.pinv(covs[ci])
+            diff = repr_rgbs - means[ci]
+            mah[:, ci] = np.sqrt(
+                np.einsum("ni,ij,nj->n", diff, inv_cov, diff)
+            )
+        self._mahalanobis = mah
+        self._max_mahalanobis = float(max_mahalanobis)
 
         msg.info(f"GMM converged in {self._gmm.n_iter_} iterations")
 
@@ -171,6 +203,7 @@ class InteractiveClusteringEngine:
         self,
         rgb_threshold: Optional[float] = None,
         thresholds: Optional[List[float]] = None,
+        max_mahalanobis: Optional[float] = None,
     ) -> InteractiveClusterResult:
         """Re-apply filters with new thresholds without re-running GMM.
 
@@ -194,12 +227,41 @@ class InteractiveClusteringEngine:
         elif rgb_threshold is not None:
             k = self._gmm.n_components
             self._thresholds = [rgb_threshold] * k
+        if max_mahalanobis is not None:
+            self._max_mahalanobis = float(max_mahalanobis)
 
         return self._apply_filters()
 
     def _apply_filter1(self) -> np.ndarray:
-        """Apply Filter 1 with per-cluster probability thresholds."""
-        labels = self._raw_posteriors.argmax(axis=1)  # (N,)
+        """Distance-gated label assignment.
+
+        Two stages, both required:
+
+        1. **Distance gate** — for each point, find the closest cluster
+           by Mahalanobis distance. If that distance exceeds
+           ``self._max_mahalanobis`` (≈ N-sigma in the seed covariance),
+           the point is unassigned (label = ``-1``). This is what
+           prevents distant non-seed selector-pass domains from being
+           force-mapped into a cluster by ``argmax``.
+        2. **Posterior threshold** — among the points that survived the
+           distance gate, drop those whose max posterior is below the
+           per-cluster threshold. Useful when two seed clusters overlap
+           and the user wants to keep only confident assignments.
+        """
+        # Closest cluster by Mahalanobis distance (not by posterior —
+        # posteriors are relative; distances are absolute).
+        nearest = self._mahalanobis.argmin(axis=1)
+        nearest_dist = self._mahalanobis[
+            np.arange(self._mahalanobis.shape[0]), nearest
+        ]
+        # Distance-gate mask: True ⇒ within seed-covariance ellipsoid
+        # of *some* cluster.
+        within_gate = nearest_dist <= float(self._max_mahalanobis)
+
+        labels = np.where(within_gate, nearest, -1).astype(np.int64)
+
+        # Posterior threshold (legacy filter 1) — applied only to points
+        # that already passed the distance gate.
         for k in range(self._gmm.n_components):
             threshold = self._thresholds[k] if k < len(self._thresholds) else 0.5
             cluster_mask = labels == k
@@ -213,6 +275,11 @@ class InteractiveClusteringEngine:
         """Apply Filter 1 and return result."""
         labels = self._apply_filter1()
         max_posteriors = self._raw_posteriors.max(axis=1)
+        nearest_mah = (
+            self._mahalanobis.min(axis=1)
+            if self._mahalanobis is not None
+            else None
+        )
 
         return InteractiveClusterResult(
             labels=labels,
@@ -222,4 +289,6 @@ class InteractiveClusteringEngine:
             covariances=self._gmm.covariances_.copy(),
             weights=self._gmm.weights_.copy(),
             thresholds=list(self._thresholds),
+            nearest_mahalanobis=nearest_mah,
+            max_mahalanobis=float(self._max_mahalanobis),
         )

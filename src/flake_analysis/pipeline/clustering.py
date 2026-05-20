@@ -59,6 +59,7 @@ def run_clustering_step(
     rgb_threshold: float = 0.50,
     cluster_thresholds: Optional[Dict[int, float]] = None,
     fit_scope: str = "seeds",
+    max_mahalanobis: float = 3.0,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Fit manual seed-group GMM and persist outputs.
@@ -123,6 +124,7 @@ def run_clustering_step(
         "random_state": random_state,
         "rgb_threshold": rgb_threshold,
         "fit_scope": fit_scope,
+        "max_mahalanobis": max_mahalanobis,
     }
     if cluster_thresholds is not None:
         params["cluster_thresholds"] = {
@@ -137,6 +139,7 @@ def run_clustering_step(
         output_dir=output_dir,
         rgb_threshold=rgb_threshold,
         fit_scope=fit_scope,
+        max_mahalanobis=max_mahalanobis,
         progress_callback=progress_callback,
     )
 

@@ -107,6 +107,7 @@ def run_clustering(
     max_iter: int = 100,
     tol: float = 1e-4,
     fit_scope: str = "seeds",
+    max_mahalanobis: float = 3.0,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Fit GMM with manual seed groups and persist labels + model.
@@ -232,19 +233,25 @@ def run_clustering(
         max_iter=max_iter,
         tol=tol,
         fit_scope=fit_scope,
+        max_mahalanobis=max_mahalanobis,
     )
 
     if progress_callback is not None:
         progress_callback(0.8, "Computing posteriors...")
 
     # --- Persist outputs -------------------------------------------------
-    assignments_df = pd.DataFrame(
-        {
-            "domain_id": selected_domain_ids.astype(np.int64),
-            "cluster_label": result.labels.astype(np.int64),
-            "max_posterior": result.probabilities.astype(np.float64),
-        }
-    )
+    assignments_data: Dict[str, Any] = {
+        "domain_id": selected_domain_ids.astype(np.int64),
+        "cluster_label": result.labels.astype(np.int64),
+        "max_posterior": result.probabilities.astype(np.float64),
+    }
+    # Nearest-cluster Mahalanobis distance — feeds the live distance
+    # gate slider in the UI so the user can re-filter without re-fit.
+    if result.nearest_mahalanobis is not None:
+        assignments_data["nearest_mahalanobis"] = (
+            result.nearest_mahalanobis.astype(np.float64)
+        )
+    assignments_df = pd.DataFrame(assignments_data)
     assignments_path = output_dir / "assignments.parquet"
     assignments_df.to_parquet(assignments_path, engine="pyarrow", index=False)
 
@@ -327,6 +334,7 @@ def run_clustering(
         "tol": tol,
         "random_state": 42,
         "fit_scope": fit_scope,
+        "max_mahalanobis": max_mahalanobis,
     }
     return {
         "labels_path": labels_path,
