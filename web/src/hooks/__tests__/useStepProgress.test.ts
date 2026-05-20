@@ -61,4 +61,44 @@ describe('useStepProgress', () => {
     releaseDone()
     await waitFor(() => expect(result.current.status).toBe('done'))
   })
+
+  it('surfaces SSE error envelope message and sets error status', async () => {
+    const encoder = new TextEncoder()
+    const errorPayload = {
+      error: {
+        code: 'pipeline_failed',
+        message: 'thumbnails step crashed',
+        details: { exc_type: 'RuntimeError' },
+        request_id: 'req-123',
+      },
+    }
+
+    const mockStream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            `event: error\ndata: ${JSON.stringify(errorPayload)}\n\n`
+          )
+        )
+        controller.close()
+      },
+    })
+
+    global.fetch = vi.fn().mockResolvedValue(
+      new Response(mockStream, {
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    )
+
+    const { result } = renderHook(() =>
+      useStepProgress('local', 'thumbnails')
+    )
+
+    act(() => {
+      result.current.start({})
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('error'))
+    expect(result.current.message).toBe('thumbnails step crashed')
+  })
 })
