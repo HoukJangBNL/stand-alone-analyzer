@@ -7,9 +7,15 @@ from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
 from flake_analysis.api.mutex import acquire_project_lock
 from flake_analysis.api.sse import ProgressBridge, emit_sse_event
-from flake_analysis.api.schemas.compute import BackgroundParams, DomainStatsParams, ThumbnailsParams
+from flake_analysis.api.schemas.compute import (
+    BackgroundParams,
+    DomainProximityParams,
+    DomainStatsParams,
+    ThumbnailsParams,
+)
 from flake_analysis.state.manifest import Manifest
 from flake_analysis.pipeline.background import run_background_step
+from flake_analysis.pipeline.domain_proximity import run_domain_proximity_step
 from flake_analysis.pipeline.domain_stats import run_domain_stats_step
 from flake_analysis.pipeline.thumbnails import run_thumbnails_step
 
@@ -147,6 +153,63 @@ async def run_domain_stats(
             analysis_folder=manifest.analysis_folder,
             repr_mode=params.repr_mode,
             raw_ext=params.raw_ext,
+            progress_callback=bridge.emit_progress,
+        )
+
+    async def generate():
+        loop = asyncio.get_running_loop()
+
+        async def run_pipeline():
+            try:
+                result = await loop.run_in_executor(None, call_wrapper)
+                bridge.emit_done(result)
+            except Exception as e:
+                bridge.emit_error("pipeline_failed", str(e), {"exc_type": type(e).__name__})
+            finally:
+                bridge.close()
+
+        task = asyncio.create_task(run_pipeline())
+        try:
+            async for event in bridge.stream():
+                yield emit_sse_event(event["type"], event)
+        finally:
+            try:
+                await task
+            finally:
+                await lock_cm.__aexit__(None, None, None)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/domain_proximity")
+async def run_domain_proximity(
+    project_id: str,
+    params: DomainProximityParams,
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Run domain proximity step with SSE progress."""
+    # Acquire the project lock synchronously so a contended request gets an
+    # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
+    # that opens and immediately errors. The lock must be held for the lifetime
+    # of the generator, so we enter the context manager manually here and exit
+    # it in the generator's finally block.
+    lock_cm = acquire_project_lock(project_id)
+    await lock_cm.__aenter__()
+
+    bridge = ProgressBridge()
+
+    def call_wrapper():
+        return run_domain_proximity_step(
+            annotations_path=manifest.annotations_path,
+            analysis_folder=manifest.analysis_folder,
+            r_max_px=params.r_max_px,
+            min_area_px=params.min_area_px,
+            max_area_px=params.max_area_px,
+            d_touch_px=params.d_touch_px,
+            pixel_size_um=params.pixel_size_um,
+            link_distance_um=params.link_distance_um,
+            workers=params.workers,
             progress_callback=bridge.emit_progress,
         )
 
