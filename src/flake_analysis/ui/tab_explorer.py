@@ -7,19 +7,22 @@ interactive review of flakes (groups of touching domains) with:
 * 3-column Include / Exclude / Available label picker
 * NeighborFilter (size, isolation, border-clipped) — size active in PR 2.5
 * 2x2 render toggles (Plan v34 defaults; rendering deferred to M3)
-* 3-pane Z-layout: substrate grid (LOD 2) · flake list · DetailPanel
+* 3-pane Z-layout: substrate raw-image mosaic · flake list · DetailPanel
 
-Per plan v1 r9 §M2 PR 2.5 + §10 R9 spike (LOD 2 only; LOD 0/1/3 deferred).
+Per plan v1 r9 §M2 PR 2.5 + §10 R9 spike. v0.2.15 swaps the
+heatmap-style grid for a real WebP mosaic backed by the ``thumbnails``
+LOD pyramid (``00_thumbnails/lod{0,1,2}/`` + raw fallback).
 
 Mockup: ``06_tab_explorer.html``.
 Qpress reference:
 ``.agents/tasks/standalone_flake_tool/qpress_explorer_reference.md``.
 
-Image rendering, bbox/outline overlays, Geometry+MaskStats sections are
-explicitly deferred to M3 polish.
+Bbox/outline overlays, Geometry+MaskStats sections are explicitly
+deferred to M3 polish.
 """
 from __future__ import annotations
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -301,16 +304,216 @@ def _render_render_toggles() -> None:
         st.checkbox("Island outline", key=TOGGLE_KEYS[3])
 
 
-# ─── Substrate canvas (LOD 2 grid) ───────────────────────────────────────
+# ─── Substrate canvas (raw-image mosaic) ─────────────────────────────────
+
+# Mosaic chart pixel budget — kept in sync with go.Image y-axis range.
+_MOSAIC_HEIGHT_PX: int = 500
+
+# LOD width thresholds (1.5× the cached LOD widths so a cell never
+# upscales a thumbnail by more than 1.5×). LOD 3 = raw image.
+# Cached LODs come from ``core.pipeline.thumbnails.LOD_SIZES``.
+_LOD_THRESHOLDS: Tuple[Tuple[int, int], ...] = (
+    (96, 0),   # cell_px <= 96   → lod0  (64×40 thumb)
+    (288, 1),  # cell_px <= 288  → lod1  (192×120 thumb)
+    (720, 2),  # cell_px <= 720  → lod2  (480×300 thumb)
+)
+_RAW_LOD: int = 3
+
+# ix###_iy###  (the leading "ix" tag identifies the column, "iy" the row).
+_GRID_RE = re.compile(r"ix(\d+)_iy(\d+)")
+
+
+def _parse_grid_coord(image_name: str) -> Optional[Tuple[int, int]]:
+    """Return ``(col, row)`` parsed from filenames like ``ix003_iy017.png``.
+
+    Returns ``None`` when the name doesn't match — caller falls back to a
+    square ``divmod(i, sqrt(n))`` layout.
+    """
+    if not image_name:
+        return None
+    m = _GRID_RE.search(image_name)
+    if m is None:
+        return None
+    try:
+        col = int(m.group(1))
+        row = int(m.group(2))
+    except (TypeError, ValueError):
+        return None
+    return col, row
+
+
+def _load_thumbnail_index(analysis_folder: str) -> Optional[Dict[str, Any]]:
+    """Read ``00_thumbnails/index.json`` if present.
+
+    Returns ``None`` when the file is missing or malformed — caller
+    surfaces a "Run Compute → Thumbnails first" warning.
+    """
+    p = Path(analysis_folder) / "00_thumbnails" / "index.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _choose_lod(cell_px: int) -> int:
+    """Map a per-cell pixel budget to a LOD index (0..3).
+
+    Returns 3 for the implicit raw-image LOD.
+    """
+    for limit, lod in _LOD_THRESHOLDS:
+        if cell_px <= limit:
+            return lod
+    return _RAW_LOD
+
+
+def _pick_thumbnail_path(
+    thumbnail_root: Path, raw_stem: str, lod: int
+) -> Path:
+    """Resolve the on-disk WebP path for a given raw stem + LOD."""
+    return thumbnail_root / f"lod{lod}" / f"{raw_stem}.webp"
+
+
+def _resolve_raw_path(
+    raw_images_dir: str, raw_stem: str, raw_ext: str
+) -> Path:
+    return Path(raw_images_dir) / f"{raw_stem}{raw_ext}"
+
+
+def _build_grid_layout(
+    image_ids: List[int],
+    image_id_to_name: Dict[int, str],
+) -> Tuple[int, int, Dict[int, Tuple[int, int]]]:
+    """Return ``(grid_w, grid_h, image_id → (col, row))``.
+
+    Tries to parse ``ix###_iy###`` from each image's raw filename. If
+    every name parses, the returned grid spans the actual coordinate
+    extents (origin = top-left, row 0 at the top). If any name fails,
+    falls back to the square ``divmod(i, sqrt(n))`` layout used in
+    earlier versions.
+    """
+    coords: Dict[int, Tuple[int, int]] = {}
+    parsed_all = True
+    for iid in image_ids:
+        name = image_id_to_name.get(int(iid), "")
+        rc = _parse_grid_coord(name)
+        if rc is None:
+            parsed_all = False
+            break
+        coords[int(iid)] = rc
+
+    if parsed_all and coords:
+        cols = [c for c, _ in coords.values()]
+        rows = [r for _, r in coords.values()]
+        grid_w = (max(cols) - min(cols) + 1)
+        grid_h = (max(rows) - min(rows) + 1)
+        cmin, rmin = min(cols), min(rows)
+        # Normalise to (0..grid_w-1, 0..grid_h-1).
+        coords = {iid: (c - cmin, r - rmin) for iid, (c, r) in coords.items()}
+        return int(grid_w), int(grid_h), coords
+
+    # Fallback: square layout in image_id sort order.
+    n = len(image_ids)
+    grid_w = max(1, int(np.ceil(np.sqrt(n))))
+    grid_h = max(1, int(np.ceil(n / grid_w)))
+    fallback: Dict[int, Tuple[int, int]] = {}
+    for i, iid in enumerate(image_ids):
+        r, c = divmod(i, grid_w)
+        fallback[int(iid)] = (c, r)
+    return grid_w, grid_h, fallback
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def _build_mosaic_array(
+    *,
+    analysis_folder: str,
+    raw_images_dir: str,
+    raw_ext: str,
+    lod: int,
+    cell_w: int,
+    cell_h: int,
+    grid_w: int,
+    grid_h: int,
+    placement: Tuple[Tuple[int, int, int], ...],
+    pass_image_ids: Tuple[int, ...],
+    _cache_buster: str,
+) -> np.ndarray:
+    """Assemble the ``(grid_h*cell_h, grid_w*cell_w, 3)`` RGB mosaic.
+
+    ``placement`` is ``(image_id, col, row, raw_stem)``-tuples flattened
+    to fit the ``@st.cache_data`` hashing requirements. ``raw_stem`` is
+    derived from ``image_id_to_name`` upstream.
+
+    Tiles whose ``image_id`` is **not** in ``pass_image_ids`` are
+    desaturated to grayscale at 50% opacity blended with white so they
+    visually recede behind the passing tiles.
+
+    ``_cache_buster`` should be the ``thumbnails`` step ``completed_at``
+    so re-running thumbnails invalidates the cache.
+    """
+    from PIL import Image
+
+    pass_set = set(pass_image_ids)
+    H, W = grid_h * cell_h, grid_w * cell_w
+    canvas = np.full((H, W, 3), 255, dtype=np.uint8)
+    thumbnail_root = Path(analysis_folder) / "00_thumbnails"
+
+    # Reconstruct the placement tuples: stored as flat (iid, col, row, stem)
+    # entries because @st.cache_data requires hashable inputs.
+    for entry in placement:
+        # entry is (iid, col, row, stem)
+        iid_, col, row, stem = entry
+        iid = int(iid_)
+        if not stem:
+            continue
+
+        if lod >= _RAW_LOD:
+            tile_path = _resolve_raw_path(raw_images_dir, stem, raw_ext)
+        else:
+            tile_path = _pick_thumbnail_path(thumbnail_root, stem, lod)
+
+        try:
+            img = Image.open(tile_path).convert("RGB")
+            img = img.resize((cell_w, cell_h), Image.LANCZOS)
+            arr = np.asarray(img, dtype=np.uint8)
+        except Exception:
+            # Missing tile → leave the white canvas in place.
+            continue
+
+        if iid not in pass_set:
+            # Grayscale + 50% white blend → faded receding effect.
+            gray = arr.mean(axis=2, keepdims=True)
+            faded = (
+                np.broadcast_to(gray, arr.shape) * 0.5 + 255 * 0.5
+            ).astype(np.uint8)
+            arr = faded
+
+        y0 = row * cell_h
+        x0 = col * cell_w
+        canvas[y0:y0 + cell_h, x0:x0 + cell_w, :] = arr
+
+    return canvas
+
 
 def _render_substrate_grid(
-    filtered: pd.DataFrame, all_df: pd.DataFrame, labels: Dict[str, Any]
+    filtered: pd.DataFrame,
+    all_df: pd.DataFrame,
+    labels: Dict[str, Any],
+    *,
+    analysis_folder: str,
+    raw_images_dir: str,
+    annotations_path: str,
+    manifest: Any,
 ) -> None:
-    """LOD 2 substrate grid via Plotly heatmap.
+    """Substrate raw-image mosaic, LOD-driven by chart cell size.
 
-    Each cell = one ``image_id`` tile. Color = pass-ratio
-    (n_pass / n_total) for that tile under the current filter. The
-    selected flake's tile is highlighted with a gold rectangle.
+    Each tile is one ``image_id`` from the dataset, sourced from the
+    pre-rendered LOD pyramid in ``00_thumbnails/`` (or the raw image
+    when fully zoomed in). Tiles whose ``image_id`` has no passing
+    flake under the current filter are dimmed + desaturated; the
+    selected flake's tile gets a gold highlight. Click a tile to
+    select the first flake in it.
     """
     import plotly.graph_objects as go
 
@@ -318,11 +521,62 @@ def _render_substrate_grid(
         st.info("No flakes to display.")
         return
 
-    image_ids = sorted(all_df["image_id"].unique().tolist())
-    n_imgs = len(image_ids)
-    grid_w = max(1, int(np.ceil(np.sqrt(n_imgs))))
-    grid_h = max(1, int(np.ceil(n_imgs / grid_w)))
+    # Bail out early if the user hasn't generated thumbnails yet — the
+    # mosaic depends on the LOD pyramid.
+    thumb_index = _load_thumbnail_index(analysis_folder)
+    if thumb_index is None:
+        st.warning(
+            "⚠ Thumbnails not generated. Run Compute → Thumbnails first."
+        )
+        return
 
+    # Build image_id → raw filename stem map. Annotations.json is the
+    # authoritative source for image_id ↔ file_name. Without it we
+    # cannot resolve thumbnails, so warn and bail.
+    image_id_to_name: Dict[int, str] = {}
+    image_id_to_stem: Dict[int, str] = {}
+    ann_p = Path(annotations_path) if annotations_path else None
+    if ann_p is not None and ann_p.exists():
+        try:
+            coco = json.loads(ann_p.read_text(encoding="utf-8"))
+            for img in coco.get("images", []):
+                iid = int(img.get("id", -1))
+                fn = str(img.get("file_name", ""))
+                if iid >= 0 and fn:
+                    image_id_to_name[iid] = fn
+                    image_id_to_stem[iid] = Path(fn).stem
+        except (OSError, ValueError, KeyError):
+            image_id_to_name = {}
+            image_id_to_stem = {}
+
+    if not image_id_to_stem:
+        st.warning(
+            "⚠ Mosaic requires annotations.json image entries to map "
+            "image_id → raw filename. Falling back to placeholder grid."
+        )
+
+    image_ids = sorted(int(i) for i in all_df["image_id"].unique().tolist())
+    n_imgs = len(image_ids)
+
+    # Layout — true (col, row) from filenames when available.
+    grid_w, grid_h, coord_map = _build_grid_layout(image_ids, image_id_to_name)
+
+    # Cell pixel budget = chart height / grid rows, capped at the chart
+    # width / grid cols so tiles don't overflow horizontally either.
+    # Microscopy tiles are landscape (w/h ≈ 1.6 — 1920×1200), so the
+    # vertical budget usually dominates.
+    cell_h_budget = max(1, _MOSAIC_HEIGHT_PX // max(1, grid_h))
+    # Width-side budget assumes ~960 px chart width (Streamlit ~60% column).
+    cell_w_budget = max(1, 960 // max(1, grid_w))
+    cell_px_for_lod = max(cell_w_budget, cell_h_budget)
+    lod = _choose_lod(cell_px_for_lod)
+
+    # Cell aspect ratio mirrors the LOD pyramid (8:5 = 1.6:1).
+    cell_aspect = 8 / 5
+    cell_h = max(8, int(round(cell_h_budget)))
+    cell_w = max(8, int(round(cell_h * cell_aspect)))
+
+    # Pass / fail per image_id.
     pass_set: Set[int] = set(filtered["flake_id"].astype(int).tolist())
     summary = (
         all_df.groupby("image_id")
@@ -336,65 +590,162 @@ def _render_substrate_grid(
         .reset_index()
     )
     summary_idx = summary.set_index("image_id")
-
-    matrix = np.zeros((grid_h, grid_w), dtype=float)
-    text = np.full((grid_h, grid_w), "", dtype=object)
-    pos_to_image: Dict[Tuple[int, int], int] = {}
-    for i, img_id in enumerate(image_ids):
-        r, c = divmod(i, grid_w)
-        s = summary_idx.loc[img_id]
-        n_total = int(s["n_total"])
-        n_pass = int(s["n_pass"])
-        ratio = (n_pass / n_total) if n_total else 0.0
-        matrix[r, c] = ratio
-        text[r, c] = (
-            f"ix{c:03d}_iy{r:03d}<br>"
-            f"img {img_id}<br>{n_pass}/{n_total} pass"
-        )
-        pos_to_image[(r, c)] = int(img_id)
-
-    fig = go.Figure(
-        data=go.Heatmap(
-            z=matrix,
-            text=text,
-            hovertemplate="%{text}<extra></extra>",
-            colorscale="Blues",
-            showscale=True,
-            zmin=0,
-            zmax=1,
-            xgap=1,
-            ygap=1,
+    pass_image_ids: Tuple[int, ...] = tuple(
+        sorted(
+            int(iid)
+            for iid in image_ids
+            if int(summary_idx.loc[iid]["n_pass"]) > 0
         )
     )
 
-    # Highlight the tile for the currently-selected flake (gold border).
+    # Placement tuples for the cached mosaic build.
+    placement: List[Tuple[int, int, int, str]] = []
+    pos_to_image: Dict[Tuple[int, int], int] = {}
+    for iid in image_ids:
+        col, row = coord_map.get(iid, (0, 0))
+        stem = image_id_to_stem.get(iid, "")
+        placement.append((int(iid), int(col), int(row), stem))
+        pos_to_image[(int(row), int(col))] = int(iid)
+
+    cache_buster = ""
+    try:
+        thumb_step = manifest.steps.get("thumbnails")
+        if thumb_step is not None and thumb_step.completed_at:
+            cache_buster = str(thumb_step.completed_at)
+    except Exception:
+        cache_buster = ""
+
+    mosaic = _build_mosaic_array(
+        analysis_folder=analysis_folder,
+        raw_images_dir=raw_images_dir,
+        raw_ext=str(thumb_index.get("params", {}).get("raw_ext", ".png")),
+        lod=int(lod),
+        cell_w=int(cell_w),
+        cell_h=int(cell_h),
+        grid_w=int(grid_w),
+        grid_h=int(grid_h),
+        placement=tuple(placement),
+        pass_image_ids=pass_image_ids,
+        _cache_buster=cache_buster,
+    )
+
+    fig = go.Figure(data=go.Image(z=mosaic))
+
+    # Hover info per cell — one invisible scatter point at each cell
+    # center carries the tooltip text. ``go.Image`` itself doesn't
+    # support per-pixel hovertemplates.
+    hover_x: List[float] = []
+    hover_y: List[float] = []
+    hover_text: List[str] = []
+    hover_iids: List[int] = []
+    for iid in image_ids:
+        col, row = coord_map.get(iid, (0, 0))
+        s = summary_idx.loc[iid]
+        n_total = int(s["n_total"])
+        n_pass = int(s["n_pass"])
+        cx = col * cell_w + cell_w / 2.0
+        cy = row * cell_h + cell_h / 2.0
+        hover_x.append(cx)
+        hover_y.append(cy)
+        hover_text.append(
+            f"image {iid}<br>{n_pass}/{n_total} pass"
+        )
+        hover_iids.append(int(iid))
+
+    fig.add_trace(
+        go.Scatter(
+            x=hover_x,
+            y=hover_y,
+            mode="markers",
+            marker=dict(
+                size=max(8, min(cell_w, cell_h) * 0.6),
+                color="rgba(0,0,0,0)",
+                line=dict(width=0),
+            ),
+            text=hover_text,
+            customdata=hover_iids,
+            hovertemplate="%{text}<extra></extra>",
+            showlegend=False,
+            name="tiles",
+        )
+    )
+
+    # Selected-flake highlight: gold rectangle around its image's tile.
     sel_id = st.session_state.get(SELECTED_FLAKE_KEY)
     if sel_id is not None:
         match = all_df.loc[all_df["flake_id"] == int(sel_id)]
         if not match.empty:
             sel_img = int(match["image_id"].iloc[0])
-            for (r, c), iid in pos_to_image.items():
-                if iid == sel_img:
-                    fig.add_shape(
-                        type="rect",
-                        x0=c - 0.5, x1=c + 0.5,
-                        y0=r - 0.5, y1=r + 0.5,
-                        line=dict(color="#FFC800", width=3),
-                    )
-                    break
+            sel_col, sel_row = coord_map.get(sel_img, (-1, -1))
+            if sel_col >= 0 and sel_row >= 0:
+                x0 = sel_col * cell_w
+                y0 = sel_row * cell_h
+                fig.add_shape(
+                    type="rect",
+                    x0=x0, x1=x0 + cell_w,
+                    y0=y0, y1=y0 + cell_h,
+                    line=dict(color="#FFC800", width=3),
+                    fillcolor="rgba(0,0,0,0)",
+                )
 
     fig.update_layout(
-        title=f"Substrate grid (LOD 2) · {n_imgs} tiles · {len(filtered)} pass",
-        height=500,
-        margin=dict(l=10, r=10, t=40, b=10),
-        xaxis=dict(visible=False),
-        yaxis=dict(visible=False, autorange="reversed"),
+        height=_MOSAIC_HEIGHT_PX,
+        margin=dict(l=10, r=10, t=10, b=10),
+        xaxis=dict(visible=False, range=[0, grid_w * cell_w]),
+        yaxis=dict(
+            visible=False,
+            range=[grid_h * cell_h, 0],  # origin top-left
+            scaleanchor="x",
+            scaleratio=1,
+        ),
+        dragmode="pan",
     )
-    st.plotly_chart(fig, width="stretch", key="explorer_grid")
+
+    selection = st.plotly_chart(
+        fig,
+        width="stretch",
+        on_select="rerun",
+        key="explorer_grid",
+    )
+
+    # On click: jump selection to the first flake whose image_id matches
+    # the clicked tile.
+    try:
+        points = selection.get("selection", {}).get("points", []) if isinstance(
+            selection, dict
+        ) else (
+            selection.selection.get("points", [])
+            if hasattr(selection, "selection") and isinstance(selection.selection, dict)
+            else []
+        )
+    except Exception:
+        points = []
+
+    if points:
+        cd = points[0].get("customdata")
+        clicked_iid: Optional[int] = None
+        if isinstance(cd, list) and cd:
+            try:
+                clicked_iid = int(cd[0])
+            except (TypeError, ValueError):
+                clicked_iid = None
+        elif isinstance(cd, (int, float)):
+            clicked_iid = int(cd)
+        if clicked_iid is not None:
+            tile_flakes = all_df.loc[all_df["image_id"] == clicked_iid]
+            if not tile_flakes.empty:
+                st.session_state[SELECTED_FLAKE_KEY] = int(
+                    tile_flakes.iloc[0]["flake_id"]
+                )
+
+    n_pass = int(len(filtered))
+    n_total = int(len(all_df))
+    lod_label = "raw" if lod >= _RAW_LOD else f"lod{lod}"
     st.caption(
-        "LOD 2 · color = pass-ratio per tile · gold = selected. "
-        "LOD 0/1/3 (per-tile drill-down + bbox overlays) deferred to M3."
+        f"Substrate grid · LOD {lod_label} · {grid_w}×{grid_h} tiles · "
+        f"{n_pass}/{n_total} flakes pass · click a tile to inspect"
     )
+    _ = n_imgs  # noqa: F841 — retained for downstream debug hooks
 
 
 # ─── Middle pane: flake list ─────────────────────────────────────────────
@@ -566,6 +917,11 @@ def render_tab_explorer(
         )
         return
 
+    # Manifest carries the thumbnails ``completed_at`` used as the
+    # mosaic cache buster (re-running thumbnails invalidates the cache).
+    from flake_analysis.state.manifest import load_manifest as _load_manifest
+    manifest = _load_manifest(analysis_folder)
+
     labels = inputs["labels"]
     n_groups = int(labels.get("n_clusters", 0))
 
@@ -632,7 +988,15 @@ def render_tab_explorer(
     # 3-pane Z-layout.
     left, mid, right = st.columns([60, 22, 18])
     with left:
-        _render_substrate_grid(filt_df, all_df, labels)
+        _render_substrate_grid(
+            filt_df,
+            all_df,
+            labels,
+            analysis_folder=analysis_folder,
+            raw_images_dir=raw_images_dir,
+            annotations_path=annotations_path,
+            manifest=manifest,
+        )
     with mid:
         st.subheader("Flakes")
         _render_flake_list(filt_df)

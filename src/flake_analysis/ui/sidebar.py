@@ -31,6 +31,7 @@ _STATUS_BADGE = {
 }
 
 _STEP_DISPLAY_NAMES = {
+    "thumbnails": "Thumbnails",
     "background": "Background",
     "domain_stats": "Domain Stats",
     "selector": "Selector",

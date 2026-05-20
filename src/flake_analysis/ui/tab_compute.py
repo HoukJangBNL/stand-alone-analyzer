@@ -1,6 +1,6 @@
-"""Compute tab — 3 expanders: Background / Domain Stats / Domain Proximity.
+"""Compute tab — 4 expanders: Thumbnails / Background / Domain Stats / Domain Proximity.
 
-Per plan v1 r9 §M2 PR 2.2.
+Per plan v1 r9 §M2 PR 2.2 + v0.2.15 thumbnails LOD pre-render.
 """
 from __future__ import annotations
 from pathlib import Path
@@ -10,6 +10,7 @@ import streamlit as st
 from flake_analysis.pipeline.background import run_background_step
 from flake_analysis.pipeline.domain_proximity import run_domain_proximity_step
 from flake_analysis.pipeline.domain_stats import run_domain_stats_step
+from flake_analysis.pipeline.thumbnails import run_thumbnails_step
 from flake_analysis.state.manifest import load_manifest
 
 
@@ -30,19 +31,22 @@ def render_tab_compute(
         run_all = st.button("▶ Run All", type="primary", width="stretch")
     with col_caption:
         st.caption(
-            "Run Background → Domain Stats → Domain Proximity in order with default params."
+            "Run Thumbnails → Background → Domain Stats → Domain Proximity "
+            "in order with default params."
         )
 
     if run_all:
-        # Three separate progress bars — one per step. Each shows its own
-        # 0% → 100% so the user can see which step is currently active and
-        # how far each one got. The earlier "combined" single-bar UX was
-        # ambiguous about which step was running.
-        st.markdown("**1. Background**")
+        # One progress bar per step. Each shows its own 0% → 100% so
+        # the user can see which step is currently active and how far
+        # each one got. Thumbnails runs first because it has no
+        # upstream dependency and feeds the Explorer mosaic.
+        st.markdown("**1. Thumbnails**")
+        th_bar = st.progress(0.0, "Pending...")
+        st.markdown("**2. Background**")
         bg_bar = st.progress(0.0, "Pending...")
-        st.markdown("**2. Domain Stats**")
+        st.markdown("**3. Domain Stats**")
         ds_bar = st.progress(0.0, "Pending...")
-        st.markdown("**3. Domain Proximity**")
+        st.markdown("**4. Domain Proximity**")
         dp_bar = st.progress(0.0, "Pending...")
 
         def make_cb(bar):
@@ -51,6 +55,12 @@ def render_tab_compute(
             return cb
 
         try:
+            run_thumbnails_step(
+                analysis_folder=analysis_folder,
+                raw_images_dir=raw_images_dir,
+                progress_callback=make_cb(th_bar),
+            )
+            th_bar.progress(1.0, "Done")
             run_background_step(
                 raw_images_dir=raw_images_dir,
                 analysis_folder=analysis_folder,
@@ -70,26 +80,91 @@ def render_tab_compute(
                 progress_callback=make_cb(dp_bar),
             )
             dp_bar.progress(1.0, "Done")
-            st.success("All 3 compute steps completed.")
+            st.success("All 4 compute steps completed.")
             st.rerun()
         except Exception as e:
             st.error(f"Run All failed: {e}")
 
     # Re-load manifest for status display
     manifest = load_manifest(analysis_folder)
+    thumb_done = manifest.steps.get("thumbnails")
     bg_done = manifest.steps.get("background")
     stats_done = manifest.steps.get("domain_stats")
     prox_done = manifest.steps.get("domain_proximity")
 
+    thumb_complete = bool(thumb_done and thumb_done.completed_at)
     bg_complete = bool(bg_done and bg_done.completed_at)
     stats_complete = bool(stats_done and stats_done.completed_at)
     prox_complete = bool(prox_done and prox_done.completed_at)
 
     st.divider()
 
-    # ─── Section 1: Background ──────────────────────────────
+    # ─── Section 1: Thumbnails ──────────────────────────────
     with st.expander(
-        f"1. Background  {'✅ done' if bg_complete else '⬜ not started'}",
+        f"1. Thumbnails  {'✅ done' if thumb_complete else '⬜ not started'}",
+        expanded=not thumb_complete,
+    ):
+        st.caption(
+            "LOD pyramid pre-render (lod0=64×40, lod1=192×120, "
+            "lod2=480×300). Feeds the Explorer substrate mosaic. "
+            "Re-runs are incremental — only changed raw images are "
+            "regenerated. Independent of other steps."
+        )
+        col1, col2 = st.columns(2)
+        with col1:
+            th_quality = st.number_input(
+                "quality",
+                value=80,
+                step=5,
+                min_value=1,
+                max_value=100,
+                key="th_quality",
+                help="WebP encode quality (0-100).",
+            )
+            th_force = st.checkbox(
+                "force recompute",
+                value=False,
+                key="th_force",
+                help="Regenerate every thumbnail even if cached.",
+            )
+        with col2:
+            th_raw_ext = st.text_input(
+                "raw_ext", value=".png", key="th_raw_ext"
+            )
+
+        if st.button("▶ Compute thumbnails", key="th_compute"):
+            progress_bar = st.progress(0.0, "Starting...")
+            status = st.empty()
+
+            def cb(pct: float, msg: str) -> None:
+                progress_bar.progress(pct, msg)
+                status.caption(msg)
+
+            try:
+                result = run_thumbnails_step(
+                    analysis_folder=analysis_folder,
+                    raw_images_dir=raw_images_dir,
+                    raw_ext=th_raw_ext,
+                    quality=int(th_quality),
+                    force_recompute=bool(th_force),
+                    progress_callback=cb,
+                )
+                progress_bar.progress(1.0, "Done")
+                st.success(
+                    f"Thumbnails: {result['n_images']} images "
+                    f"({result['n_skipped']} cached, "
+                    f"{result['n_failed']} failed) → {result['output_dir']}"
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
+
+        if thumb_complete:
+            st.caption(f"Last run: {thumb_done.completed_at}")
+
+    # ─── Section 2: Background ──────────────────────────────
+    with st.expander(
+        f"2. Background  {'✅ done' if bg_complete else '⬜ not started'}",
         expanded=not bg_complete,
     ):
         col1, col2 = st.columns(2)
@@ -157,14 +232,14 @@ def render_tab_compute(
                 except Exception as e:
                     st.caption(f"(preview unavailable: {e})")
 
-    # ─── Section 2: Domain Stats ────────────────────────────
+    # ─── Section 3: Domain Stats ────────────────────────────
     bg_required = not bg_complete
     with st.expander(
-        f"2. Domain Stats  {'✅ done' if stats_complete else '⬜ not started'}",
+        f"3. Domain Stats  {'✅ done' if stats_complete else '⬜ not started'}",
         expanded=not stats_complete and not bg_required,
     ):
         if bg_required:
-            st.warning("Requires Background step. Run Section 1 first.")
+            st.warning("Requires Background step. Run Section 2 first.")
         else:
             col1, col2 = st.columns(2)
             with col1:
@@ -205,9 +280,9 @@ def render_tab_compute(
             if stats_complete:
                 st.caption(f"Last run: {stats_done.completed_at}")
 
-    # ─── Section 3: Domain Proximity ────────────────────────
+    # ─── Section 4: Domain Proximity ────────────────────────
     with st.expander(
-        f"3. Domain Proximity  {'✅ done' if prox_complete else '⬜ not started'}",
+        f"4. Domain Proximity  {'✅ done' if prox_complete else '⬜ not started'}",
         expanded=not prox_complete,
     ):
         st.caption("Independent step — only needs annotations.json.")
