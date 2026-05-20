@@ -203,37 +203,34 @@ def _build_flake_records(
 # ─── Filter section UI ───────────────────────────────────────────────────
 
 def _render_label_picker(labels: Dict[str, Any]) -> Tuple[List[str], List[str]]:
-    """3-column Available / Include / Exclude picker (multiselect fallback)."""
+    """Sidebar-friendly Include / Exclude picker (vertical multiselect).
+
+    Switched from a 3-column layout to two stacked multiselects so the
+    picker fits the narrow ~280px sidebar drawer without label wrap.
+    The "Available" column was redundant (each multiselect already
+    shows the full label list in its dropdown).
+    """
     all_names: List[str] = [g["name"] for g in labels.get("groups", [])]
     if not all_names:
         st.info("No clusters available. Commit clustering first.")
         return [], []
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.caption("Available")
-        if len(all_names) > 20:
-            st.caption(f"{len(all_names)} labels (search box auto-shown)")
-        st.write(", ".join(all_names))
-    with c2:
-        include = st.multiselect(
-            "Include",
-            all_names,
-            default=st.session_state.get(INCLUDE_KEY, []),
-            key=INCLUDE_KEY,
-        )
-    with c3:
-        # Hide already-included names from the Exclude options.
-        avail_excl = [n for n in all_names if n not in include]
-        prev_excl = [
-            n for n in st.session_state.get(EXCLUDE_KEY, []) if n in avail_excl
-        ]
-        exclude = st.multiselect(
-            "Exclude",
-            avail_excl,
-            default=prev_excl,
-            key=EXCLUDE_KEY,
-        )
+    include = st.multiselect(
+        "Include",
+        all_names,
+        default=st.session_state.get(INCLUDE_KEY, []),
+        key=INCLUDE_KEY,
+    )
+    avail_excl = [n for n in all_names if n not in include]
+    prev_excl = [
+        n for n in st.session_state.get(EXCLUDE_KEY, []) if n in avail_excl
+    ]
+    exclude = st.multiselect(
+        "Exclude",
+        avail_excl,
+        default=prev_excl,
+        key=EXCLUDE_KEY,
+    )
 
     conflicts = sorted(set(include) & set(exclude))
     if conflicts:
@@ -247,36 +244,33 @@ def _render_label_picker(labels: Dict[str, Any]) -> Tuple[List[str], List[str]]:
 
 
 def _render_neighbor_filter() -> Dict[str, Any]:
-    """Compact NeighborFilter expander (size, isolation, border-clipped)."""
-    with st.expander(
-        "Neighbor filter (size, isolation, border-clipped)", expanded=False
-    ):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            size_enabled = st.checkbox(
-                "Size range", value=False, key="exp_size_en"
-            )
-            size_min = st.number_input(
-                "min domains/flake", value=1, min_value=1, max_value=10000,
-                key="exp_size_min", disabled=not size_enabled,
-            )
-            size_max = st.number_input(
-                "max domains/flake", value=50, min_value=1, max_value=10000,
-                key="exp_size_max", disabled=not size_enabled,
-            )
-        with c2:
-            isolate_en = st.checkbox(
-                "Isolation ≥", value=False, key="exp_iso_en"
-            )
-            d_isolate_px = st.number_input(
-                "d_isolate_px", value=80.0, step=10.0,
-                key="exp_iso_px", disabled=not isolate_en,
-            )
-        with c3:
-            exclude_border = st.checkbox(
-                "Exclude border-clipped flakes",
-                value=False, key="exp_border",
-            )
+    """Compact vertical NeighborFilter for the sidebar drawer."""
+    size_enabled = st.checkbox("Size range", value=False, key="exp_size_en")
+    size_cols = st.columns(2)
+    with size_cols[0]:
+        size_min = st.number_input(
+            "min", value=1, min_value=1, max_value=10000,
+            key="exp_size_min", disabled=not size_enabled,
+            label_visibility="collapsed",
+        )
+    with size_cols[1]:
+        size_max = st.number_input(
+            "max", value=50, min_value=1, max_value=10000,
+            key="exp_size_max", disabled=not size_enabled,
+            label_visibility="collapsed",
+        )
+    if size_enabled:
+        st.caption("domains / flake")
+
+    isolate_en = st.checkbox("Isolation ≥", value=False, key="exp_iso_en")
+    d_isolate_px = st.number_input(
+        "d_isolate_px", value=80.0, step=10.0,
+        key="exp_iso_px", disabled=not isolate_en,
+    )
+    exclude_border = st.checkbox(
+        "Exclude border-clipped flakes",
+        value=False, key="exp_border",
+    )
 
     return {
         "size_enabled": bool(size_enabled),
@@ -289,30 +283,22 @@ def _render_neighbor_filter() -> Dict[str, Any]:
 
 
 def _render_render_toggles() -> None:
-    """2x2 render toggles (Plan v34 defaults). Rendering itself M3.
+    """Render toggles for the sidebar drawer (vertical, no expander).
 
     Pre-seed each widget key once with its default so Streamlit doesn't
     re-apply ``value=`` on later reruns and snap the toggle back to
-    default after a rerun GC's the widget key (same class of bug as the
-    Selector axis pickers).
+    default after a rerun GC's the widget key.
     """
     for k, default in zip(TOGGLE_KEYS, TOGGLE_DEFAULTS):
         if k not in st.session_state:
             st.session_state[k] = bool(default)
-    with st.expander("Render toggles (Plan v34 defaults)", expanded=False):
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.checkbox("Flake bbox", key=TOGGLE_KEYS[0])
-        with c2:
-            st.checkbox("Flake outline", key=TOGGLE_KEYS[1])
-        with c3:
-            st.checkbox("Island bbox", key=TOGGLE_KEYS[2])
-        with c4:
-            st.checkbox("Island outline", key=TOGGLE_KEYS[3])
-        st.caption(
-            "Toggles stored in session_state. Bbox/outline rendering "
-            "deferred to M3 polish."
-        )
+    cols = st.columns(2)
+    with cols[0]:
+        st.checkbox("Flake bbox", key=TOGGLE_KEYS[0])
+        st.checkbox("Flake outline", key=TOGGLE_KEYS[1])
+    with cols[1]:
+        st.checkbox("Island bbox", key=TOGGLE_KEYS[2])
+        st.checkbox("Island outline", key=TOGGLE_KEYS[3])
 
 
 # ─── Substrate canvas (LOD 2 grid) ───────────────────────────────────────
@@ -531,12 +517,44 @@ def _render_detail_panel(
 
 # ─── Top-level renderer ──────────────────────────────────────────────────
 
+def render_explorer_sidebar(
+    labels: Dict[str, Any],
+) -> Tuple[List[str], List[str], Dict[str, Any]]:
+    """Render the Explorer control drawer in the sidebar.
+
+    Mirrors the Selector / Clustering drawers (commit 1e74935 / da5df6c).
+    Owns: include/exclude label picker, neighbor filter, render toggles.
+    Save-state button stays in the tab body so it can use the
+    just-computed filtered flake list.
+    """
+    include: List[str] = []
+    exclude: List[str] = []
+    neighbor_filter: Dict[str, Any] = {}
+    with st.sidebar.expander("⚙ Explorer controls", expanded=True):
+        st.caption("**Cluster picker**")
+        include, exclude = _render_label_picker(labels)
+        st.divider()
+        st.caption("**Neighbor filter**")
+        neighbor_filter = _render_neighbor_filter()
+        st.divider()
+        st.caption("**Render toggles**")
+        _render_render_toggles()
+    return include, exclude, neighbor_filter
+
+
 def render_tab_explorer(
     raw_images_dir: str,
     annotations_path: str,
     analysis_folder: str,
 ) -> None:
-    """Render the Explorer tab."""
+    """Render the Explorer tab.
+
+    Layout:
+        sidebar drawer  ⚙ — cluster picker / neighbor filter / toggles
+        body header    — clusters + filtered counts + group chips +
+                         💾 Save explorer state
+        body 3-pane    — substrate grid · flake list · DetailPanel
+    """
     if not analysis_folder:
         st.warning("Set analysis_folder in sidebar to enable the Explorer tab.")
         return
@@ -550,63 +568,64 @@ def render_tab_explorer(
 
     labels = inputs["labels"]
     n_groups = int(labels.get("n_clusters", 0))
-    st.success(f"✅ Explorer ready · {n_groups} clusters")
 
-    # Top filter section
-    include, exclude = _render_label_picker(labels)
-    neighbor_filter = _render_neighbor_filter()
-    _render_render_toggles()
+    # Sidebar drawer (filters + toggles).
+    include, exclude, neighbor_filter = render_explorer_sidebar(labels)
 
     all_df, filt_df = _build_flake_records(
         inputs, set(include), set(exclude), neighbor_filter
     )
 
-    # Result banner with per-group breakdown.
+    # Header banner: cluster count + filtered counts + per-group chips.
     n_total, n_pass = int(len(all_df)), int(len(filt_df))
     pct = (100.0 * n_pass / n_total) if n_total else 0.0
-    bcols = st.columns([2, 5])
-    with bcols[0]:
-        st.metric("Filtered / total flakes", f"{n_pass} / {n_total}", f"{pct:.1f}%")
-    with bcols[1]:
-        # Per-group breakdown chips.
-        if n_pass:
-            counts: Dict[str, int] = {}
-            for groups_str in filt_df["groups"]:
-                if not groups_str or groups_str == "—":
-                    continue
-                for name in groups_str.split(", "):
-                    counts[name] = counts.get(name, 0) + 1
-            name_to_color = {
-                g["name"]: CLUSTER_PALETTE[i % len(CLUSTER_PALETTE)]
-                for i, g in enumerate(labels.get("groups", []))
-            }
-            chips = "".join(
-                f"<span style='background:{name_to_color.get(n, '#9e9e9e')};"
-                "color:white;padding:2px 8px;margin:2px;border-radius:10px;"
-                f"font-size:12px;'>{n}: {c}</span>"
-                for n, c in sorted(counts.items(), key=lambda kv: -kv[1])
-            )
-            st.markdown(
-                f"<div style='padding-top:18px;'>{chips}</div>",
-                unsafe_allow_html=True,
-            )
+    st.success(
+        f"✅ Explorer · {n_groups} clusters · "
+        f"**{n_pass:,} / {n_total:,}** flakes pass current filter "
+        f"({pct:.1f}%)"
+    )
 
-    # Save-state action.
-    save_col, _ = st.columns([1, 4])
-    with save_col:
-        if st.button("\U0001F4BE Save explorer state", type="primary", key="exp_save"):
-            try:
-                save_explorer_state(
-                    analysis_folder=analysis_folder,
-                    include_labels=include,
-                    exclude_labels=exclude,
-                    neighbor_filter=neighbor_filter,
-                    selected_flake_ids=filt_df["flake_id"].astype(int).tolist(),
-                )
-                st.success("Explorer state saved.")
-                st.rerun()
-            except Exception as e:
-                st.error(str(e))
+    if n_pass:
+        counts: Dict[str, int] = {}
+        for groups_str in filt_df["groups"]:
+            if not groups_str or groups_str == "—":
+                continue
+            for name in groups_str.split(", "):
+                counts[name] = counts.get(name, 0) + 1
+        name_to_color = {
+            g["name"]: CLUSTER_PALETTE[i % len(CLUSTER_PALETTE)]
+            for i, g in enumerate(labels.get("groups", []))
+        }
+        chips = "".join(
+            f"<span style='background:{name_to_color.get(n, '#9e9e9e')};"
+            "color:white;padding:2px 8px;margin:2px;border-radius:10px;"
+            f"font-size:12px;'>{n}: {c}</span>"
+            for n, c in sorted(counts.items(), key=lambda kv: -kv[1])
+        )
+        st.markdown(chips, unsafe_allow_html=True)
+
+    # Save-state action lives in the body so the user sees the
+    # filtered count it'll persist before clicking.
+    if st.button(
+        "\U0001F4BE Save explorer state",
+        type="primary",
+        key="exp_save",
+        help="Persist the include/exclude picks + filter state to "
+             "06_explorer/explorer_state.json + the filtered flake "
+             "list to selected_flakes.parquet.",
+    ):
+        try:
+            save_explorer_state(
+                analysis_folder=analysis_folder,
+                include_labels=include,
+                exclude_labels=exclude,
+                neighbor_filter=neighbor_filter,
+                selected_flake_ids=filt_df["flake_id"].astype(int).tolist(),
+            )
+            st.success("Explorer state saved.")
+            st.rerun()
+        except Exception as e:
+            st.error(str(e))
 
     st.divider()
 

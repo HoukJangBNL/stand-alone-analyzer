@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from flake_analysis.core.pipeline.clustering import run_clustering as core_run_clustering
@@ -183,13 +184,16 @@ def apply_thresholds(
     *,
     analysis_folder: str | Path,
     cluster_thresholds: Dict[int, float],
+    max_mahalanobis: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Re-evaluate per-cluster posterior thresholds without refitting.
+    """Commit live filter state (thresholds + distance gate) to disk.
 
-    Reads ``assignments.parquet`` (``domain_id, cluster_label,
-    max_posterior``), rewrites a ``threshold_pass`` boolean column,
-    updates ``labels.json``'s ``thresholds`` field, and updates the
-    manifest's ``params.cluster_thresholds``.
+    Rewrites ``assignments.parquet`` so that the ``cluster_label`` column
+    reflects the current filter state — domains that fail either the
+    per-cluster posterior threshold or the optional Mahalanobis distance
+    gate are demoted to ``-1``. Downstream Explorer / Domain Proximity
+    consume ``cluster_label`` directly, so the live preview the user
+    just dialled in becomes the committed clustering.
 
     Parameters
     ----------
@@ -197,11 +201,18 @@ def apply_thresholds(
     cluster_thresholds : dict[int, float]
         Per-cluster posterior cutoffs. Clusters absent from this dict
         fall back to ``0.50``.
+    max_mahalanobis : float, optional
+        Distance-gate cap (seed-σ units). When provided and the
+        parquet has a ``nearest_mahalanobis`` column, points farther
+        than this from every cluster centre are also demoted to ``-1``.
+        ``None`` leaves the distance gate untouched (recovers the old
+        threshold-only behaviour).
 
     Returns
     -------
     dict
-        ``{"n_pass": int, "n_total": int, "n_clusters": int}``.
+        ``{"n_pass": int, "n_total": int, "n_clusters": int}`` —
+        n_pass counts domains with cluster_label >= 0 after the rewrite.
     """
     output_dir = step_dir(analysis_folder, "clustering")
     asn_path = output_dir / "assignments.parquet"
@@ -218,36 +229,72 @@ def apply_thresholds(
     posterior_col = (
         "max_posterior" if "max_posterior" in df.columns else "posterior_p"
     )
+    has_mah = (
+        "nearest_mahalanobis" in df.columns and max_mahalanobis is not None
+    )
 
     norm_thresh = {int(k): float(v) for k, v in cluster_thresholds.items()}
 
-    def _passes(row) -> bool:
+    # Reload the original engine assignment from labels.json so repeated
+    # commits don't permanently demote points whose threshold was
+    # tightened then loosened. ``labels.json["assignments"]`` was written
+    # with the engine's first labelling (cluster_label >= 0); we use that
+    # as the base, then re-apply the live filters.
+    labels = json.loads(labels_path.read_text(encoding="utf-8"))
+    base_assign: Dict[int, int] = {
+        int(k): int(v) for k, v in (labels.get("assignments") or {}).items()
+    }
+    # Domain ids in labels.json are only the originally-assigned ones;
+    # everything else stays -1.
+    df[cluster_col] = df["domain_id"].astype(int).map(base_assign).fillna(-1).astype(int)
+
+    def _new_label(row) -> int:
         cid = int(row[cluster_col])
         if cid < 0:
-            return False
+            return -1
+        if has_mah and float(row["nearest_mahalanobis"]) > float(max_mahalanobis):
+            return -1
         cutoff = norm_thresh.get(cid, 0.50)
-        return float(row[posterior_col]) >= cutoff
+        if float(row[posterior_col]) < cutoff:
+            return -1
+        return cid
 
-    df["threshold_pass"] = df.apply(_passes, axis=1).astype(bool)
+    df[cluster_col] = df.apply(_new_label, axis=1).astype(np.int64)
+    # Keep the legacy ``threshold_pass`` boolean for any caller that
+    # still reads it; it now means "survived all live filters".
+    df["threshold_pass"] = (df[cluster_col] >= 0).astype(bool)
     df.to_parquet(asn_path, engine="pyarrow", index=False)
 
-    # Update labels.json thresholds field.
-    labels = json.loads(labels_path.read_text(encoding="utf-8"))
+    # Update labels.json: thresholds + max_mahalanobis + group sizes
+    # + the ``assignments`` map (so a future apply_thresholds can use
+    # *this* commit as a baseline if the user prefers cumulative
+    # behaviour over re-resetting every call). We deliberately do NOT
+    # overwrite the original assignments — we keep them as the engine's
+    # ground truth so repeated commits stay reversible.
     labels["thresholds"] = {str(k): float(v) for k, v in norm_thresh.items()}
+    if max_mahalanobis is not None:
+        labels["max_mahalanobis"] = float(max_mahalanobis)
+    # Refresh per-group sizes to match the new cluster_label distribution.
+    for group in labels.get("groups", []):
+        cid = int(group.get("id", -1))
+        if cid >= 0:
+            group["size"] = int((df[cluster_col] == cid).sum())
     labels_path.write_text(json.dumps(labels, indent=2), encoding="utf-8")
 
-    # Update manifest params.cluster_thresholds.
+    # Update manifest params.cluster_thresholds + max_mahalanobis.
     manifest = load_manifest(analysis_folder)
     if "clustering" in manifest.steps:
         entry = manifest.steps["clustering"]
         entry.params["cluster_thresholds"] = {
             str(k): float(v) for k, v in norm_thresh.items()
         }
+        if max_mahalanobis is not None:
+            entry.params["max_mahalanobis"] = float(max_mahalanobis)
         # Refresh wrapper-level params_hash to reflect the threshold update.
         entry.params_hash = params_hash(entry.params)
         save_manifest(manifest, analysis_folder)
 
-    n_pass = int(df["threshold_pass"].sum())
+    n_pass = int((df[cluster_col] >= 0).sum())
     return {
         "n_pass": n_pass,
         "n_total": int(len(df)),

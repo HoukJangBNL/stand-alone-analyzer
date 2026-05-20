@@ -869,24 +869,37 @@ def _render_per_cluster_thresholds_sidebar(
 def _render_threshold_apply_button(
     analysis_folder: str,
     new_thresh: Dict[int, float],
+    max_mahalanobis: Optional[float] = None,
 ) -> None:
-    """Disk-persist button — separate from the live preview."""
+    """Disk-persist live filter state (thresholds + distance gate).
+
+    Renamed from "Save thresholds" because the action is broader: it
+    rewrites ``assignments.parquet[cluster_label]`` so the live filter
+    (per-cluster posterior threshold + Mahalanobis distance gate) is
+    actually committed — Explorer / Domain Proximity downstream read
+    ``cluster_label`` directly, so without this the live preview the
+    user dialled in is never visible to them.
+    """
     if not new_thresh:
         return
     if st.button(
-        "💾 Save thresholds to disk",
+        "💾 Commit clustering",
         key="clu_apply_thresh",
         type="primary",
         use_container_width=True,
+        help="Bake the live threshold + distance gate into "
+             "assignments.parquet so Explorer sees this clustering.",
     ):
         try:
             summary = apply_thresholds(
                 analysis_folder=analysis_folder,
                 cluster_thresholds=new_thresh,
+                max_mahalanobis=max_mahalanobis,
             )
             st.success(
-                f"Thresholds saved: {summary['n_pass']:,} / "
-                f"{summary['n_total']:,} pass."
+                f"Clustering committed: {summary['n_pass']:,} / "
+                f"{summary['n_total']:,} assigned "
+                f"({summary['n_total'] - summary['n_pass']:,} unassigned)."
             )
             st.rerun()
         except Exception as e:
@@ -1095,7 +1108,10 @@ def render_clustering_sidebar(
             live_thresh = _render_per_cluster_thresholds_sidebar(
                 labels, assignments_df,
             )
-            _render_threshold_apply_button(analysis_folder, live_thresh)
+            _render_threshold_apply_button(
+                analysis_folder, live_thresh,
+                max_mahalanobis=live_max_mah,
+            )
 
     return x_axis, y_axis, show_3d, live_thresh, live_max_mah
 
