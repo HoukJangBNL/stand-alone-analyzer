@@ -2,7 +2,12 @@
 from __future__ import annotations
 import os
 from dataclasses import dataclass
-from fastapi import Request
+from typing import Annotated, AsyncIterator
+from fastapi import Depends, Request
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from flake_analysis.db.engine import async_session_maker
+from flake_analysis.db.models import Analysis
 from flake_analysis.state.manifest import Manifest, load_manifest
 
 _active_project: str | None = None
@@ -47,3 +52,27 @@ async def get_manifest(project_id: str) -> Manifest:
     """Load manifest for project_id (v1: 'local')."""
     analysis_folder = _resolve_project_id(project_id)
     return load_manifest(analysis_folder)
+
+
+async def get_db_session() -> AsyncIterator[AsyncSession]:
+    """Yield an async session per request; close on exit."""
+    async with async_session_maker() as session:
+        yield session
+
+
+async def get_active_analysis(
+    ctx: Annotated[ProjectContext, Depends(get_project_context)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Analysis | None:
+    """Resolve the active Analysis row for the request's ProjectContext.
+
+    v1 selects the most recent analyses row joined to scans whose project
+    alias matches ctx.project_id. v1 always uses 'local' so this devolves
+    to ``ORDER BY analyses.id DESC LIMIT 1`` — that is the v1 contract.
+    Returns ``None`` when no row exists (silent fallback per pinned
+    decision #1: clients without a DB-backed project keep their byte-for-byte
+    disk-only response).
+    """
+    stmt = select(Analysis).order_by(Analysis.id.desc()).limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()

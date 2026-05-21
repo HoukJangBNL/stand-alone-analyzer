@@ -48,3 +48,43 @@ async def pg_session(pg_url: str) -> AsyncIterator[AsyncSession]:
                 await session.close()
         await trans.rollback()
     await engine.dispose()
+
+
+@pytest_asyncio.fixture()
+async def sample_analysis_factory(pg_session):
+    """Insert a Model + Scan + Analysis row and return the Analysis.
+
+    Uses ``flush`` + ``refresh`` instead of ``commit`` so the per-test
+    rollback in ``pg_session`` still cleans up. ``Analysis.status`` is a
+    GENERATED column populated via RETURNING on flush.
+    """
+    from flake_analysis.db.models import Analysis, Model, Scan
+
+    counter = {"n": 0}
+
+    async def _make(steps_done: dict | None = None) -> "Analysis":
+        counter["n"] += 1
+        suffix = counter["n"]
+        m = Model(
+            name=f"test-model-{suffix}",
+            base_model="sam2",
+            s3_uri=f"s3://test/{suffix}",
+        )
+        pg_session.add(m)
+        await pg_session.flush()
+        s = Scan(name=f"test-scan-{suffix}")
+        pg_session.add(s)
+        await pg_session.flush()
+        a = Analysis(
+            scan_id=s.id,
+            model_id=m.id,
+            amg_params={},
+            link_distance_px=10.0,
+            steps_done=steps_done or {},
+        )
+        pg_session.add(a)
+        await pg_session.flush()
+        await pg_session.refresh(a)
+        return a
+
+    return _make
