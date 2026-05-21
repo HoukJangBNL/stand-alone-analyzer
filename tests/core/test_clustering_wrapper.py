@@ -44,20 +44,79 @@ def _make_all_selected_parquet(path: Path, n: int) -> None:
     df.to_parquet(path, engine="pyarrow", index=False)
 
 
-def test_run_clustering_two_blobs_separates_correctly():
+def _make_ten_blob_npz(path: Path) -> dict:
+    """Ten well-separated RGB blobs of 10 domains each (100 total).
+
+    Used to encode the owner-stated invariant for seed-driven clustering:
+    only the seeded blobs become clusters; everything else is noise (-1).
+
+    Layout: blob ``b`` owns ``domain_ids`` ``[10*b, 10*b + 10)``. Centers are
+    chosen so all pairs are separated by >> the per-blob ``scale`` (so cluster
+    identity is unambiguous), and ``np.random.default_rng(seed=11)`` is used
+    so the fixture is deterministic. Seed picked because GMM seed-fit on 3
+    members reproducibly converges with ``random_state=42`` for these blobs.
+    """
+    rng = np.random.default_rng(11)
+    centers = np.array(
+        [
+            [30.0, 30.0, 30.0],
+            [60.0, 30.0, 30.0],
+            [30.0, 60.0, 30.0],
+            [30.0, 30.0, 60.0],
+            [200.0, 100.0, 100.0],
+            [100.0, 200.0, 100.0],
+            [100.0, 100.0, 200.0],
+            [220.0, 220.0, 100.0],
+            [100.0, 220.0, 220.0],
+            [220.0, 100.0, 220.0],
+        ],
+        dtype=np.float64,
+    )
+    blobs = [rng.normal(loc=c, scale=2.0, size=(10, 3)) for c in centers]
+    repr_rgbs = np.vstack(blobs).astype(np.float64)
+    flake_ids = np.arange(100, dtype=np.int64)  # domain_ids 0..99
+    np.savez(
+        path,
+        repr_rgbs=repr_rgbs,
+        std_pcts=rng.uniform(0, 30, size=(100, 3)),
+        areas=np.full(100, 500, dtype=np.int32),
+        flake_ids=flake_ids,
+    )
+    return {"repr_rgbs": repr_rgbs, "flake_ids": flake_ids}
+
+
+def test_run_clustering_leaves_ungrouped_bucket_for_unseeded_blobs():
+    """Owner-stated invariant: only seeded groups get clustered.
+
+    Spec (owner correction superseding the prior happy-path test that asserted
+    the opposite): the clustering pipeline must always leave an "ungrouped"
+    bucket. With ``fit_scope="seeds"`` + the Mahalanobis distance gate,
+    domains far from every seed-defined ellipsoid are classified as noise
+    (``cluster_label == -1``). Only seeded blobs produce clusters; unseeded
+    blobs must collapse into the noise bucket.
+
+    Fixture: 10 well-separated RGB blobs × 10 domains = 100 selected domains.
+    Seeds: 3 domain_ids from blob 0 and 3 domain_ids from blob 5 only. The
+    other 8 blobs are entirely unseeded and must end up as ``-1``.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
         npz_path = tmp / "stats.npz"
         sel_path = tmp / "selection.parquet"
         out_dir = tmp / "clustering_out"
 
-        _make_two_blob_npz(npz_path)
+        _make_ten_blob_npz(npz_path)
         _make_all_selected_parquet(sel_path, n=100)
 
-        # Seeds use domain_ids — wrapper converts to positional indices.
+        # Seed only 2 of the 10 blobs. Seeds use domain_ids — the wrapper
+        # converts them to positional indices internally.
+        seeded_blob_a = 0
+        seeded_blob_b = 5
+        seed_a_ids = [0, 1, 2]      # blob 0 owns ids 0..9
+        seed_b_ids = [50, 51, 52]   # blob 5 owns ids 50..59
         seed_groups = [
-            {"name": "dark", "domain_ids": [0, 1, 2]},
-            {"name": "light", "domain_ids": [50, 51, 52]},
+            {"name": "graphite", "domain_ids": seed_a_ids},
+            {"name": "h-bn", "domain_ids": seed_b_ids},
         ]
 
         result = run_clustering(
@@ -68,49 +127,81 @@ def test_run_clustering_two_blobs_separates_correctly():
             rgb_threshold=0.5,
         )
 
-        # Output files exist.
+        # ---- Output files exist ----------------------------------------
         assert (out_dir / "labels.json").exists()
         assert (out_dir / "assignments.parquet").exists()
         assert (out_dir / "gmm_model.pkl").exists()
 
-        # Two clusters, no unassigned given well-separated blobs at threshold 0.5.
+        # ---- Invariant: only seeded groups become clusters -------------
         assert result["n_clusters"] == 2
-        assert result["n_assigned"] == 100
-        assert result["n_unassigned"] == 0
 
-        # Random_state recorded in params.
+        # ---- Invariant: ungrouped bucket is non-empty ------------------
+        # This is the headline owner invariant: the pipeline must always
+        # leave room for "not in any seeded group". Unseeded blobs land here.
+        assert result["n_unassigned"] > 0
+
+        # No mapping fallout in this clean fixture.
+        assert result["n_dropped_seed_ids"] == 0
+        assert result["n_dropped_selected_ids"] == 0
         assert result["params"]["random_state"] == 42
 
-        # Assignments match the blob structure.
+        # ---- Per-blob membership ---------------------------------------
         adf = pd.read_parquet(out_dir / "assignments.parquet")
-        assert set(adf.columns) == {"domain_id", "cluster_label", "max_posterior"}
+        # Required columns; ``nearest_mahalanobis`` is also present (driven
+        # by the live distance-gate slider) and intentionally not constrained
+        # here — see ``test_run_clustering_labels_json_schema`` for full schema.
+        assert {"domain_id", "cluster_label", "max_posterior"} <= set(adf.columns)
         labels = adf.set_index("domain_id")["cluster_label"]
-        # All ids in [0, 50) share one label, [50, 100) share the other.
-        first_half_labels = set(labels.loc[0:49].tolist())
-        second_half_labels = set(labels.loc[50:99].tolist())
-        assert len(first_half_labels) == 1
-        assert len(second_half_labels) == 1
-        assert first_half_labels != second_half_labels
 
-        # gmm_model.pkl round-trips to InteractiveClusterResult.
+        # Seed members of seeded blob A get assigned to a single non-negative
+        # cluster label (call it ``label_a``). Note: with the seed-only fit
+        # + Mahalanobis gate, only the seed members themselves are guaranteed
+        # to be assigned to their cluster — non-seed members of the same blob
+        # may still fall outside the (very tight) seed covariance and become
+        # noise. The invariant under test is about *unseeded* blobs being
+        # noise, not about whole seeded blobs clustering.
+        seed_a_labels = set(labels.loc[seed_a_ids].tolist())
+        seed_b_labels = set(labels.loc[seed_b_ids].tolist())
+        assert len(seed_a_labels) == 1, (
+            f"seed group A members should share a label, got {seed_a_labels}"
+        )
+        assert len(seed_b_labels) == 1, (
+            f"seed group B members should share a label, got {seed_b_labels}"
+        )
+        label_a = next(iter(seed_a_labels))
+        label_b = next(iter(seed_b_labels))
+        assert label_a >= 0 and label_b >= 0
+        # The two seeded blobs map to different cluster labels.
+        assert label_a != label_b
+
+        # Every domain in an *unseeded* blob is noise.
+        unseeded_blobs = [b for b in range(10) if b not in (seeded_blob_a, seeded_blob_b)]
+        for b in unseeded_blobs:
+            blob_ids = list(range(b * 10, b * 10 + 10))
+            blob_labels = labels.loc[blob_ids].tolist()
+            assert all(lab == -1 for lab in blob_labels), (
+                f"unseeded blob {b} (ids {blob_ids[0]}..{blob_ids[-1]}) must be "
+                f"all noise, got {blob_labels}"
+            )
+
+        # ---- gmm_model.pkl round-trips ---------------------------------
         with open(out_dir / "gmm_model.pkl", "rb") as f:
             loaded = pickle.load(f)
         assert isinstance(loaded, InteractiveClusterResult)
         assert loaded.n_clusters == 2
 
-        # labels.json shape sanity (plan v1 r7 §7.1 frozen schema).
+        # ---- labels.json schema sanity (plan v1 r7 §7.1) ---------------
         labels_payload = json.loads((out_dir / "labels.json").read_text())
         assert labels_payload["version"] == 1
         assert labels_payload["n_clusters"] == 2
         assert len(labels_payload["groups"]) == 2
         assert labels_payload["noise_label"] == -1
         assert labels_payload["random_state"] == 42
-        # All 100 well-separated points should be assigned.
-        assert len(labels_payload["assignments"]) == 100
-
-        # No mapping fallout in the well-formed input.
-        assert result["n_dropped_seed_ids"] == 0
-        assert result["n_dropped_selected_ids"] == 0
+        # ``assignments`` excludes noise per ``core/pipeline/clustering.py``
+        # (the dict-comp at "if int(lab) >= 0"), so with ungrouped domains
+        # present its size is strictly less than the 100 selected domains.
+        assert len(labels_payload["assignments"]) < 100
+        assert len(labels_payload["assignments"]) == result["n_assigned"]
 
 
 def test_run_clustering_handles_partial_selection():
