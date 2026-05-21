@@ -19,6 +19,7 @@ export function CommitButton({ projectId }: CommitButtonProps) {
   return (
     <div>
       <button
+        data-testid="selector-commit-submit"
         onClick={onClick}
         disabled={mutation.isPending}
         style={{ background: '#16a34a', color: 'white', padding: '6px 12px' }}

@@ -9,6 +9,7 @@ export function LiveMahalanobisSlider() {
         Live max Mahalanobis ({value.toFixed(2)})
       </span>
       <input
+        data-testid="clustering-mahal-live"
         type="range"
         min={0.5}
         max={8.0}

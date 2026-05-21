@@ -18,6 +18,7 @@ export function AxisPicker({ pane }: AxisPickerProps) {
         {AXES.map((a) => (
           <label key={a} style={{ fontSize: 11 }}>
             <input
+              data-testid={`selector-axis-${pane.toLowerCase()}-${a}`}
               type="radio"
               name={groupName}
               checked={current === a}

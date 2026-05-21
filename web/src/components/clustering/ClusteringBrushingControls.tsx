@@ -9,9 +9,9 @@ export function ClusteringBrushingControls() {
   return (
     <div style={{ display: 'flex', gap: 4, alignItems: 'center', margin: '8px 0' }}>
       <span style={{ fontSize: 12, color: '#444' }}>Brush ({count})</span>
-      <button type="button" onClick={undo} style={{ fontSize: 12 }}>Undo</button>
-      <button type="button" onClick={redo} style={{ fontSize: 12 }}>Redo</button>
-      <button type="button" onClick={clear} style={{ fontSize: 12 }}>Clear</button>
+      <button data-testid="clustering-brushing-undo" type="button" onClick={undo} style={{ fontSize: 12 }}>Undo</button>
+      <button data-testid="clustering-brushing-redo" type="button" onClick={redo} style={{ fontSize: 12 }}>Redo</button>
+      <button data-testid="clustering-brushing-clear" type="button" onClick={clear} style={{ fontSize: 12 }}>Clear</button>
     </div>
   )
 }

@@ -11,27 +11,36 @@ export function StepCard({ projectId, step, stepName }: StepCardProps) {
   const [params] = useState({})
   const { status, pct, message, start, cancel } = useStepProgress(projectId, step)
 
-  const handleRun = () => {
-    start(params)
-  }
+  const handleRun = () => start(params)
 
   return (
-    <div style={{ border: '1px solid #ccc', padding: '16px', margin: '8px 0' }}>
+    <div
+      data-testid={`compute-${step}-card`}
+      style={{ border: '1px solid #ccc', padding: '16px', margin: '8px 0' }}
+    >
       <h3>{stepName}</h3>
 
-      <button onClick={handleRun} disabled={status === 'running'}>
+      <button
+        data-testid={`compute-${step}-run`}
+        onClick={handleRun}
+        disabled={status === 'running'}
+      >
         Run
       </button>
 
       {status === 'running' && (
-        <button onClick={cancel} style={{ marginLeft: '8px' }}>
+        <button
+          data-testid={`compute-${step}-cancel`}
+          onClick={cancel}
+          style={{ marginLeft: '8px' }}
+        >
           Cancel
         </button>
       )}
 
       {status === 'running' && (
         <div>
-          <div>{Math.round(pct * 100)}%</div>
+          <div data-testid={`compute-${step}-pct`}>{Math.round(pct * 100)}%</div>
           <div>{message}</div>
         </div>
       )}

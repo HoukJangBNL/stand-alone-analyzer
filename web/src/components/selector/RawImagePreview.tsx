@@ -26,13 +26,14 @@ export function RawImagePreview({ projectId, domainId }: RawImagePreviewProps) {
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
         <label style={{ fontSize: 12 }}>
           <input
+            data-testid="selector-preview-contour"
             type="checkbox"
             checked={withContour}
             onChange={(e) => setWithContour(e.target.checked)}
           />{' '}
           Show boundary
         </label>
-        <button onClick={reset} aria-label="Reset zoom">Reset</button>
+        <button data-testid="selector-preview-reset" onClick={reset} aria-label="Reset zoom">Reset</button>
       </div>
       <div
         ref={wrapperRef}

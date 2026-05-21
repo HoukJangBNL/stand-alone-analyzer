@@ -20,7 +20,7 @@ export function CommitClusteringButton({ projectId }: Props) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <button type="button" onClick={handleClick} disabled={busy} style={{ padding: '6px 12px' }}>
+      <button data-testid="clustering-commit" type="button" onClick={handleClick} disabled={busy} style={{ padding: '6px 12px' }}>
         Commit clustering{busy ? ` (${Math.round(apply.pct * 100)}%)` : ''}
       </button>
       {apply.status === 'done' && apply.result && (

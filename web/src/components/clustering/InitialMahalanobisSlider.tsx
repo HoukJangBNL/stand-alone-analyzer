@@ -9,6 +9,7 @@ export function InitialMahalanobisSlider() {
         Initial max Mahalanobis ({value.toFixed(2)})
       </span>
       <input
+        data-testid="clustering-mahal-initial"
         type="range"
         min={0.5}
         max={6.0}

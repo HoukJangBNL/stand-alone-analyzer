@@ -12,7 +12,7 @@ export function FilterControls() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
         <strong>Filter</strong>
-        <button onClick={resetFilter}>Reset</button>
+        <button data-testid="selector-filter-reset" onClick={resetFilter}>Reset</button>
       </div>
       {METRIC_DEFS.map((def) => (
         <MetricRangeRow

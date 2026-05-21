@@ -25,7 +25,7 @@ export function FitGMMButton({ projectId }: Props) {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-      <button type="button" onClick={handleClick} disabled={disabled} style={{ padding: '6px 12px' }}>
+      <button data-testid="clustering-fit-gmm" type="button" onClick={handleClick} disabled={disabled} style={{ padding: '6px 12px' }}>
         Fit GMM{busy ? ` (${Math.round(refit.pct * 100)}%)` : ''}
       </button>
       {refit.status === 'error' && (

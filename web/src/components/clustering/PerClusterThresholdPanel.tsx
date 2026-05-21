@@ -32,7 +32,7 @@ export function PerClusterThresholdPanel({ labels, assignments }: Props) {
     <section style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
       <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h4 style={{ margin: 0 }}>Per-cluster thresholds</h4>
-        <button type="button" onClick={reset} style={{ fontSize: 12 }}>
+        <button data-testid="clustering-thresholds-reset" type="button" onClick={reset} style={{ fontSize: 12 }}>
           Reset
         </button>
       </header>

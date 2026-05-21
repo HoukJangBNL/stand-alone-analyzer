@@ -86,6 +86,7 @@ export function MetricRangeRow({ metricKey, value, onChange }: MetricRangeRowPro
       </label>
       <div style={{ display: 'flex', gap: 8 }}>
         <input
+          data-testid={`selector-metric-${metricKey}-min`}
           aria-label={`${metricKey} min`}
           type="number"
           step={def.step}
@@ -95,6 +96,7 @@ export function MetricRangeRow({ metricKey, value, onChange }: MetricRangeRowPro
           style={{ width: '50%' }}
         />
         <input
+          data-testid={`selector-metric-${metricKey}-max`}
           aria-label={`${metricKey} max`}
           type="number"
           step={def.step}

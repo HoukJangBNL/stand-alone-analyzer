@@ -50,6 +50,7 @@ export function ClusterRow({ clusterId, clusterName, passCount, totalCount }: Pr
       />
       <span style={{ fontSize: 12 }}>{clusterName}</span>
       <input
+        data-testid={`clustering-cluster-row-${clusterId}-threshold`}
         type="range"
         min={0}
         max={1}

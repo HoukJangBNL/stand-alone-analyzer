@@ -33,6 +33,7 @@ export function SaveExplorerStateButton({ projectId }: Props) {
 
   return (
     <button
+      data-testid="explorer-save-state"
       type="button"
       onClick={onClick}
       disabled={m.isPending}

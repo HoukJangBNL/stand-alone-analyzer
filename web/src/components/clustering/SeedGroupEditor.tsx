@@ -24,18 +24,19 @@ export function SeedGroupEditor() {
       <SeedGroupList />
       <div style={{ display: 'flex', gap: 4 }}>
         <input
+          data-testid="clustering-seed-name"
           type="text"
           placeholder="seed group name"
           value={name}
           onChange={(e) => setName(e.target.value)}
           style={{ flex: 1, padding: '4px 6px' }}
         />
-        <button type="button" onClick={handleAdd} disabled={!canAdd}>
+        <button data-testid="clustering-seed-add" type="button" onClick={handleAdd} disabled={!canAdd}>
           Add from selection ({selectedIds.size})
         </button>
       </div>
       <div>
-        <button type="button" onClick={clearSeedGroups}>
+        <button data-testid="clustering-seed-clear" type="button" onClick={clearSeedGroups}>
           Clear all
         </button>
       </div>

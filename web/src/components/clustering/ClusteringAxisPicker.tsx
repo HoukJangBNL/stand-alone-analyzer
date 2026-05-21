@@ -19,6 +19,7 @@ export function ClusteringAxisPicker({ pane }: Props) {
         {AXES.map((a) => (
           <label key={a} style={{ fontSize: 11 }}>
             <input
+              data-testid={`clustering-axis-${pane.toLowerCase()}-${a}`}
               type="radio"
               name={groupName}
               checked={current === a}

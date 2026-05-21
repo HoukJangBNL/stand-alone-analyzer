@@ -41,6 +41,7 @@ export function BrushingControls() {
         {BUTTONS.map((b) => (
           <button
             key={b.mode}
+            data-testid={`selector-brushing-mode-${b.mode}`}
             title={b.title}
             onClick={() => setMode(b.mode)}
             aria-pressed={mode === b.mode}
@@ -54,9 +55,9 @@ export function BrushingControls() {
         ))}
       </div>
       <div style={{ display: 'flex', gap: 4 }}>
-        <button onClick={undo}>Undo</button>
-        <button onClick={redo}>Redo</button>
-        <button onClick={clear}>Clear</button>
+        <button data-testid="selector-brushing-undo" onClick={undo}>Undo</button>
+        <button data-testid="selector-brushing-redo" onClick={redo}>Redo</button>
+        <button data-testid="selector-brushing-clear" onClick={clear}>Clear</button>
       </div>
     </div>
   )

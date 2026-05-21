@@ -7,6 +7,7 @@ export function Live3DToggle() {
   return (
     <label style={{ display: 'flex', gap: 6, alignItems: 'center', margin: '8px 0' }}>
       <input
+        data-testid="selector-live3d-toggle"
         type="checkbox"
         checked={show3D}
         onChange={(e) => setShow3D(e.target.checked)}

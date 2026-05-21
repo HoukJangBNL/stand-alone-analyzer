@@ -8,6 +8,7 @@ export function FitScopeRadio() {
       <legend style={{ fontSize: 12, fontWeight: 600 }}>Fit scope</legend>
       <label style={{ display: 'block' }}>
         <input
+          data-testid="clustering-fit-scope-seeds"
           type="radio"
           name="fit-scope"
           value="seeds"
@@ -18,6 +19,7 @@ export function FitScopeRadio() {
       </label>
       <label style={{ display: 'block' }}>
         <input
+          data-testid="clustering-fit-scope-all"
           type="radio"
           name="fit-scope"
           value="all_selected"

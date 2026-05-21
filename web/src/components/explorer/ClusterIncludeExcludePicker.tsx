@@ -29,6 +29,7 @@ export function ClusterIncludeExcludePicker({ availableLabels }: Props) {
         {availableLabels.map((n) => (
           <label key={`inc-${n}`}>
             <input
+              data-testid={`explorer-cluster-include-${n}`}
               type="checkbox"
               aria-label={`Include ${n}`}
               checked={include.has(n)}
@@ -43,6 +44,7 @@ export function ClusterIncludeExcludePicker({ availableLabels }: Props) {
         {availableLabels.map((n) => (
           <label key={`exc-${n}`}>
             <input
+              data-testid={`explorer-cluster-exclude-${n}`}
               type="checkbox"
               aria-label={`Exclude ${n}`}
               checked={exclude.has(n)}
