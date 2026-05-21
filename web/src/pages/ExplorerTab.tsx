@@ -1,4 +1,6 @@
 // web/src/pages/ExplorerTab.tsx
+// W3.3: Explorer is the future flake_analyses curation entry point. Heading
+// labelled (preview) until that re-scope ships.
 import { Link } from 'react-router-dom'
 import { useTileManifest } from '@/hooks/useTileManifest'
 import { useExplorerFlakes } from '@/hooks/useExplorerFlakes'
@@ -73,16 +75,22 @@ export function ExplorerTab({ projectId }: Props) {
   const availableLabels = Array.from(labelSet).sort()
 
   return (
-    <div
-      style={{
-        display: 'grid',
-        gridTemplateColumns: '1fr 280px',
-        gap: 8,
-        height: '100%',
-      }}
-    >
-      <ExplorerMain projectId={projectId} manifest={manifest} flakesByStem={flakesByStem} />
-      <ExplorerRightRail projectId={projectId} availableLabels={availableLabels} />
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%', gap: 8 }}>
+      <h2 data-testid="explorer-tab-heading" style={{ margin: 0, fontSize: 16 }}>
+        Explorer <span style={{ color: '#6b7280', fontWeight: 400 }}>(preview)</span>
+      </h2>
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 280px',
+          gap: 8,
+          flex: 1,
+          minHeight: 0,
+        }}
+      >
+        <ExplorerMain projectId={projectId} manifest={manifest} flakesByStem={flakesByStem} />
+        <ExplorerRightRail projectId={projectId} availableLabels={availableLabels} />
+      </div>
     </div>
   )
 }
