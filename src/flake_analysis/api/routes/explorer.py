@@ -60,3 +60,42 @@ async def get_explorer_grid(
     response.headers["ETag"] = _etag_for(tm)
     response.headers["Cache-Control"] = "public, max-age=86400, immutable"
     return tm
+
+
+@router.get("/explorer/flakes", response_model=ExplorerFlakesResponse)
+async def get_explorer_flakes(
+    project_id: str,
+    include: str = Query("", description="Comma-separated cluster names"),
+    exclude: str = Query("", description="Comma-separated cluster names"),
+    size_min: int | None = Query(None, ge=1),
+    size_max: int | None = Query(None, ge=1),
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Server-side filter per pinned decision #4."""
+    inc = [s for s in include.split(",") if s] if include else []
+    exc = [s for s in exclude.split(",") if s] if exclude else []
+    try:
+        df = build_flake_table(
+            manifest.analysis_folder,
+            include_labels=inc,
+            exclude_labels=exc,
+            size_min=size_min,
+            size_max=size_max,
+        )
+    except FileNotFoundError as e:
+        raise ArtifactMissing(missing=str(e))
+
+    rows = [
+        ExplorerFlakeRow(
+            flake_id=int(r["flake_id"]),
+            image_id=int(r["image_id"]),
+            domains=int(r["domains"]),
+            groups=str(r["groups"]),
+            distance=str(r["distance"]),
+            clipped=str(r["clipped"]),
+            **{"pass": True},
+        )
+        for _, r in df.iterrows()
+    ]
+    return ExplorerFlakesResponse(rows=rows, total=len(rows))
