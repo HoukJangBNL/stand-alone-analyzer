@@ -24,6 +24,7 @@ export interface ClusteringState {
   fitScope: FitScope
   initialMaxMahalanobis: number
   liveMaxMahalanobis: number
+  regCovar: number
   perClusterThresholds: Record<number, number>
   axisX: AvailableAxis
   axisY: AvailableAxis
@@ -42,6 +43,7 @@ export interface ClusteringState {
   setFitScope(scope: FitScope): void
   setInitialMaxMahalanobis(v: number): void
   setLiveMaxMahalanobis(v: number): void
+  setRegCovar(v: number): void
 
   setAxis(pane: 'X' | 'Y', value: AvailableAxis): void
   setEditingGroupId(id: string | null): void
@@ -64,6 +66,7 @@ export const useClusteringStore = create<ClusteringState>((set, get) => ({
   fitScope: 'seeds',
   initialMaxMahalanobis: 3.0,
   liveMaxMahalanobis: 3.0,
+  regCovar: 10.0,
   perClusterThresholds: {},
   axisX: 'R',
   axisY: 'G',
@@ -115,6 +118,9 @@ export const useClusteringStore = create<ClusteringState>((set, get) => ({
   setLiveMaxMahalanobis(v) {
     set({ liveMaxMahalanobis: v })
   },
+  setRegCovar(v) {
+    set({ regCovar: v })
+  },
 
   setAxis(pane, value) {
     set(pane === 'X' ? { axisX: value } : { axisY: value })
@@ -148,6 +154,7 @@ export function resetClusteringStore(): void {
       fitScope: 'seeds',
       initialMaxMahalanobis: 3.0,
       liveMaxMahalanobis: 3.0,
+      regCovar: 10.0,
       perClusterThresholds: {},
       axisX: 'R',
       axisY: 'G',
