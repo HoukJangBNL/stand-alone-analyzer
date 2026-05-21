@@ -11,3 +11,5 @@ export function colorForLabel(label: number): string {
   if (label < 0) return NEUTRAL_GRAY
   return CLUSTER_PALETTE[label % CLUSTER_PALETTE.length]
 }
+
+export const colorForCluster = colorForLabel
