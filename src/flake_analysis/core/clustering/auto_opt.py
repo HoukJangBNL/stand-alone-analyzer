@@ -67,3 +67,17 @@ def compute_blob_recall(
     """
     neighbours = _seed_neighbours(points, seeds, k)
     return _blob_recall_from_neighbours(neighbours, labels)
+
+
+def compute_mahalanobis_margin(engine, points: np.ndarray) -> float:
+    """Tiebreaker: mean nearest-cluster Mahalanobis / gate cap. Lower = better.
+
+    Reads ``engine._mahalanobis`` (computed once per fit) and
+    ``engine._max_mahalanobis``. O(N) at most.
+    """
+    mah = getattr(engine, "_mahalanobis", None)
+    cap = float(getattr(engine, "_max_mahalanobis", 3.0))
+    if mah is None or cap <= 0.0:
+        return float("inf")
+    nearest = mah.min(axis=1)
+    return float(nearest.mean() / cap)

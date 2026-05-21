@@ -5,7 +5,10 @@ import time
 
 import numpy as np
 
-from flake_analysis.core.clustering.auto_opt import compute_blob_recall
+from flake_analysis.core.clustering.auto_opt import (
+    compute_blob_recall,
+    compute_mahalanobis_margin,
+)
 
 
 def _two_clean_blobs(rng_seed: int = 7):
@@ -56,3 +59,27 @@ def test_compute_blob_recall_latency_under_100ms_at_n1000():
     compute_blob_recall(points, seeds, labels, k=10)
     elapsed = time.perf_counter() - t0
     assert elapsed < 0.1, f"blob-recall took {elapsed:.3f}s at N=1000"
+
+
+def test_compute_mahalanobis_margin_smaller_when_seeds_well_inside_gate():
+    """A loose covariance (large reg_covar) → seed Mah small → margin small."""
+    from flake_analysis.core.clustering.engine import InteractiveClusteringEngine
+
+    points = _two_clean_blobs()
+    seeds = [[0, 1, 2], [50, 51, 52]]
+
+    eng_tight = InteractiveClusteringEngine()
+    eng_tight.fit(points, seeds, rgb_threshold=0.5,
+                  reg_covar=0.01, max_mahalanobis=3.0)
+    margin_tight = compute_mahalanobis_margin(eng_tight, points)
+
+    eng_loose = InteractiveClusteringEngine()
+    eng_loose.fit(points, seeds, rgb_threshold=0.5,
+                  reg_covar=10.0, max_mahalanobis=3.0)
+    margin_loose = compute_mahalanobis_margin(eng_loose, points)
+
+    assert margin_loose < margin_tight, (
+        f"loose reg_covar should give smaller margin "
+        f"(loose={margin_loose}, tight={margin_tight})"
+    )
+    assert 0.0 <= margin_loose <= 1.0
