@@ -142,6 +142,11 @@ alembic upgrade head --sql
 
 > alembic 명령은 모두 §2.5 `PGPASSWORD` + §2.7 env 변수 prefix가 필요.
 
+> **CI guard.** PRs against `main` run [`alembic-drift.yml`](../.github/workflows/alembic-drift.yml)
+> which spins up an ephemeral Postgres, applies migrations, then calls
+> `scripts/check_alembic_drift.py`. If a model change ships without a
+> migration, CI fails before merge.
+
 ---
 
 ## 4. 비용 / 자원 cleanup
