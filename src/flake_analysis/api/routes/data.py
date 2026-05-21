@@ -121,3 +121,17 @@ async def get_clustering_labels(
         return load_labels_json(manifest.analysis_folder)
     except FileNotFoundError as e:
         raise ClusteringNotFitted(expected_path=str(e).split("missing at ", 1)[-1])
+
+
+@router.get("/clustering/assignments")
+async def get_clustering_assignments(
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+    accept: str | None = Header(default=None),
+):
+    """Return 04_clustering/assignments.parquet (Arrow IPC if Accept: application/vnd.apache.arrow.stream, else JSON)."""
+    try:
+        table = load_assignments_table(manifest.analysis_folder)
+    except FileNotFoundError as e:
+        raise ClusteringNotFitted(expected_path=str(e).split("missing at ", 1)[-1])
+    return arrow_or_json_response(table, accept_header=accept)
