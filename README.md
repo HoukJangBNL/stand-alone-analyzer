@@ -11,7 +11,12 @@ single venv).
 
 ## Status
 
-`v0.3.0` — beta. React + FastAPI. Single-user desktop tool. No DB, no SSH, no GPU.
+`v0.3.0` — beta. React + FastAPI cutover complete; AWS RDS + alembic schema (v6) bootstrapped. Currently in transition between two operating modes:
+
+- **Local mode** (default, what most users get): Single-user desktop tool. Reads/writes `analysis_folder/` on local disk. No DB connection required.
+- **DB mode** (in progress): Postgres on AWS RDS via SSH tunnel, alembic-managed schema. Used by the team for the Qpress integration path. See [`docs/project-status.md`](docs/project-status.md) for the current migration state.
+
+The two modes share the same FastAPI backend — DB mode adds persistence; it does not replace the filesystem layout.
 
 ## Quick start
 
@@ -37,10 +42,13 @@ serve `web/dist/` + reverse-proxy uvicorn). For development with
 hot-reload, see `CONTRIBUTING.md` (`npm run dev` on :5173 + uvicorn
 `--reload` on :8000).
 
-Then enter 3 paths in the SPA's left sidebar:
+Open the SPA at http://127.0.0.1:8000/ (or http://localhost:5173/ in dev). The 3 input paths are wired through the FastAPI backend:
+
 1. **raw_images/** — folder of microscope tile PNGs
 2. **annotations.json** — COCO+RLE segmentation output (e.g., from SAM2)
 3. **analysis_folder/** — empty directory (will be populated)
+
+> **Current limitation**: the project-creation sidebar UI is not yet implemented — the SPA defaults to a project ID of `local`, and the 3 paths must be set via API (`POST /api/v1/projects`) or via environment / manifest until the sidebar lands. Track progress in [`docs/project-status.md`](docs/project-status.md).
 
 ## Pipeline tabs
 
@@ -75,23 +83,27 @@ pytest -v                    # full suite (~44 tests)
 pytest tests/parity/ -v      # M3 end-to-end parity harness
 ```
 
-## Database setup
+## Database setup (DB mode only)
 
-Schema is managed by Alembic against a Postgres RDS instance reached via SSH tunnel.
+> Skip this section if you're using local mode — no DB is required for the desktop workflow.
 
-Prerequisites: SSH tunnel forwarding `localhost:5432 -> RDS:5432` is active.
+Schema is managed by Alembic against a Postgres RDS instance reached via SSH tunnel. Full operational procedure (bastion start/stop, SG rules, secret retrieval) lives in [`docs/db-ops.md`](docs/db-ops.md).
+
+Prerequisites: SSH tunnel forwarding `localhost:5432 -> RDS:5432` is active (`docs/db-ops.md` §2.4).
 
 ```bash
 export SAA_DB_HOST=localhost
 export SAA_DB_PORT=5432
 export SAA_DB_USER=houk
-export SAA_DB_PASSWORD=...        # from Secrets Manager
+export SAA_DB_PASSWORD=...        # from Secrets Manager (db-ops.md §2.5)
 export SAA_DB_NAME=qpress
 
 alembic upgrade head              # apply pending migrations
 alembic current                   # show current revision
 alembic history                   # list all revisions
 ```
+
+The schema source of truth is [`docs/db-schema-v6.md`](docs/db-schema-v6.md). Do not use `alembic revision --autogenerate` — see runbook §3 for why.
 
 ## License
 

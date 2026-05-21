@@ -29,3 +29,8 @@ env/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local environment / secrets (never commit DB passwords etc.)
+.env
+.env.local
+*.env.local
