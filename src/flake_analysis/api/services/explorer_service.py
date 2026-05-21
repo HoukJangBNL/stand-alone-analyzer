@@ -227,3 +227,66 @@ def build_flake_table(
 
     out = df.drop(columns=["_cluster_set"])
     return out.loc[out["pass"]].reset_index(drop=True)
+
+
+def build_flake_detail(
+    analysis_folder: str | Path, *, flake_id: int
+) -> ExplorerFlakeDetail:
+    """Build the detail-pane payload for a single flake.
+
+    bbox_xy + mask_stats are best-effort: PR 2.5 leaves them empty; later
+    plans extend this without breaking the schema.
+    """
+    folder = Path(analysis_folder)
+    inputs = _load_clustering_and_proximity(folder)
+    fa: pd.DataFrame = inputs["flake_assignments"]
+    asn: pd.DataFrame = inputs["assignments"]
+    labels: dict[str, Any] = inputs["labels"]
+
+    grp = fa.loc[fa["flake_id"].astype(int) == int(flake_id)]
+    if grp.empty:
+        raise KeyError(f"flake_id {flake_id} not found")
+
+    domain_ids = grp["domain_id"].astype(int).tolist()
+    image_id = int(grp["image_id"].iloc[0]) if "image_id" in grp.columns else 0
+
+    cid_to_name = {int(g["id"]): g["name"] for g in labels.get("groups", [])}
+    asn_idx = asn.set_index("domain_id")["cluster_id"].astype(int).to_dict()
+    cluster_names = sorted({
+        cid_to_name.get(asn_idx[d], f"cluster_{asn_idx[d]}")
+        for d in domain_ids if d in asn_idx and asn_idx[d] >= 0
+    })
+
+    return ExplorerFlakeDetail(
+        flake_id=int(flake_id),
+        image_id=image_id,
+        domain_ids=domain_ids,
+        cluster_names=cluster_names,
+        bbox_xy=[],
+        mask_stats={},
+        distance_px=None,
+        isolation_px=None,
+    )
+
+
+def resolve_raw_path(
+    *,
+    cache_dir: Path,
+    in_folder: Path,
+    raw_images_dir: Path,
+    stem: str,
+    ext: str,
+) -> Optional[Path]:
+    """Mosaic-viewer §10 resolver chain: cache → in-folder → raw_images_dir → None.
+
+    Pinned decision #3: raw images are served as-is, no transforms here.
+    """
+    candidates = [
+        Path(cache_dir) / f"{stem}{ext}",
+        Path(in_folder) / f"{stem}{ext}",
+        Path(raw_images_dir) / f"{stem}{ext}",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None

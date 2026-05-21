@@ -222,3 +222,84 @@ def test_build_flake_table_size_max_only(tmp_path: Path):
                            include_labels=[], exclude_labels=[],
                            size_min=None, size_max=2)
     assert df["flake_id"].tolist() == [200]
+
+
+def test_build_flake_detail_returns_domain_ids_and_cluster_names(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import build_flake_detail
+    _write_clustering_and_proximity(tmp_path)
+    detail = build_flake_detail(tmp_path, flake_id=100)
+    assert detail.flake_id == 100
+    assert detail.image_id == 0
+    assert detail.domain_ids == [10, 11, 12]
+    assert set(detail.cluster_names) == {"thin", "thick"}
+
+
+def test_build_flake_detail_raises_on_unknown_flake(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import build_flake_detail
+    _write_clustering_and_proximity(tmp_path)
+    with pytest.raises(KeyError):
+        build_flake_detail(tmp_path, flake_id=99999)
+
+
+def test_resolve_raw_path_cache_dir_first(tmp_path: Path):
+    """Resolver chain (mosaic-viewer §10): cache_dir → in-folder → raw_images_dir → 404."""
+    from flake_analysis.api.services.explorer_service import resolve_raw_path
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "ix000_iy000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "ix000_iy000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    out = resolve_raw_path(
+        cache_dir=cache, in_folder=tmp_path, raw_images_dir=raw_dir,
+        stem="ix000_iy000", ext=".png",
+    )
+    assert out == cache / "ix000_iy000.png"
+
+
+def test_resolve_raw_path_falls_back_to_in_folder(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import resolve_raw_path
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "ix000_iy000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    in_folder = tmp_path / "in"
+    in_folder.mkdir()
+    (in_folder / "ix000_iy000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    out = resolve_raw_path(
+        cache_dir=cache, in_folder=in_folder, raw_images_dir=raw_dir,
+        stem="ix000_iy000", ext=".png",
+    )
+    assert out == in_folder / "ix000_iy000.png"
+
+
+def test_resolve_raw_path_falls_back_to_raw_images_dir(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import resolve_raw_path
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    in_folder = tmp_path / "in"
+    in_folder.mkdir()
+    raw_dir = tmp_path / "raw"
+    raw_dir.mkdir()
+    (raw_dir / "ix000_iy000.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    out = resolve_raw_path(
+        cache_dir=cache, in_folder=in_folder, raw_images_dir=raw_dir,
+        stem="ix000_iy000", ext=".png",
+    )
+    assert out == raw_dir / "ix000_iy000.png"
+
+
+def test_resolve_raw_path_returns_none_when_missing_everywhere(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import resolve_raw_path
+    cache = tmp_path / "cache"; cache.mkdir()
+    in_folder = tmp_path / "in"; in_folder.mkdir()
+    raw_dir = tmp_path / "raw"; raw_dir.mkdir()
+    out = resolve_raw_path(
+        cache_dir=cache, in_folder=in_folder, raw_images_dir=raw_dir,
+        stem="missing_stem", ext=".png",
+    )
+    assert out is None
