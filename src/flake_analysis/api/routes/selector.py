@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
+from flake_analysis.api.errors import PrerequisiteMissing, ArtifactMissing
 from flake_analysis.api.mutex import acquire_project_lock
 from flake_analysis.api.schemas.selector import (
     SelectorParams,
@@ -109,15 +110,29 @@ async def commit_selection(
                 progress_callback=None,
             )
 
-        result = await loop.run_in_executor(None, _call)
+        try:
+            result = await loop.run_in_executor(None, _call)
+        except RuntimeError as e:
+            msg = str(e)
+            if "not completed" in msg:
+                raise PrerequisiteMissing(step="domain_stats", reason=msg)
+            if "missing at" in msg:
+                # extract path after "missing at "
+                expected = msg.split("missing at ", 1)[-1].strip()
+                raise ArtifactMissing(expected_path=expected, reason=msg)
+            raise
+
         out_path = Path(str(result["output_path"]))
         n_filter_accepted = int(result["selected_count"])
         total_count = int(result["total_count"])
 
-        n_committed = await loop.run_in_executor(
-            None,
-            lambda: apply_brush_intersection(out_path, lasso_ids=body.lasso_ids),
-        )
+        try:
+            n_committed = await loop.run_in_executor(
+                None,
+                lambda: apply_brush_intersection(out_path, lasso_ids=body.lasso_ids),
+            )
+        except FileNotFoundError:
+            raise ArtifactMissing(expected_path=str(out_path))
 
         return SelectorCommitSummary(
             output_path=str(out_path),

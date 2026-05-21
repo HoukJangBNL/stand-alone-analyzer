@@ -96,3 +96,38 @@ async def test_commit_with_lasso_intersects(tmp_path):
                 assert rows == {1: False, 2: True, 3: False, 4: False}
     finally:
         os.environ.pop("SAA_ANALYSIS_FOLDER", None)
+
+
+@pytest.mark.asyncio
+async def test_commit_without_domain_stats_returns_409(tmp_path):
+    """RuntimeError('Domain Stats step not completed') -> 409 prerequisite_missing."""
+    analysis = tmp_path / "proj"
+    analysis.mkdir()
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    save_manifest(
+        Manifest(analysis_folder=str(analysis), raw_images_dir=str(raw)),
+        analysis,
+    )
+    os.environ["SAA_ANALYSIS_FOLDER"] = str(analysis)
+
+    def boom(**_kw):
+        raise RuntimeError("Domain Stats step not completed. Run Compute → Domain Stats first.")
+
+    try:
+        with patch(
+            "flake_analysis.api.routes.selector.run_selector_step",
+            side_effect=boom,
+        ):
+            app = create_app()
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+                r = await client.post(
+                    "/api/v1/projects/local/selector/commit",
+                    json={"params": {"area_min": 5.0}, "lasso_ids": None},
+                )
+                assert r.status_code == 409
+                body = r.json()
+                assert body["error"]["code"] == "prerequisite_missing"
+                assert "Domain Stats" in body["error"]["details"]["reason"]
+    finally:
+        os.environ.pop("SAA_ANALYSIS_FOLDER", None)
