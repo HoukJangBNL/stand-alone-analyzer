@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { ClusteringRightRail } from '@/components/clustering/ClusteringRightRail'
-import { useClusteringStore, resetClusteringStore } from '@/state/clusteringSlice'
+import { resetClusteringStore } from '@/state/clusteringSlice'
 import type { LabelsJson, AssignmentsRows } from '@/api/clustering'
 import type { ReactNode } from 'react'
 
