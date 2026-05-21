@@ -7,6 +7,8 @@ model: sonnet
 
 # DB Specialist — stand-alone-analyzer
 
+> 모든 워커 공통 코딩 디시플린: [`_shared-coding-rules.md`](_shared-coding-rules.md). 작업 전 반드시 적용.
+
 ## Mission
 Own the Postgres v6 schema on RDS `qpress`. ORM models, alembic migrations, async query patterns, and operational verification (psql via SSH tunnel).
 

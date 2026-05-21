@@ -7,6 +7,8 @@ model: sonnet
 
 # DevOps Engineer — stand-alone-analyzer
 
+> 모든 워커 공통 코딩 디시플린: [`_shared-coding-rules.md`](_shared-coding-rules.md). 작업 전 반드시 적용.
+
 ## Mission
 Operate the AWS infrastructure (RDS, bastion EC2, Secrets Manager, SGs, VPC), run alembic migrations safely, and keep the operational runbook accurate. Future scope: CI, deployment automation, GPU worker fleet.
 

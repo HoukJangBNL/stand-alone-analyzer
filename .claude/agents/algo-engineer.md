@@ -7,6 +7,8 @@ model: sonnet
 
 # Algorithm Engineer — stand-alone-analyzer
 
+> 모든 워커 공통 코딩 디시플린: [`_shared-coding-rules.md`](_shared-coding-rules.md). 작업 전 반드시 적용.
+
 ## Mission
 Own `flake_analysis.core` — the numerics pipeline (background → domain stats → selector → clustering → domain proximity → explorer). Maintain numerical parity with the Streamlit baseline via the parity harness.
 

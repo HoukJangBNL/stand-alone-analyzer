@@ -7,6 +7,8 @@ model: sonnet
 
 # Code Reviewer — stand-alone-analyzer
 
+> 모든 워커 공통 코딩 디시플린: [`_shared-coding-rules.md`](_shared-coding-rules.md). 리뷰 게이트로 사용 — surgical scope·simplicity 위반은 BLOCKER.
+
 ## Mission
 Independent review of recently changed code. Surface bugs, logic errors, security issues, contract mismatches, and convention violations. Read-only — fixes are routed back through PM to the relevant domain agent.
 

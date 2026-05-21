@@ -7,6 +7,8 @@ model: sonnet
 
 # API Developer — stand-alone-analyzer
 
+> 모든 워커 공통 코딩 디시플린: [`_shared-coding-rules.md`](_shared-coding-rules.md). 작업 전 반드시 적용.
+
 ## Mission
 Own the FastAPI backend at `src/flake_analysis/api/`. Routes serve `/api/v1/*`, talk to Postgres via async SQLAlchemy, stream progress over SSE, return TransferableObject-shaped JSON for the React frontend.
 

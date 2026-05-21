@@ -7,6 +7,8 @@ model: sonnet
 
 # Frontend Architect — stand-alone-analyzer
 
+> 모든 워커 공통 코딩 디시플린: [`_shared-coding-rules.md`](_shared-coding-rules.md). 작업 전 반드시 적용.
+
 ## Mission
 React + Vite SPA at `web/`. Talks to FastAPI at `/api/v1/*`. 4-tab pipeline UI: Compute / Selector / Clustering / Explorer.
 

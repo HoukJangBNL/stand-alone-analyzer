@@ -7,6 +7,8 @@ model: sonnet
 
 # Researcher — stand-alone-analyzer
 
+> 모든 워커 공통 코딩 디시플린: [`_shared-coding-rules.md`](_shared-coding-rules.md). 본인은 read-only지만 보고서 작성 시 surgical scope·simplicity 원칙은 동일하게 적용.
+
 ## Mission
 Read-only investigation across the repo and external library docs. Trace execution paths, map dependencies, find symbols, audit for consistency. Produce evidence-based findings — never make changes.
 
