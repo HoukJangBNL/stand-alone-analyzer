@@ -26,15 +26,17 @@ describe('ExplorerRightRail', () => {
     )
   })
 
-  it('renders the five control panels: cluster picker, neighbour filter, render toggles, LOD picker, save button', () => {
+  it('renders the surviving control panels: cluster picker, neighbour filter, save button', () => {
     wrap(<ExplorerRightRail projectId="local" availableLabels={['1', '2']} />)
-    // The composer wrapper itself.
     expect(screen.getByTestId('explorer-right-rail')).not.toBeNull()
-    // Each child uses an aria-label region; assert by aria.
     expect(screen.getByRole('region', { name: /cluster picker/i })).not.toBeNull()
     expect(screen.getByRole('group', { name: /neighbor filter/i })).not.toBeNull()
-    expect(screen.getByRole('group', { name: /render toggles/i })).not.toBeNull()
-    expect(screen.getByRole('group', { name: /lod picker/i })).not.toBeNull()
     expect(screen.getByRole('button', { name: /Save Explorer state/i })).not.toBeNull()
+  })
+
+  it('does NOT render dropped LOD picker or render toggles (W3.3)', () => {
+    wrap(<ExplorerRightRail projectId="local" availableLabels={['1', '2']} />)
+    expect(screen.queryByRole('group', { name: /render toggles/i })).toBeNull()
+    expect(screen.queryByRole('group', { name: /lod picker/i })).toBeNull()
   })
 })

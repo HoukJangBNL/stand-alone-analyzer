@@ -15,16 +15,7 @@ describe('explorerSlice — initial state', () => {
     expect(s.excludeLabels.size).toBe(0)
     expect(s.selectedFlakeId).toBeNull()
     expect(s.focusFlakeId).toBeNull()
-    expect(s.lodChoice).toBe('auto')
     expect(s.viewportState).toBeNull()
-  })
-
-  it('defaults render toggles to (true, false, false, true) per Plan v34', () => {
-    const t = useExplorerStore.getState().renderToggles
-    expect(t.flake_bbox).toBe(true)
-    expect(t.flake_outline).toBe(false)
-    expect(t.island_bbox).toBe(false)
-    expect(t.island_outline).toBe(true)
   })
 
   it('defaults neighborFilter to all-null + exclude_border_clipped=false', () => {
@@ -96,19 +87,12 @@ describe('explorerSlice — neighborFilter actions', () => {
   })
 })
 
-describe('explorerSlice — selection + viewport + LOD + toggles', () => {
+describe('explorerSlice — selection + viewport', () => {
   it('setSelectedFlakeId / setFocusFlakeId update independently', () => {
     useExplorerStore.getState().setSelectedFlakeId(42)
     useExplorerStore.getState().setFocusFlakeId(7)
     expect(useExplorerStore.getState().selectedFlakeId).toBe(42)
     expect(useExplorerStore.getState().focusFlakeId).toBe(7)
-  })
-
-  it('setLodChoice accepts auto and 0..3', () => {
-    useExplorerStore.getState().setLodChoice(2)
-    expect(useExplorerStore.getState().lodChoice).toBe(2)
-    useExplorerStore.getState().setLodChoice('auto')
-    expect(useExplorerStore.getState().lodChoice).toBe('auto')
   })
 
   it('setViewportState stores and clears', () => {
@@ -120,25 +104,28 @@ describe('explorerSlice — selection + viewport + LOD + toggles', () => {
     expect(useExplorerStore.getState().viewportState).toBeNull()
   })
 
-  it('toggleRender flips a single toggle key', () => {
-    useExplorerStore.getState().toggleRender('flake_outline')
-    expect(useExplorerStore.getState().renderToggles.flake_outline).toBe(true)
-    useExplorerStore.getState().toggleRender('flake_outline')
-    expect(useExplorerStore.getState().renderToggles.flake_outline).toBe(false)
-  })
-
   it('resetExplorerStore returns every field to default', () => {
     useExplorerStore.getState().addInclude('a')
     useExplorerStore.getState().setSelectedFlakeId(1)
-    useExplorerStore.getState().setLodChoice(3)
     useExplorerStore.getState().setSizeRange(1, 99)
     resetExplorerStore()
     const s = useExplorerStore.getState()
     expect(s.includeLabels.size).toBe(0)
     expect(s.selectedFlakeId).toBeNull()
-    expect(s.lodChoice).toBe('auto')
     expect(s.neighborFilter.sizeMin).toBeNull()
-    expect(s.renderToggles.flake_bbox).toBe(true)
-    expect(s.renderToggles.island_outline).toBe(true)
+  })
+})
+
+describe('explorerSlice — W3.3 dead-control purge', () => {
+  it('does not expose lodChoice / setLodChoice', () => {
+    const s = useExplorerStore.getState() as Record<string, unknown>
+    expect('lodChoice' in s).toBe(false)
+    expect('setLodChoice' in s).toBe(false)
+  })
+
+  it('does not expose renderToggles / toggleRender', () => {
+    const s = useExplorerStore.getState() as Record<string, unknown>
+    expect('renderToggles' in s).toBe(false)
+    expect('toggleRender' in s).toBe(false)
   })
 })

@@ -1,8 +1,8 @@
 // web/src/components/explorer/ExplorerRightRail.tsx
+// W3.3: dropped <RenderTogglesPanel> and <LodPicker> (dead in this codebase).
+// Surviving controls will be reframed as flake_analyses.curation_params.
 import { ClusterIncludeExcludePicker } from './ClusterIncludeExcludePicker'
 import { NeighborFilterPanel } from './NeighborFilterPanel'
-import { RenderTogglesPanel } from './RenderTogglesPanel'
-import { LodPicker } from './LodPicker'
 import { SaveExplorerStateButton } from './SaveExplorerStateButton'
 
 interface Props {
@@ -18,8 +18,6 @@ export function ExplorerRightRail({ projectId, availableLabels }: Props) {
     >
       <ClusterIncludeExcludePicker availableLabels={availableLabels} />
       <NeighborFilterPanel />
-      <RenderTogglesPanel />
-      <LodPicker />
       <SaveExplorerStateButton projectId={projectId} />
     </aside>
   )

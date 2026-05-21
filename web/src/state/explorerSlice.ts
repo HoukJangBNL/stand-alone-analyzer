@@ -1,33 +1,21 @@
 // web/src/state/explorerSlice.ts
-// Zustand slice per frontend-design §3.5 + Plan 4 brief.
+// Zustand slice. W3.3: removed `lodChoice` + `renderToggles` (state-only no-ops
+// with no readers in the production tree). Survivors stay; isolation/border
+// fields will map to flake_analyses.curation_params in a future plan.
 import { create } from 'zustand'
-
-export type LodChoice = 'auto' | 0 | 1 | 2 | 3
 
 export interface NeighborFilter {
   sizeMin: number | null
   sizeMax: number | null
+  // TODO(flake_analyses): map to curation_params.neighbor_isolation_min
   isolationMin: number | null
+  // TODO(flake_analyses): map to curation_params.exclude_border_clipped
   excludeBorderClipped: boolean
 }
 
 export interface ViewportState {
   center: [number, number]
   zoom: number
-}
-
-export interface RenderToggles {
-  flake_bbox: boolean       // default TRUE
-  flake_outline: boolean    // default false
-  island_bbox: boolean      // default false
-  island_outline: boolean   // default TRUE
-}
-
-const DEFAULT_TOGGLES: RenderToggles = {
-  flake_bbox: true,
-  flake_outline: false,
-  island_bbox: false,
-  island_outline: true,
 }
 
 const DEFAULT_NEIGHBOR_FILTER: NeighborFilter = {
@@ -43,9 +31,7 @@ export interface ExplorerState {
   neighborFilter: NeighborFilter
   selectedFlakeId: number | null
   focusFlakeId: number | null
-  lodChoice: LodChoice
   viewportState: ViewportState | null
-  renderToggles: RenderToggles
 
   addInclude(label: string): void
   removeInclude(label: string): void
@@ -59,9 +45,7 @@ export interface ExplorerState {
 
   setSelectedFlakeId(id: number | null): void
   setFocusFlakeId(id: number | null): void
-  setLodChoice(c: LodChoice): void
   setViewportState(v: ViewportState | null): void
-  toggleRender(key: keyof RenderToggles): void
 }
 
 export const useExplorerStore = create<ExplorerState>((set) => ({
@@ -70,41 +54,27 @@ export const useExplorerStore = create<ExplorerState>((set) => ({
   neighborFilter: { ...DEFAULT_NEIGHBOR_FILTER },
   selectedFlakeId: null,
   focusFlakeId: null,
-  lodChoice: 'auto',
   viewportState: null,
-  renderToggles: { ...DEFAULT_TOGGLES },
 
   addInclude(label) {
     set((s) => {
-      const inc = new Set(s.includeLabels)
-      inc.add(label)
-      const exc = new Set(s.excludeLabels)
-      exc.delete(label)
+      const inc = new Set(s.includeLabels); inc.add(label)
+      const exc = new Set(s.excludeLabels); exc.delete(label)
       return { includeLabels: inc, excludeLabels: exc }
     })
   },
   removeInclude(label) {
-    set((s) => {
-      const inc = new Set(s.includeLabels)
-      inc.delete(label)
-      return { includeLabels: inc }
-    })
+    set((s) => { const inc = new Set(s.includeLabels); inc.delete(label); return { includeLabels: inc } })
   },
   addExclude(label) {
     set((s) => {
-      const exc = new Set(s.excludeLabels)
-      exc.add(label)
-      const inc = new Set(s.includeLabels)
-      inc.delete(label)
+      const exc = new Set(s.excludeLabels); exc.add(label)
+      const inc = new Set(s.includeLabels); inc.delete(label)
       return { excludeLabels: exc, includeLabels: inc }
     })
   },
   removeExclude(label) {
-    set((s) => {
-      const exc = new Set(s.excludeLabels)
-      exc.delete(label)
-      return { excludeLabels: exc }
-    })
+    set((s) => { const exc = new Set(s.excludeLabels); exc.delete(label); return { excludeLabels: exc } })
   },
   clearLabels() {
     set({ includeLabels: new Set(), excludeLabels: new Set() })
@@ -120,21 +90,9 @@ export const useExplorerStore = create<ExplorerState>((set) => ({
     set((s) => ({ neighborFilter: { ...s.neighborFilter, excludeBorderClipped: v } }))
   },
 
-  setSelectedFlakeId(id) {
-    set({ selectedFlakeId: id })
-  },
-  setFocusFlakeId(id) {
-    set({ focusFlakeId: id })
-  },
-  setLodChoice(c) {
-    set({ lodChoice: c })
-  },
-  setViewportState(v) {
-    set({ viewportState: v })
-  },
-  toggleRender(key) {
-    set((s) => ({ renderToggles: { ...s.renderToggles, [key]: !s.renderToggles[key] } }))
-  },
+  setSelectedFlakeId(id) { set({ selectedFlakeId: id }) },
+  setFocusFlakeId(id) { set({ focusFlakeId: id }) },
+  setViewportState(v) { set({ viewportState: v }) },
 }))
 
 export function resetExplorerStore(): void {
@@ -145,9 +103,7 @@ export function resetExplorerStore(): void {
       neighborFilter: { ...DEFAULT_NEIGHBOR_FILTER },
       selectedFlakeId: null,
       focusFlakeId: null,
-      lodChoice: 'auto',
       viewportState: null,
-      renderToggles: { ...DEFAULT_TOGGLES },
     },
     false
   )
