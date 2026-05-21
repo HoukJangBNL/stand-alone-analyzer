@@ -8,7 +8,7 @@ import json
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Response
 from fastapi.responses import FileResponse
 
 from flake_analysis.api.auth import User, get_current_user
@@ -40,6 +40,18 @@ def _thumb_etag(folder: Path) -> str:
     return f"{ph}:{':'.join(sig[:2])}" if sig else ph
 
 
+def _read_thumbnail_cache_dir(folder: Path) -> Path | None:
+    """Return cache_dir from 00_thumbnails/index.json, or None for legacy layout."""
+    idx_p = folder / "00_thumbnails" / "index.json"
+    if not idx_p.exists():
+        return None
+    idx = json.loads(idx_p.read_text(encoding="utf-8"))
+    cache_dir = idx.get("cache_dir")
+    if not cache_dir:
+        return None
+    return Path(cache_dir)
+
+
 @router.get("/static/thumbnails/lod{lod}/{stem}.webp")
 async def get_thumbnail(
     project_id: str,
@@ -48,18 +60,43 @@ async def get_thumbnail(
     manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
+    """Serve a thumbnail tile.
+
+    Plan 5 Task 7 (deployment-design §2.2 Option B): when the project's
+    00_thumbnails/index.json declares a `cache_dir`, return a 200 with
+    an `X-Accel-Redirect` header pointing at /_tiles_internal/<sha>/...
+    so nginx (alias /var/cache/stand-alone-analyzer/thumbnails/) ships
+    the bytes off the asyncio loop. Legacy projects (no `cache_dir` in
+    index.json — v0.2.15 layout) keep the Plan 4 `FileResponse`
+    fallback so existing analysis folders still load.
+    """
     folder = Path(manifest.analysis_folder)
+    headers = {
+        "Cache-Control": "public, max-age=86400, immutable",
+        "ETag": _thumb_etag(folder),
+    }
+
+    cache_dir = _read_thumbnail_cache_dir(folder)
+    if cache_dir is not None:
+        # cache_dir = .../<sha>/   — the basename is what nginx aliases under.
+        sha = cache_dir.name
+        # Validate <stem> with the same allowlist as the Plan 4 route to
+        # prevent injecting traversal segments into the X-Accel-Redirect URL.
+        # safe_join will raise ParamsInvalid on any of `..`, absolute,
+        # or non-allowlist names.
+        safe_target = safe_join(cache_dir / f"lod{lod}", f"{stem}.webp")
+        if not safe_target.exists():
+            raise ThumbnailMissing(lod=lod, stem=stem)
+        headers["X-Accel-Redirect"] = f"/_tiles_internal/{sha}/lod{lod}/{stem}.webp"
+        return Response(status_code=200, headers=headers)
+
+    # Legacy v0.2.15 layout — tiles live directly under 00_thumbnails/lodN/.
     cache = folder / "00_thumbnails"
     # safe_join validates EVERY part — the leading "lod{lod}" segment is
     # constructed server-side so we only need to validate `stem`.
     safe_stem = safe_join(cache / f"lod{lod}", f"{stem}.webp")
     if not safe_stem.exists():
         raise ThumbnailMissing(lod=lod, stem=stem)
-
-    headers = {
-        "Cache-Control": "public, max-age=86400, immutable",
-        "ETag": _thumb_etag(folder),
-    }
     return FileResponse(str(safe_stem), media_type="image/webp", headers=headers)
 
 
