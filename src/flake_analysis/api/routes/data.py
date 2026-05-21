@@ -5,12 +5,18 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, Response
 
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
-from flake_analysis.api.errors import DomainStatsNotFound, SelectionNotFound
+from flake_analysis.api.errors import (
+    AnnotationsPathUnset,
+    DomainNotFound,
+    DomainStatsNotFound,
+    SelectionNotFound,
+)
 from flake_analysis.api.schemas.data import ManifestModel
+from flake_analysis.api.services.annotation_preview import load_preview
 from flake_analysis.api.services.arrow_writer import arrow_or_json_response
 from flake_analysis.state.manifest import Manifest
 
@@ -75,3 +81,25 @@ async def get_selection(
     df = pd.read_parquet(p)
     table = pa.Table.from_pandas(df, preserve_index=False)
     return arrow_or_json_response(table, accept_header=accept)
+
+
+@router.get("/annotations/{domain_id}/preview")
+async def get_annotation_preview(
+    domain_id: int,
+    with_contour: bool = False,
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Return PNG crop around ``domain_id`` (optionally with red contour overlay)."""
+    if not manifest.annotations_path:
+        raise AnnotationsPathUnset()
+    try:
+        png = load_preview(
+            annotations_path=manifest.annotations_path,
+            raw_images_dir=manifest.raw_images_dir,
+            domain_id=domain_id,
+            with_contour=with_contour,
+        )
+    except KeyError as e:
+        raise DomainNotFound(domain_id=domain_id, reason=str(e))
+    return Response(content=png, media_type="image/png")

@@ -77,6 +77,18 @@ class SelectionNotFound(AppError):
     message = "No selection committed yet. Click Commit on the Selector tab."
 
 
+class AnnotationsPathUnset(AppError):
+    code = "annotations_path_unset"
+    status_code = status.HTTP_400_BAD_REQUEST
+    message = "annotations_path is not configured for this project."
+
+
+class DomainNotFound(AppError):
+    code = "domain_not_found"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Domain not found in annotations."
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()
