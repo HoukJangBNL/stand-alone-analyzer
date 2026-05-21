@@ -5,7 +5,9 @@ from dataclasses import dataclass
 from typing import Annotated, AsyncIterator
 from fastapi import Depends, Request
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
+from flake_analysis.api.errors import DbUnavailable
 from flake_analysis.db.engine import async_session_maker
 from flake_analysis.db.models import Analysis
 from flake_analysis.state.manifest import Manifest, load_manifest
@@ -72,7 +74,13 @@ async def get_active_analysis(
     Returns ``None`` when no row exists (silent fallback per pinned
     decision #1: clients without a DB-backed project keep their byte-for-byte
     disk-only response).
+
+    A reachable-but-failing DB is escalated as ``DbUnavailable`` (500) per
+    pinned decision #5 — never silently fall back to disk on SQL errors.
     """
-    stmt = select(Analysis).order_by(Analysis.id.desc()).limit(1)
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+    try:
+        stmt = select(Analysis).order_by(Analysis.id.desc()).limit(1)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
+    except SQLAlchemyError as exc:
+        raise DbUnavailable() from exc

@@ -125,6 +125,12 @@ class FlakeNotFound(AppError):
     message = "Flake not found for the requested flake_id."
 
 
+class DbUnavailable(AppError):
+    code = "db_unavailable"
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    message = "Database temporarily unavailable"
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()
