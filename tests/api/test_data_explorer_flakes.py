@@ -108,6 +108,24 @@ async def test_flakes_size_min_max(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_flakes_pass_column_reflects_filter_invariant(tmp_path: Path):
+    """Route reads `pass` from the DataFrame; build_flake_table only returns passing rows."""
+    _seed_clustering_world(tmp_path)
+    app = create_app()
+    manifest = Manifest(analysis_folder=str(tmp_path))
+    from flake_analysis.api import deps
+    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/api/v1/projects/local/explorer/flakes")
+    assert resp.status_code == 200
+    payload = resp.json()
+    assert payload["rows"], "expected at least one row"
+    assert payload["rows"][0]["pass"] is True
+
+
+@pytest.mark.asyncio
 async def test_flakes_404_when_clustering_missing(tmp_path: Path):
     (tmp_path / "manifest.json").write_text(json.dumps({
         "version": 1, "analysis_folder": str(tmp_path),

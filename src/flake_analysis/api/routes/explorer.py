@@ -94,7 +94,7 @@ async def get_explorer_flakes(
             groups=str(r["groups"]),
             distance=str(r["distance"]),
             clipped=str(r["clipped"]),
-            **{"pass": True},
+            **{"pass": bool(r["pass"])},
         )
         for _, r in df.iterrows()
     ]
