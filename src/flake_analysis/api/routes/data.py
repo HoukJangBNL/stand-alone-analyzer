@@ -11,6 +11,7 @@ from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
 from flake_analysis.api.errors import (
     AnnotationsPathUnset,
+    ClusteringNotFitted,
     DomainNotFound,
     DomainStatsNotFound,
     SelectionNotFound,
@@ -18,6 +19,11 @@ from flake_analysis.api.errors import (
 from flake_analysis.api.schemas.data import ManifestModel
 from flake_analysis.api.services.annotation_preview import load_preview
 from flake_analysis.api.services.arrow_writer import arrow_or_json_response
+from flake_analysis.api.services.clustering_service import (
+    load_assignments_table,
+    load_labels_json,
+    load_seed_groups,
+)
 from flake_analysis.state.manifest import Manifest
 
 router = APIRouter(prefix="/projects/{project_id}/data", tags=["data"])
@@ -103,3 +109,15 @@ async def get_annotation_preview(
     except KeyError as e:
         raise DomainNotFound(domain_id=domain_id, reason=str(e))
     return Response(content=png, media_type="image/png")
+
+
+@router.get("/clustering/labels")
+async def get_clustering_labels(
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Return labels.json as JSON."""
+    try:
+        return load_labels_json(manifest.analysis_folder)
+    except FileNotFoundError as e:
+        raise ClusteringNotFitted(expected_path=str(e).split("missing at ", 1)[-1])
