@@ -2,8 +2,9 @@
 from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
+from flake_analysis.core._compat import ProgressCallback
 from flake_analysis.core.pipeline.domain_stats import run_domain_stats as core_run_domain_stats
 
 from flake_analysis.state.manifest import (
@@ -13,9 +14,6 @@ from flake_analysis.state.manifest import (
     stamp_top_level,
 )
 from flake_analysis.state.hashing import file_mtime, params_hash
-
-
-ProgressCallback = Callable[[float, str], None]
 
 
 def run_domain_stats_step(
