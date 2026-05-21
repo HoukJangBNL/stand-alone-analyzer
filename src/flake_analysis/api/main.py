@@ -7,7 +7,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from flake_analysis.api.settings import Settings
 from flake_analysis.api.logging_ctx import RequestIdMiddleware
 from flake_analysis.api.errors import AppError, app_error_handler
-from flake_analysis.api.routes import health, version, projects, data, run, selector, clustering
+from flake_analysis.api.routes import (
+    health, version, projects, data, run, selector, clustering, explorer,
+)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -52,6 +54,7 @@ def create_app() -> FastAPI:
     app.include_router(run.router, prefix="/api/v1")
     app.include_router(selector.router, prefix="/api/v1")
     app.include_router(clustering.router, prefix="/api/v1")
+    app.include_router(explorer.router, prefix="/api/v1")
 
     return app
 
