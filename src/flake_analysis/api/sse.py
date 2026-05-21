@@ -110,15 +110,24 @@ async def sse_stream(
     interval = heartbeat_seconds if heartbeat_seconds is not None else SSE_HEARTBEAT_SECONDS
     # Read from the queue directly: wrapping bridge.stream().__anext__() in
     # asyncio.wait_for cancels the underlying queue.get() on timeout, which
-    # closes the async generator and drops the next event. Reading the
-    # queue directly lets us re-enter wait_for cleanly.
+    # closes the async generator and drops the next event. asyncio.Queue.get()
+    # is cancellation-safe, so we can re-enter wait_for cleanly.
+    #
+    # Hot-path optimisation: when the queue already has an item, fetch it
+    # without going through wait_for (which allocates a Task + TimerHandle
+    # per call). This preserves the concurrent-drain behaviour that the
+    # producer thread relies on when blasting >128 events through the
+    # bounded (maxsize=128) queue.
     queue = bridge._queue
     while True:
-        try:
-            event = await asyncio.wait_for(queue.get(), timeout=interval)
-        except asyncio.TimeoutError:
-            yield SSE_HEARTBEAT_FRAME
-            continue
+        if not queue.empty():
+            event = queue.get_nowait()
+        else:
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=interval)
+            except asyncio.TimeoutError:
+                yield SSE_HEARTBEAT_FRAME
+                continue
         if event is None:
             return
         yield emit_sse_event(event["type"], event)
