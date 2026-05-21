@@ -1,0 +1,56 @@
+# /etc/systemd/system/saa-api.service
+# Stand-Alone Analyzer FastAPI backend — single-user, single-process.
+# Adapted from deployment-design.md §5.1.
+#
+# IMPORTANT: BEFORE FIRST INSTALL — replace <EDIT-ME> below with the
+# actual service-account UNIX user / group. Suggested name: `saa`.
+
+[Unit]
+Description=Stand-Alone Analyzer FastAPI backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# <EDIT-ME>: replace with the real service-account user (e.g. `saa`).
+User=<EDIT-ME>
+Group=<EDIT-ME>
+
+WorkingDirectory=/opt/saa
+Environment=HOME=/var/lib/stand-alone-analyzer
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=SAA_LOG_LEVEL=info
+Environment=SAA_LOG_FORMAT=json
+Environment=SAA_BIND_HOST=127.0.0.1
+Environment=SAA_BIND_PORT=8000
+Environment=STAND_ALONE_THUMB_LOCAL_CACHE=1
+EnvironmentFile=-/etc/stand-alone-analyzer/backend.env
+
+ExecStart=/opt/saa/.venv/bin/uvicorn flake_analysis.api.main:app --host 127.0.0.1 --port 8000
+
+# Lifecycle
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=45s
+KillSignal=SIGTERM
+KillMode=mixed
+
+# Hardening (best-effort; relax if SMB needs more)
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/mnt/analysis /var/cache/stand-alone-analyzer /var/lib/stand-alone-analyzer
+ReadOnlyPaths=/mnt/raw_images
+PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=saa-api
+
+[Install]
+WantedBy=multi-user.target
