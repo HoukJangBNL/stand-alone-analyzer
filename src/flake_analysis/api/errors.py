@@ -101,6 +101,24 @@ class SeedGroupsMissing(AppError):
     message = "No seed groups committed yet."
 
 
+class ExplorerStateMissing(AppError):
+    code = "explorer_state_missing"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "No explorer state saved yet. Click Save on the Explorer tab."
+
+
+class ThumbnailMissing(AppError):
+    code = "thumbnail_missing"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Thumbnail not found for the requested LOD/stem."
+
+
+class RawImageMissing(AppError):
+    code = "raw_image_missing"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Raw substrate image not found."
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()

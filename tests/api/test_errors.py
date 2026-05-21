@@ -35,3 +35,28 @@ def test_app_error_handler_integration():
     body = resp.json()
     assert body["error"]["code"] == "prerequisite_missing"
     assert body["error"]["details"]["step"] == "background"
+
+
+def test_explorer_state_missing_envelope():
+    from flake_analysis.api.errors import ExplorerStateMissing
+    e = ExplorerStateMissing()
+    env = e.to_response()
+    assert env["error"]["code"] == "explorer_state_missing"
+    assert e.status_code == 404
+
+
+def test_thumbnail_missing_envelope():
+    from flake_analysis.api.errors import ThumbnailMissing
+    e = ThumbnailMissing(lod=0, stem="ix003_iy017")
+    env = e.to_response()
+    assert env["error"]["code"] == "thumbnail_missing"
+    assert env["error"]["details"] == {"lod": 0, "stem": "ix003_iy017"}
+    assert e.status_code == 404
+
+
+def test_raw_image_missing_envelope():
+    from flake_analysis.api.errors import RawImageMissing
+    e = RawImageMissing(filename="ix003_iy017.png")
+    env = e.to_response()
+    assert env["error"]["code"] == "raw_image_missing"
+    assert e.status_code == 404
