@@ -102,3 +102,42 @@ describe('useStepProgress', () => {
     expect(result.current.message).toBe('thumbnails step crashed')
   })
 })
+
+describe('useStepProgress.result', () => {
+  it('exposes the done event payload', async () => {
+    const sseBody = [
+      'event: progress\ndata: {"type":"progress","pct":0.5,"msg":"halfway"}\n\n',
+      'event: done\ndata: {"type":"done","result":{"selected_count":7,"total_count":12}}\n\n',
+    ].join('')
+
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode(sseBody))
+        controller.close()
+      },
+    })
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(stream, {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })
+      )
+    )
+
+    const { result } = renderHook(() => useStepProgress('local', 'selector'))
+    await act(async () => {
+      await result.current.start({})
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('done'))
+    expect(result.current.result).toEqual({ selected_count: 7, total_count: 12 })
+  })
+
+  it('result is null until done event arrives', () => {
+    const { result } = renderHook(() => useStepProgress('local', 'selector'))
+    expect(result.current.result).toBeNull()
+  })
+})

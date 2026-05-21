@@ -1,29 +1,30 @@
 // web/src/hooks/useStepProgress.ts
 /**
- * useStepProgress hook per integrated design §6.
- * Single-connection POST→SSE per §3.2.
+ * useStepProgress hook per integrated design §6 (extended for Plan 2 to
+ * surface the 'done' event's result payload).
  */
 import { useState, useCallback, useRef } from 'react'
 import { parseEventStream } from '@/lib/sse'
 
 type StepStatus = 'idle' | 'running' | 'done' | 'error'
 
-export function useStepProgress<P = any>(
+export function useStepProgress<P = unknown, R = unknown>(
   projectId: string,
   step: string
 ) {
   const [status, setStatus] = useState<StepStatus>('idle')
   const [pct, setPct] = useState(0)
   const [message, setMessage] = useState('')
+  const [result, setResult] = useState<R | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
   const start = useCallback(
     async (params: P) => {
       abortControllerRef.current = new AbortController()
-
       setStatus('running')
       setPct(0)
       setMessage('')
+      setResult(null)
 
       try {
         const response = await fetch(
@@ -48,6 +49,7 @@ export function useStepProgress<P = any>(
             setPct(event.data.pct)
             setMessage(event.data.msg || '')
           } else if (event.type === 'done') {
+            setResult((event.data?.result ?? null) as R | null)
             setStatus('done')
             setPct(1)
             break
@@ -73,5 +75,5 @@ export function useStepProgress<P = any>(
     abortControllerRef.current?.abort()
   }, [])
 
-  return { status, pct, message, start, cancel }
+  return { status, pct, message, result, start, cancel }
 }
