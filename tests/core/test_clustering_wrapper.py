@@ -444,3 +444,70 @@ def test_run_clustering_default_reg_covar_is_one():
     with tempfile.TemporaryDirectory() as tmp:
         result = _run_two_blob(Path(tmp))
     assert result["params"]["reg_covar"] == 1.0
+
+
+def _make_overlap_fog_bench_npz(path: Path) -> dict:
+    """10 Gaussian RGB blobs (with two overlapping pairs) + 100 fog points.
+
+    Layout: blob b owns rows [10*b, 10*b+10); fog occupies rows 100..199.
+    domain_ids 0..199 align with row order. Blobs (0,1) and (3,4) overlap.
+    """
+    rng = np.random.default_rng(23)
+    centers = np.array([
+        [40.0,  40.0,  40.0], [50.0,  40.0,  40.0],   # pair 1 overlaps
+        [40.0,  60.0,  40.0],
+        [200.0, 100.0, 100.0], [205.0, 105.0, 100.0], # pair 2 overlaps
+        [100.0, 200.0, 100.0], [100.0, 100.0, 200.0],
+        [220.0, 220.0, 100.0], [100.0, 220.0, 220.0], [220.0, 100.0, 220.0],
+    ], dtype=np.float64)
+    blobs = [rng.normal(loc=c, scale=2.0, size=(10, 3)) for c in centers]
+    fog = rng.uniform(0.0, 255.0, size=(100, 3))
+    repr_rgbs = np.vstack(blobs + [fog]).astype(np.float64)
+    flake_ids = np.arange(200, dtype=np.int64)
+    np.savez(
+        path, repr_rgbs=repr_rgbs,
+        std_pcts=rng.uniform(0, 30, size=(200, 3)),
+        areas=np.full(200, 500, dtype=np.int32),
+        flake_ids=flake_ids,
+    )
+    return {"repr_rgbs": repr_rgbs, "flake_ids": flake_ids}
+
+
+def test_overlap_fog_bench_recall_and_leak_at_default_reg_covar():
+    """At reg_covar=1.0, max_mah=3.0: seeded-blob recall >= 0.65, fog/unseeded leak <= 0.05.
+
+    This is a baseline check at the engine's default knobs. Auto-tune (Task 5)
+    pushes recall higher by sweeping reg_covar; the user's slider lifts it further.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        npz_path = tmp / "stats.npz"
+        sel_path = tmp / "selection.parquet"
+        out_dir = tmp / "out"
+        _make_overlap_fog_bench_npz(npz_path)
+        _make_all_selected_parquet(sel_path, n=200)
+        # Seed blobs 0 and 5 with 3 members each.
+        seed_groups = [
+            {"name": "A", "domain_ids": [0, 1, 2]},
+            {"name": "B", "domain_ids": [50, 51, 52]},
+        ]
+        result = run_clustering(
+            npz_path, sel_path, seed_groups,
+            output_dir=out_dir, rgb_threshold=0.5,
+            reg_covar=1.0, max_mahalanobis=3.0,
+        )
+        adf = pd.read_parquet(out_dir / "assignments.parquet")
+        labels = adf.set_index("domain_id")["cluster_label"]
+        # Recall over seeded blobs 0 and 5: own-blob rows must mostly land non-neg.
+        seeded_rows = list(range(0, 10)) + list(range(50, 60))
+        seeded_assigned = sum(int(labels.loc[i]) >= 0 for i in seeded_rows)
+        recall = seeded_assigned / len(seeded_rows)
+        assert recall >= 0.65, f"seeded blob recall {recall} < 0.65"
+        # Leak: unseeded blob rows + fog rows that got a non-neg label.
+        unseeded_blob_rows = [
+            i for b in range(10) if b not in (0, 5) for i in range(b * 10, b * 10 + 10)
+        ]
+        fog_rows = list(range(100, 200))
+        non_seeded = unseeded_blob_rows + fog_rows
+        leak = sum(int(labels.loc[i]) >= 0 for i in non_seeded) / len(non_seeded)
+        assert leak <= 0.05, f"unseeded/fog leak {leak} > 0.05"
