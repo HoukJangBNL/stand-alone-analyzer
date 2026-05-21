@@ -91,6 +91,7 @@ describe('postCommit', () => {
       expect.objectContaining({
         method: 'POST',
         headers: expect.objectContaining({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ params: { area_min: 5 }, lasso_ids: [2, 3] }),
       })
     )
     expect(out.n_committed).toBe(1)

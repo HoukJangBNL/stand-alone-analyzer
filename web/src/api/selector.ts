@@ -12,11 +12,21 @@ export class ApiError extends Error {
   code: string
   details: unknown
   status: number
-  constructor(status: number, code: string, message: string, details: unknown) {
+  requestId?: string
+  constructor(
+    status: number,
+    code: string,
+    message: string,
+    details: unknown,
+    requestId?: string
+  ) {
     super(`[${code}] ${message}`)
+    this.name = 'ApiError'
     this.code = code
     this.details = details
     this.status = status
+    this.requestId = requestId
+    Object.setPrototypeOf(this, ApiError.prototype)
   }
 }
 
@@ -33,7 +43,8 @@ async function unwrap<T>(resp: Response): Promise<T> {
       resp.status,
       err.code ?? 'http_error',
       err.message ?? `HTTP ${resp.status}`,
-      err.details ?? null
+      err.details ?? null,
+      err.request_id
     )
   }
   return (await resp.json()) as T
