@@ -5,6 +5,7 @@ attempt becomes a 400 ParamsInvalid before disk is touched.
 """
 from __future__ import annotations
 import json
+import mimetypes
 from pathlib import Path
 
 from fastapi import APIRouter, Depends
@@ -60,3 +61,28 @@ async def get_thumbnail(
         "ETag": _thumb_etag(folder),
     }
     return FileResponse(str(safe_stem), media_type="image/webp", headers=headers)
+
+
+@router.get("/static/raw/{filename}")
+async def get_raw(
+    project_id: str,
+    filename: str,
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Pinned decision #3: raw served as-is (no transforms, no Y-flip)."""
+    folder = Path(manifest.analysis_folder)
+    raw_root = Path(json.loads((folder / "manifest.json").read_text())["raw_images_dir"])
+    safe_path = safe_join(raw_root, filename)
+    if not safe_path.exists():
+        raise RawImageMissing(filename=filename)
+
+    media_type, _ = mimetypes.guess_type(str(safe_path))
+    if media_type is None:
+        media_type = "application/octet-stream"
+
+    headers = {
+        "Cache-Control": "public, max-age=86400, immutable",
+        "ETag": _thumb_etag(folder),  # share the thumbnails identity for now
+    }
+    return FileResponse(str(safe_path), media_type=media_type, headers=headers)
