@@ -71,6 +71,7 @@ async def test_flake_detail_404_when_unknown(tmp_path: Path):
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/api/v1/projects/local/explorer/flake/99999")
     assert resp.status_code == 404
+    assert resp.json()["error"]["code"] == "flake_not_found"
 
 
 @pytest.mark.asyncio

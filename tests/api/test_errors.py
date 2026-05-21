@@ -60,3 +60,12 @@ def test_raw_image_missing_envelope():
     env = e.to_response()
     assert env["error"]["code"] == "raw_image_missing"
     assert e.status_code == 404
+
+
+def test_flake_not_found_envelope():
+    from flake_analysis.api.errors import FlakeNotFound
+    e = FlakeNotFound(flake_id=99999)
+    env = e.to_response()
+    assert env["error"]["code"] == "flake_not_found"
+    assert env["error"]["details"] == {"flake_id": 99999}
+    assert e.status_code == 404

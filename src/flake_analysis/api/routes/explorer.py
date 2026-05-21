@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Query, Response
 
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
-from flake_analysis.api.errors import ArtifactMissing, ExplorerStateMissing
+from flake_analysis.api.errors import ArtifactMissing, ExplorerStateMissing, FlakeNotFound
 from flake_analysis.api.schemas.explorer import (
     ExplorerFlakeDetail,
     ExplorerFlakeRow,
@@ -113,4 +113,4 @@ async def get_explorer_flake_detail(
     except FileNotFoundError as e:
         raise ArtifactMissing(missing=str(e))
     except KeyError:
-        raise ArtifactMissing(missing=f"flake_id={flake_id}")
+        raise FlakeNotFound(flake_id=flake_id)

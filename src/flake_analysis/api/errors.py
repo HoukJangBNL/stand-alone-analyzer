@@ -119,6 +119,12 @@ class RawImageMissing(AppError):
     message = "Raw substrate image not found."
 
 
+class FlakeNotFound(AppError):
+    code = "flake_not_found"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Flake not found for the requested flake_id."
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()
