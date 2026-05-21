@@ -76,3 +76,50 @@ async def run_clustering_refit(
                 await lock_cm.__aexit__(None, None, None)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/run/clustering/apply_thresholds")
+async def run_clustering_apply_thresholds(
+    project_id: str,
+    params: ApplyThresholdsParams,
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Rewrite assignments.parquet with new thresholds + max_mahalanobis (SSE). Lock+drain."""
+    lock_cm = acquire_project_lock(project_id)
+    await lock_cm.__aenter__()
+
+    bridge = ProgressBridge()
+
+    def call_wrapper():
+        return apply_thresholds(
+            analysis_folder=manifest.analysis_folder,
+            cluster_thresholds={int(k): float(v) for k, v in params.cluster_thresholds.items()},
+            max_mahalanobis=params.max_mahalanobis,
+        )
+
+    async def generate():
+        loop = asyncio.get_running_loop()
+
+        async def run_pipeline():
+            try:
+                bridge.emit_progress(0.1, "Applying thresholds...")
+                result = await loop.run_in_executor(None, call_wrapper)
+                bridge.emit_progress(1.0, "Done")
+                bridge.emit_done(result)
+            except Exception as e:
+                bridge.emit_error("pipeline_failed", str(e), {"exc_type": type(e).__name__})
+            finally:
+                bridge.close()
+
+        task = asyncio.create_task(run_pipeline())
+        try:
+            async for event in bridge.stream():
+                yield emit_sse_event(event["type"], event)
+        finally:
+            try:
+                await task
+            finally:
+                await lock_cm.__aexit__(None, None, None)
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
