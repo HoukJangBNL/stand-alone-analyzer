@@ -71,6 +71,12 @@ class DomainStatsNotFound(AppError):
     message = "Domain Stats not computed yet. Run Compute → Domain Stats first."
 
 
+class SelectionNotFound(AppError):
+    code = "selection_not_found"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "No selection committed yet. Click Commit on the Selector tab."
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()

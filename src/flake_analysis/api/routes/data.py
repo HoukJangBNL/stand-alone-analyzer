@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pyarrow as pa
 from fastapi import APIRouter, Depends, Header
 
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
-from flake_analysis.api.errors import DomainStatsNotFound
+from flake_analysis.api.errors import DomainStatsNotFound, SelectionNotFound
 from flake_analysis.api.schemas.data import ManifestModel
 from flake_analysis.api.services.arrow_writer import arrow_or_json_response
 from flake_analysis.state.manifest import Manifest
@@ -58,4 +59,19 @@ async def get_domain_stats(
 ):
     """Return domain stats arrays (Arrow IPC if Accept: application/vnd.apache.arrow.stream, else JSON)."""
     table = _load_stats_table(manifest.analysis_folder)
+    return arrow_or_json_response(table, accept_header=accept)
+
+
+@router.get("/selector/selection")
+async def get_selection(
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+    accept: str | None = Header(default=None),
+):
+    """Return 03_selector/selection.parquet rows (Arrow IPC or JSON column-oriented)."""
+    p = Path(manifest.analysis_folder) / "03_selector" / "selection.parquet"
+    if not p.exists():
+        raise SelectionNotFound(path=str(p))
+    df = pd.read_parquet(p)
+    table = pa.Table.from_pandas(df, preserve_index=False)
     return arrow_or_json_response(table, accept_header=accept)
