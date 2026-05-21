@@ -89,6 +89,18 @@ class DomainNotFound(AppError):
     message = "Domain not found in annotations."
 
 
+class ClusteringNotFitted(AppError):
+    code = "clustering_not_fitted"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Clustering has not been fitted yet. Click Fit GMM on the Clustering tab."
+
+
+class SeedGroupsMissing(AppError):
+    code = "seed_groups_missing"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "No seed groups committed yet."
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()
