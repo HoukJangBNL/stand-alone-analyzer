@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "stand-alone-analyzer"
 version = "0.2.18"
-description = "Streamlit app for interactive 2D material flake analysis"
+description = "React + FastAPI app for interactive 2D material flake analysis"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
@@ -24,8 +24,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
-    "streamlit>=1.32",
-    "plotly>=5.18",
     "pandas>=2.1",
     "pyarrow>=14",
     # Absorbed from flake-analysis-core (merged in v0.2.0)
@@ -39,6 +37,9 @@ dependencies = [
     "pydantic-settings>=2.0",
     "fastapi>=0.110",
     "httpx>=0.27",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
 ]
 
 [project.optional-dependencies]
