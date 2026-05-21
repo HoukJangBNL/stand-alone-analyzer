@@ -1,17 +1,15 @@
-"""Compatibility shims for Qpress dependencies removed in standalone extraction.
+"""Compatibility shim for the `msg` logger and the canonical
+`ProgressCallback` type alias used across `flake_analysis.core`.
 
-These shims let extracted Qpress code (modules/analyzer/*, utils/image_processing/*)
-run without the full Qpress runtime (msg, OperationContext, AnalysisTree).
-
-When this package is imported by Qpress itself, Qpress can monkey-patch these
-back to its native implementations. When imported by the standalone Streamlit
-app, the shims are used directly.
+Originally this module also exposed `OperationContext` and `AnalysisTree`
+shims for the Qpress reverse-merge contract; both were unused in the
+standalone repo and were removed in W4.1 (see W0 audit
+`claudedocs/pipeline-core-audit.md` §6).
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional
+from typing import Callable
 
 # --- msg shim ----------------------------------------------------------------
 # Replaces `from infrastructure.shared.core.message_handler import msg`.
@@ -49,52 +47,3 @@ class _Msg:
 
 
 msg = _Msg()
-
-
-# --- OperationContext stub ---------------------------------------------------
-# Replaces Qpress's OperationContext for files that consume `ctx.params` etc.
-# Standalone passes plain dicts; this stub preserves attribute access shape.
-
-
-@dataclass
-class OperationContext:
-    """Plain dataclass shim of Qpress's OperationContext.
-
-    Extracted operations only need params + state-style fields.
-    Standalone code may build one of these in pipeline wrappers if needed.
-    """
-
-    params: Dict[str, Any] = field(default_factory=dict)
-    inputs: Dict[str, Any] = field(default_factory=dict)
-    state: Dict[str, Any] = field(default_factory=dict)
-    workspace: Optional[str] = None
-    progress_callback: Optional[Callable[[float, str], None]] = None
-
-    async def report_progress(self, percentage: float, message: str = "") -> None:
-        if self.progress_callback is not None:
-            self.progress_callback(percentage, message)
-
-    async def check_cancellation(self) -> None:
-        # Standalone has no cancellation infrastructure (single-process Streamlit).
-        return None
-
-
-# --- AnalysisTree no-op ------------------------------------------------------
-# Replaces Qpress's AnalysisTree dependency tracking.
-# Standalone uses manifest.json instead — see stand-alone-analyzer state/manifest.py.
-
-
-class AnalysisTree:
-    """No-op shim — standalone uses manifest.json for dependency tracking."""
-
-    @staticmethod
-    def write_meta_json(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    @staticmethod
-    def register(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    @staticmethod
-    def get_parent(*args: Any, **kwargs: Any) -> None:
-        return None
