@@ -8,7 +8,7 @@ import pyarrow as pa
 from fastapi import APIRouter, Depends, Header, Response
 
 from flake_analysis.api.auth import User, get_current_user
-from flake_analysis.api.deps import get_manifest
+from flake_analysis.api.deps import get_active_analysis, get_manifest
 from flake_analysis.api.errors import (
     AnnotationsPathUnset,
     ClusteringNotFitted,
@@ -24,6 +24,7 @@ from flake_analysis.api.services.clustering_service import (
     load_labels_json,
     load_seed_groups,
 )
+from flake_analysis.api.services.manifest_merge import merge_db_steps_into_manifest
 from flake_analysis.state.manifest import Manifest
 
 router = APIRouter(prefix="/projects/{project_id}/data", tags=["data"])
@@ -32,10 +33,21 @@ router = APIRouter(prefix="/projects/{project_id}/data", tags=["data"])
 @router.get("/manifest")
 async def get_manifest_endpoint(
     manifest: Manifest = Depends(get_manifest),
+    analysis=Depends(get_active_analysis),
     user: User = Depends(get_current_user),
 ) -> ManifestModel:
-    """Return manifest as JSON."""
-    return ManifestModel.model_validate(manifest)
+    """Return manifest as JSON, with DB-derived step_status overlay when present.
+
+    Pinned decision #1: DB is source of truth ONLY for steps in
+    DB_TO_MANIFEST_STEP_MAP (background/sam/domain_stats/domain_proximity).
+    Disk-only steps (clustering/selector/thumbnails/explorer) pass through.
+    Pinned decision #5: DB errors propagate as DbUnavailable (500), not
+    silent fallback to disk. The "no DB row" case (analysis is None) is
+    silent fallback per pinned decision #1's corollary.
+    """
+    base = ManifestModel.model_validate(manifest).model_dump()
+    merged = merge_db_steps_into_manifest(base, analysis)
+    return ManifestModel.model_validate(merged)
 
 
 def _load_stats_table(analysis_folder: str | Path) -> pa.Table:
