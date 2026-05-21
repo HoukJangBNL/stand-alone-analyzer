@@ -31,4 +31,12 @@ describe('BrushingControls', () => {
     fireEvent.click(screen.getByRole('button', { name: /Clear/ }))
     expect(useSelectorStore.getState().brushing.selectedIds.size).toBe(0)
   })
+
+  it('redo button restores undone selection', () => {
+    useSelectorStore.getState().applyLasso([1, 2, 3], 'replace')
+    useSelectorStore.getState().undoBrush()
+    render(<BrushingControls />)
+    fireEvent.click(screen.getByRole('button', { name: /Redo/ }))
+    expect(useSelectorStore.getState().brushing.selectedIds.size).toBe(3)
+  })
 })
