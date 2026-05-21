@@ -1,6 +1,6 @@
 # stand-alone-analyzer
 
-A Streamlit app for interactive 2D material flake analysis.
+A React + FastAPI app for interactive 2D material flake analysis.
 
 Loads pre-computed segmentation masks (COCO + RLE) and provides a 4-tab pipeline GUI for background generation, color analysis, manual clustering, and label-based filtering.
 
@@ -11,22 +11,33 @@ single venv).
 
 ## Status
 
-`v0.2.0` — beta. Single-user desktop tool. No DB, no SSH, no GPU.
+`v0.3.0` — beta. React + FastAPI. Single-user desktop tool. No DB, no SSH, no GPU.
 
 ## Quick start
 
 ```bash
-# Clone and install
+# Clone and install (Python deps for the FastAPI backend)
 git clone https://github.com/HoukJangBNL/stand-alone-analyzer.git
 cd stand-alone-analyzer
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run
-streamlit run app/streamlit_app.py
+# Build the React frontend
+cd web
+npm install
+npm run build
+cd ..
+
+# Run the FastAPI backend (serves /api/v1/*)
+uvicorn flake_analysis.api.main:app --host 127.0.0.1 --port 8000
 ```
 
-Then enter 3 paths in the sidebar:
+For production, see `docs/operations/runbook.md` (nginx + systemd
+serve `web/dist/` + reverse-proxy uvicorn). For development with
+hot-reload, see `CONTRIBUTING.md` (`npm run dev` on :5173 + uvicorn
+`--reload` on :8000).
+
+Then enter 3 paths in the SPA's left sidebar:
 1. **raw_images/** — folder of microscope tile PNGs
 2. **annotations.json** — COCO+RLE segmentation output (e.g., from SAM2)
 3. **analysis_folder/** — empty directory (will be populated)
@@ -40,7 +51,7 @@ Then enter 3 paths in the sidebar:
 | 3 | Clustering | Manual seed-group GMM with per-cluster posterior thresholds |
 | 4 | Explorer | Substrate-grid LOD 2 + Include/Exclude label picker + 3-pane Z-layout (canvas + flake list + DetailPanel) |
 
-See [USER_GUIDE.md](docs/USER_GUIDE.md) for detailed workflow.
+See [`docs/project-status.md`](docs/project-status.md) for current state and [`docs/db-schema-v6.md`](docs/db-schema-v6.md) for the DB schema.
 
 ## Filesystem layout
 
@@ -62,6 +73,24 @@ analysis/
 ```bash
 pytest -v                    # full suite (~44 tests)
 pytest tests/parity/ -v      # M3 end-to-end parity harness
+```
+
+## Database setup
+
+Schema is managed by Alembic against a Postgres RDS instance reached via SSH tunnel.
+
+Prerequisites: SSH tunnel forwarding `localhost:5432 -> RDS:5432` is active.
+
+```bash
+export SAA_DB_HOST=localhost
+export SAA_DB_PORT=5432
+export SAA_DB_USER=houk
+export SAA_DB_PASSWORD=...        # from Secrets Manager
+export SAA_DB_NAME=qpress
+
+alembic upgrade head              # apply pending migrations
+alembic current                   # show current revision
+alembic history                   # list all revisions
 ```
 
 ## License
