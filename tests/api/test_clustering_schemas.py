@@ -58,6 +58,32 @@ def test_apply_thresholds_summary_shape():
     assert s.n_pass == 80
 
 
+def test_refit_params_default_reg_covar_is_ten():
+    p = ClusteringRefitParams(seed_groups=[])
+    assert p.reg_covar == 10.0
+    assert p.auto_tune is False
+
+
+def test_refit_params_clamps_reg_covar_range():
+    with pytest.raises(ValidationError):
+        ClusteringRefitParams(seed_groups=[], reg_covar=-1.0)
+    with pytest.raises(ValidationError):
+        ClusteringRefitParams(seed_groups=[], reg_covar=1000.0)
+    # Range corners must be accepted.
+    ClusteringRefitParams(seed_groups=[], reg_covar=0.0)
+    ClusteringRefitParams(seed_groups=[], reg_covar=100.0)
+
+
+def test_summary_reg_covar_chosen_optional():
+    s = ClusteringSummary(output_dir="/x", n_clusters=2, n_assigned=10, n_unassigned=0)
+    assert s.reg_covar_chosen is None
+    s2 = ClusteringSummary(
+        output_dir="/x", n_clusters=2, n_assigned=10, n_unassigned=0,
+        reg_covar_chosen=3.0,
+    )
+    assert s2.reg_covar_chosen == 3.0
+
+
 def test_labels_json_groups_required():
     payload = {
         "version": 1,

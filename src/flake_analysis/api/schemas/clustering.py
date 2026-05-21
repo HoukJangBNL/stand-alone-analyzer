@@ -18,6 +18,8 @@ class ClusteringRefitParams(BaseModel):
     rgb_threshold: float = 0.50
     fit_scope: Literal["seeds", "all_selected"] = "seeds"
     max_mahalanobis: float = 3.0
+    reg_covar: float = Field(default=10.0, ge=0.0, le=100.0)
+    auto_tune: bool = False
 
 
 class ApplyThresholdsParams(BaseModel):
@@ -33,6 +35,7 @@ class ClusteringSummary(BaseModel):
     n_assigned: int
     n_unassigned: int
     wrapper_params_hash: str | None = None
+    reg_covar_chosen: float | None = None
 
 
 class ApplyThresholdsSummary(BaseModel):
