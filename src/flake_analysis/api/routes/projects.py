@@ -2,7 +2,8 @@
 from __future__ import annotations
 import os
 from pathlib import Path
-from fastapi import APIRouter, Depends
+from typing import Optional
+from fastapi import APIRouter, Body, Depends
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.schemas.projects import (
     CreateProjectRequest,
@@ -11,24 +12,39 @@ from flake_analysis.api.schemas.projects import (
     ValidatePathsResponse,
     PathStatus,
 )
-from flake_analysis.api.deps import _resolve_project_id
+from flake_analysis.api.deps import (
+    DEFAULT_ANALYSIS_FOLDER,
+    DEFAULT_PROJECT_ID,
+    _resolve_project_id,
+)
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
 @router.post("")
 async def create_project(
-    req: CreateProjectRequest,
+    req: Optional[CreateProjectRequest] = Body(default=None),
     user: User = Depends(get_current_user),
 ) -> ProjectHandle:
-    """Create project (v1: sets active project path)."""
+    """Create project (v1: sets active project path).
+
+    Empty body → default project rooted at SAA_ANALYSIS_FOLDER.
+    Body with analysis_folder → activates that path.
+    Other paths (raw_images_dir, annotations_path) are echoed back verbatim
+    for the frontend to persist alongside the manifest.
+    """
+    import os as _os
     import flake_analysis.api.deps as deps_module
-    deps_module._active_project = req.analysis_folder
+
+    analysis_folder = (req.analysis_folder if req else None) or _os.environ.get(
+        "SAA_ANALYSIS_FOLDER", DEFAULT_ANALYSIS_FOLDER
+    )
+    deps_module._active_project = analysis_folder
 
     return ProjectHandle(
-        project_id="local",
-        analysis_folder=req.analysis_folder,
-        raw_images_dir=req.raw_images_dir,
-        annotations_path=req.annotations_path,
+        project_id=DEFAULT_PROJECT_ID,
+        analysis_folder=analysis_folder,
+        raw_images_dir=(req.raw_images_dir if req else None),
+        annotations_path=(req.annotations_path if req else None),
     )
 
 @router.get("/active")
