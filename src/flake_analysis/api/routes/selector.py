@@ -5,14 +5,18 @@ POST /selector/commit — synchronous JSON.
 """
 from __future__ import annotations
 import asyncio
+import io
 from pathlib import Path
+from typing import Literal
+
+import pandas as pd
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
-from flake_analysis.api.errors import PrerequisiteMissing, ArtifactMissing
+from flake_analysis.api.errors import PrerequisiteMissing, ArtifactMissing, SelectionNotFound
 from flake_analysis.api.mutex import acquire_project_lock
 from flake_analysis.api.schemas.selector import (
     SelectorParams,
@@ -142,3 +146,34 @@ async def commit_selection(
             total_count=total_count,
             params_hash=result.get("params_hash"),
         )
+
+
+@router.get("/selector/export")
+async def export_selection(
+    project_id: str,
+    mode: Literal["filtered", "selected"] = "selected",
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Stream selection.parquet rows as CSV.
+
+    mode=filtered → all rows (every domain with its selected boolean).
+    mode=selected → only rows where ``selected`` is True.
+    """
+    p = Path(manifest.analysis_folder) / "03_selector" / "selection.parquet"
+    if not p.exists():
+        raise SelectionNotFound(path=str(p))
+    df = pd.read_parquet(p)
+    if mode == "selected":
+        df = df[df["selected"].astype(bool)]
+
+    def _iter():
+        # Single-shot CSV (a few hundred KB even at 10⁵ rows; no need to chunk).
+        buf = io.StringIO()
+        df.to_csv(buf, index=False)
+        yield buf.getvalue()
+
+    headers = {
+        "Content-Disposition": f'attachment; filename="selection_{mode}.csv"',
+    }
+    return StreamingResponse(_iter(), media_type="text/csv; charset=utf-8", headers=headers)
