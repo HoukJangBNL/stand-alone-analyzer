@@ -1,5 +1,19 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { lazy, Suspense } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom'
 import { ComputeTab } from './pages/ComputeTab'
+
+const SelectorTab = lazy(() =>
+  import('@/pages/SelectorTab').then((m) => ({ default: m.SelectorTab }))
+)
+
+function SelectorTabRoute() {
+  const { projectId } = useParams<{ projectId: string }>()
+  return (
+    <Suspense fallback={<div style={{ padding: 16 }}>Loading Selector tab...</div>}>
+      <SelectorTab projectId={projectId || 'local'} />
+    </Suspense>
+  )
+}
 
 export function App() {
   return (
@@ -9,6 +23,7 @@ export function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/projects/local/compute" replace />} />
           <Route path="/projects/:projectId/compute" element={<ComputeTab />} />
+          <Route path="/projects/:projectId/selector" element={<SelectorTabRoute />} />
         </Routes>
       </div>
     </BrowserRouter>
