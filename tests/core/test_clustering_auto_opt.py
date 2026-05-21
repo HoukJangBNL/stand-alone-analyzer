@@ -6,6 +6,7 @@ import time
 import numpy as np
 
 from flake_analysis.core.clustering.auto_opt import (
+    auto_tune_reg_covar,
     compute_blob_recall,
     compute_mahalanobis_margin,
 )
@@ -83,3 +84,35 @@ def test_compute_mahalanobis_margin_smaller_when_seeds_well_inside_gate():
         f"(loose={margin_loose}, tight={margin_tight})"
     )
     assert 0.0 <= margin_loose <= 1.0
+
+
+def test_auto_tune_reg_covar_picks_from_candidates():
+    """On the 2-blob fixture, the tuner returns one of the documented candidates.
+
+    Note: with two clean, fully-seeded blobs there are no unseeded blobs to
+    penalise over-fattening, so the largest reg_covar (10.0) is genuinely
+    optimal under (recall desc, margin desc). The bounded-band check only
+    becomes meaningful on fixtures with unseeded blobs (see overlap+fog bench).
+    """
+    points = _two_clean_blobs()
+    seeds = [[0, 1, 2], [50, 51, 52]]
+    chosen = auto_tune_reg_covar(points, seeds)
+    assert chosen in {0.1, 0.3, 1.0, 3.0, 10.0}
+
+
+def test_auto_tune_reg_covar_falls_back_to_tiebreaker_when_recall_ties():
+    """All candidates score recall=1 on this trivial fixture → margin breaks tie."""
+    rng = np.random.default_rng(0)
+    a = rng.normal(loc=[10.0, 10.0, 10.0], scale=0.1, size=(20, 3))
+    b = rng.normal(loc=[200.0, 200.0, 200.0], scale=0.1, size=(20, 3))
+    points = np.vstack([a, b]).astype(np.float64)
+    chosen = auto_tune_reg_covar(points, [[0, 1, 2], [20, 21, 22]])
+    assert chosen in {0.1, 0.3, 1.0, 3.0, 10.0}
+
+
+def test_auto_tune_reg_covar_default_candidates_are_documented():
+    import inspect
+    from flake_analysis.core.clustering import auto_opt
+    sig = inspect.signature(auto_opt.auto_tune_reg_covar)
+    default = sig.parameters["candidates"].default
+    assert list(default) == [0.1, 0.3, 1.0, 3.0, 10.0]

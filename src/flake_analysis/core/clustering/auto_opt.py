@@ -81,3 +81,42 @@ def compute_mahalanobis_margin(engine, points: np.ndarray) -> float:
         return float("inf")
     nearest = mah.min(axis=1)
     return float(nearest.mean() / cap)
+
+
+def auto_tune_reg_covar(
+    points: np.ndarray,
+    seeds: Sequence[Sequence[int]],
+    candidates: Sequence[float] = (0.1, 0.3, 1.0, 3.0, 10.0),
+    rgb_threshold: float = 0.5,
+    max_mahalanobis: float = 3.0,
+    k: int = 10,
+) -> float:
+    """Sweep candidates; pick (recall desc, margin desc) winner.
+
+    Default candidates cover the band identified in
+    claudedocs/clustering-tunable-spec.md §2c. Held fixed:
+    rgb_threshold, max_mahalanobis. Returns the winning reg_covar.
+    """
+    # Lazy import avoids a circular import at module load.
+    from flake_analysis.core.clustering.engine import InteractiveClusteringEngine
+
+    seed_dict = {cid: list(idxs) for cid, idxs in enumerate(seeds)}
+    # Precompute KD-tree neighbour map once — invariant across the sweep.
+    neighbours = _seed_neighbours(points, seed_dict, k)
+    best_score = (-1.0, float("inf"))  # (recall, -margin)
+    best_value = float(list(candidates)[0])
+    for rc in candidates:
+        engine = InteractiveClusteringEngine()
+        result = engine.fit(
+            points, list(seeds),
+            rgb_threshold=rgb_threshold,
+            max_mahalanobis=max_mahalanobis,
+            reg_covar=float(rc),
+        )
+        recall = _blob_recall_from_neighbours(neighbours, result.labels)
+        margin = compute_mahalanobis_margin(engine, points)
+        score = (recall, -margin)
+        if score > best_score:
+            best_score = score
+            best_value = float(rc)
+    return best_value
