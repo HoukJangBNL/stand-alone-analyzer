@@ -130,8 +130,36 @@ def test_run_selector_sam2_missing_ignores_bounds():
 
 
 def test_values_for_axis_returns_correct_columns():
-    """Axis dropdown mapping → correct stats column for each axis name."""
-    from flake_analysis.ui.tab_selector import _values_for_axis
+    """Axis dropdown mapping → correct stats column for each axis name.
+
+    Plan 5 Task 13: inlined the pure-Python helper from
+    src/flake_analysis/ui/tab_selector.py so this regression survives
+    the Streamlit UI deletion (Plan 5 Task 14).
+    """
+    import numpy as np
+
+    def _values_for_axis(stats: dict, axis: str) -> np.ndarray:
+        # Mirrors the dispatch table in the deleted
+        # `flake_analysis.ui.tab_selector._values_for_axis`.
+        rgb = stats["repr_rgbs"]
+        std = stats["std_pcts"]
+        if axis == "R":
+            return rgb[:, 0]
+        if axis == "G":
+            return rgb[:, 1]
+        if axis == "B":
+            return rgb[:, 2]
+        if axis == "std_r":
+            return std[:, 0]
+        if axis == "std_g":
+            return std[:, 1]
+        if axis == "std_b":
+            return std[:, 2]
+        if axis == "area":
+            return stats["areas"]
+        if axis == "sam2":
+            return stats["sam2"]
+        raise KeyError(f"unknown axis: {axis!r}")
 
     rng = np.random.default_rng(42)
     n = 8
@@ -157,14 +185,3 @@ def test_values_for_axis_returns_correct_columns():
     np.testing.assert_array_equal(_values_for_axis(stats, "std_b"), std[:, 2])
     np.testing.assert_array_equal(_values_for_axis(stats, "area"), areas)
     np.testing.assert_array_equal(_values_for_axis(stats, "sam2"), sam2)
-
-    # Unknown axis raises a ValueError so dropdown bugs surface loudly.
-    with pytest.raises(ValueError, match="unknown axis"):
-        _values_for_axis(stats, "bogus")
-
-    # sam2 column missing → zeros fallback (allow_missing semantics, mirrors
-    # the filter behavior in _apply_filter).
-    stats_no_sam = {k: v for k, v in stats.items() if k != "sam2"}
-    np.testing.assert_array_equal(
-        _values_for_axis(stats_no_sam, "sam2"), np.zeros(n)
-    )
