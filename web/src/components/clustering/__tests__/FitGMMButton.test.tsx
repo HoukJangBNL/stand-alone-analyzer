@@ -51,4 +51,22 @@ describe('FitGMMButton', () => {
     ])
     expect(body.fit_scope).toBe('seeds')
   })
+
+  it('submits regCovar from the slice (default 10.0) and auto_tune is unset', async () => {
+    useClusteringStore.getState().addSeedGroup('a', [0, 1, 2])
+    useClusteringStore.getState().addSeedGroup('b', [10, 11, 12])
+    useClusteringStore.getState().setRegCovar(3.0)
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response('', { status: 200, headers: { 'content-type': 'text/event-stream' } })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    wrap(<FitGMMButton projectId="local" />)
+    const btn = screen.getByRole('button', { name: /Fit GMM/ }) as HTMLButtonElement
+    fireEvent.click(btn)
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    const body = JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.reg_covar).toBe(3.0)
+    expect(body.auto_tune ?? false).toBe(false)
+  })
 })

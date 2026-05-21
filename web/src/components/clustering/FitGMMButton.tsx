@@ -9,6 +9,7 @@ export function FitGMMButton({ projectId }: Props) {
   const seedGroups = useClusteringStore((s) => s.seedGroups)
   const fitScope = useClusteringStore((s) => s.fitScope)
   const initialMaxMahalanobis = useClusteringStore((s) => s.initialMaxMahalanobis)
+  const regCovar = useClusteringStore((s) => s.regCovar)
   const refit = useClusteringRefit(projectId)
 
   const enoughGroups = seedGroups.length >= 2
@@ -20,6 +21,7 @@ export function FitGMMButton({ projectId }: Props) {
       seed_groups: seedGroups.map((g) => ({ name: g.name, domain_ids: g.member_ids })),
       fit_scope: fitScope,
       max_mahalanobis: initialMaxMahalanobis,
+      reg_covar: regCovar,
     })
   }
 
