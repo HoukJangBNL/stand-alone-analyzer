@@ -60,6 +60,8 @@ export interface ClusteringRefitBody {
   rgb_threshold?: number
   fit_scope?: 'seeds' | 'all_selected'
   max_mahalanobis?: number
+  reg_covar?: number
+  auto_tune?: boolean
 }
 
 export interface ApplyThresholdsBody {

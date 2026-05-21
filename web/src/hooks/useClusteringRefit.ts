@@ -11,6 +11,7 @@ interface RefitResult {
   n_assigned: number
   n_unassigned: number
   output_dir: string
+  reg_covar_chosen?: number
 }
 
 type RefitStatus = 'idle' | 'running' | 'done' | 'error'
