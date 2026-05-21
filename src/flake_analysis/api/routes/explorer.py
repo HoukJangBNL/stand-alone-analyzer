@@ -43,3 +43,20 @@ async def get_tile_manifest(
     response.headers["ETag"] = _etag_for(tm)
     response.headers["Cache-Control"] = "public, max-age=86400, immutable"
     return tm
+
+
+@router.get("/explorer/grid", response_model=TileManifest)
+async def get_explorer_grid(
+    project_id: str,
+    response: Response,
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Pinned decision #11: canonical alias of /tile_manifest per mosaic-viewer §4."""
+    try:
+        tm = build_tile_manifest(manifest.analysis_folder)
+    except FileNotFoundError as e:
+        raise ArtifactMissing(missing=str(e))
+    response.headers["ETag"] = _etag_for(tm)
+    response.headers["Cache-Control"] = "public, max-age=86400, immutable"
+    return tm
