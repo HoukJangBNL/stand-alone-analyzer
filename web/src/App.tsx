@@ -1,5 +1,6 @@
 import { lazy, Suspense } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useParams } from 'react-router-dom'
+import { Toaster } from 'sonner'
 import { ComputeTab } from './pages/ComputeTab'
 
 const SelectorTab = lazy(() =>
@@ -42,6 +43,12 @@ function ExplorerTabRoute() {
 export function App() {
   return (
     <BrowserRouter>
+      <Toaster
+        data-testid="app-root-toaster"
+        position="top-right"
+        richColors
+        closeButton
+      />
       <div style={{ padding: '20px' }}>
         <h1>Stand-Alone Analyzer</h1>
         <Routes>
