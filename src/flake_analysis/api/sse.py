@@ -83,3 +83,42 @@ class ProgressBridge:
             if event is None:
                 break
             yield event
+
+
+SSE_HEARTBEAT_SECONDS: float = 15.0
+"""Heartbeat interval. Floor is 15s — lowering requires ops signoff."""
+
+SSE_HEARTBEAT_FRAME: str = ": heartbeat\n\n"
+"""SSE comment line. EventSource clients ignore lines starting with ':' per WHATWG."""
+
+
+async def sse_stream(
+    bridge: "ProgressBridge",
+    heartbeat_seconds: float | None = None,
+) -> AsyncGenerator[str, None]:
+    """Drain a ProgressBridge into SSE wire frames, injecting heartbeats while idle.
+
+    On every ``heartbeat_seconds`` interval where no real event arrives, emit
+    ``: heartbeat\\n\\n`` so intermediaries (nginx / ELB) keep the connection
+    alive. Real events are encoded with :func:`emit_sse_event` exactly as the
+    inline drain loops did before this helper existed.
+
+    The interval is resolved at call time via the module-level
+    ``SSE_HEARTBEAT_SECONDS`` constant (so tests can ``monkeypatch.setattr``
+    it). Pass an explicit ``heartbeat_seconds`` to override per-call.
+    """
+    interval = heartbeat_seconds if heartbeat_seconds is not None else SSE_HEARTBEAT_SECONDS
+    # Read from the queue directly: wrapping bridge.stream().__anext__() in
+    # asyncio.wait_for cancels the underlying queue.get() on timeout, which
+    # closes the async generator and drops the next event. Reading the
+    # queue directly lets us re-enter wait_for cleanly.
+    queue = bridge._queue
+    while True:
+        try:
+            event = await asyncio.wait_for(queue.get(), timeout=interval)
+        except asyncio.TimeoutError:
+            yield SSE_HEARTBEAT_FRAME
+            continue
+        if event is None:
+            return
+        yield emit_sse_event(event["type"], event)

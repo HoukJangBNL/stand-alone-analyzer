@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
 from flake_analysis.api.mutex import acquire_project_lock
-from flake_analysis.api.sse import ProgressBridge, emit_sse_event
+from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.api.schemas.compute import (
     BackgroundParams,
     DomainProximityParams,
@@ -63,8 +63,8 @@ async def run_thumbnails(
 
         task = asyncio.create_task(run_pipeline())
         try:
-            async for event in bridge.stream():
-                yield emit_sse_event(event["type"], event)
+            async for frame in sse_stream(bridge):
+                yield frame
         finally:
             try:
                 await task
@@ -117,8 +117,8 @@ async def run_background(
 
         task = asyncio.create_task(run_pipeline())
         try:
-            async for event in bridge.stream():
-                yield emit_sse_event(event["type"], event)
+            async for frame in sse_stream(bridge):
+                yield frame
         finally:
             try:
                 await task
@@ -170,8 +170,8 @@ async def run_domain_stats(
 
         task = asyncio.create_task(run_pipeline())
         try:
-            async for event in bridge.stream():
-                yield emit_sse_event(event["type"], event)
+            async for frame in sse_stream(bridge):
+                yield frame
         finally:
             try:
                 await task
@@ -227,8 +227,8 @@ async def run_domain_proximity(
 
         task = asyncio.create_task(run_pipeline())
         try:
-            async for event in bridge.stream():
-                yield emit_sse_event(event["type"], event)
+            async for frame in sse_stream(bridge):
+                yield frame
         finally:
             try:
                 await task

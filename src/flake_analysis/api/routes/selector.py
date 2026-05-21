@@ -24,7 +24,7 @@ from flake_analysis.api.schemas.selector import (
     SelectorCommitSummary,
 )
 from flake_analysis.api.services.selector_service import apply_brush_intersection
-from flake_analysis.api.sse import ProgressBridge, emit_sse_event
+from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.state.manifest import Manifest
 from flake_analysis.pipeline.selector import run_selector_step
 
@@ -76,8 +76,8 @@ async def run_selector(
 
         task = asyncio.create_task(run_pipeline())
         try:
-            async for event in bridge.stream():
-                yield emit_sse_event(event["type"], event)
+            async for frame in sse_stream(bridge):
+                yield frame
         finally:
             try:
                 await task

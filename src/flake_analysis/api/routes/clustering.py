@@ -18,7 +18,7 @@ from flake_analysis.api.schemas.clustering import (
     ApplyThresholdsParams,
     ClusteringRefitParams,
 )
-from flake_analysis.api.sse import ProgressBridge, emit_sse_event
+from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.pipeline.clustering import apply_thresholds, run_clustering_step
 from flake_analysis.state.manifest import Manifest
 
@@ -67,8 +67,8 @@ async def run_clustering_refit(
 
         task = asyncio.create_task(run_pipeline())
         try:
-            async for event in bridge.stream():
-                yield emit_sse_event(event["type"], event)
+            async for frame in sse_stream(bridge):
+                yield frame
         finally:
             try:
                 await task
@@ -114,8 +114,8 @@ async def run_clustering_apply_thresholds(
 
         task = asyncio.create_task(run_pipeline())
         try:
-            async for event in bridge.stream():
-                yield emit_sse_event(event["type"], event)
+            async for frame in sse_stream(bridge):
+                yield frame
         finally:
             try:
                 await task
