@@ -1,7 +1,6 @@
 // web/src/components/explorer/__tests__/MosaicCanvas.test.tsx
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, fireEvent, waitFor } from '@testing-library/react'
-import React from 'react'
+import { render } from '@testing-library/react'
 
 const mockViewer = {
   open: vi.fn(),
@@ -12,7 +11,7 @@ const mockViewer = {
   addHandler: vi.fn(),
   world: {
     getItemCount: vi.fn(() => 0),
-    getItemAt: vi.fn(() => ({ setOpacity: vi.fn() })),
+    getItemAt: vi.fn((_i: number) => ({ setOpacity: vi.fn() })),
   },
   viewport: {
     viewerElementToViewportCoordinates: vi.fn(() => ({ x: 0.05, y: 0.05 })),
@@ -27,24 +26,60 @@ vi.mock('openseadragon', () => ({
 
 import OpenSeadragon from 'openseadragon'
 import { MosaicCanvas } from '../MosaicCanvas'
-import type { TileManifest } from '@/api/explorer'
+import type { TileManifestDto, ExplorerFlakeRowDto } from '@/api/explorer'
 import { useExplorerStore, resetExplorerStore } from '@/state/explorerSlice'
 
-const manifest: TileManifest = {
-  project_id: 'local',
-  cols: 2,
-  rows: 1,
-  tile_w_px: 256,
-  tile_h_px: 256,
-  pyramid: { lod_choice: 'auto', cache_dir: '/x', available_lods: [0] },
+const manifest: TileManifestDto = {
+  grid_w: 2,
+  grid_h: 1,
+  lod_sizes: { '0': [256, 256] },
+  signature: ['sigA', 'sigB'],
+  params_hash: 'hash123',
   tiles: [
-    { stem: 'A', col: 0, row: 0, url: '/static/raw/A.jpg', w: 256, h: 256, lod: null },
-    { stem: 'B', col: 1, row: 0, url: '/static/raw/B.jpg', w: 256, h: 256, lod: null },
+    {
+      image_id: 10,
+      stem: 'A',
+      col: 0,
+      row: 0,
+      width_px: 256,
+      height_px: 256,
+      lod_sizes: { '0': [256, 256] },
+    },
+    {
+      image_id: 20,
+      stem: 'B',
+      col: 1,
+      row: 0,
+      width_px: 256,
+      height_px: 256,
+      lod_sizes: { '0': [256, 256] },
+    },
   ],
-  flakes_by_stem: {
-    A: [{ flake_id: 'A:0', cluster_label: 1, passes_filter: true, bbox_norm: [0.1, 0.1, 0.4, 0.4] }],
-    B: [{ flake_id: 'B:0', cluster_label: 2, passes_filter: false, bbox_norm: [0.2, 0.2, 0.5, 0.5] }],
-  },
+}
+
+const flakesByStem: Record<string, ExplorerFlakeRowDto[]> = {
+  A: [
+    {
+      flake_id: 100,
+      image_id: 10,
+      domains: 1,
+      groups: 'mono',
+      distance: '5.00 px',
+      clipped: 'no',
+      pass: true,
+    },
+  ],
+  B: [
+    {
+      flake_id: 200,
+      image_id: 20,
+      domains: 1,
+      groups: 'bi',
+      distance: '2.50 px',
+      clipped: 'yes',
+      pass: false,
+    },
+  ],
 }
 
 describe('MosaicCanvas', () => {
@@ -54,7 +89,7 @@ describe('MosaicCanvas', () => {
   })
 
   it('mounts an OSD viewer with collectionMode and tileSources from the manifest', () => {
-    render(<MosaicCanvas manifest={manifest} />)
+    render(<MosaicCanvas manifest={manifest} flakesByStem={flakesByStem} />)
     expect(OpenSeadragon).toHaveBeenCalledTimes(1)
     const cfg = (OpenSeadragon as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
       collectionMode: boolean
@@ -62,12 +97,22 @@ describe('MosaicCanvas', () => {
     }
     expect(cfg.collectionMode).toBe(true)
     expect(cfg.tileSources).toHaveLength(2)
-    expect(cfg.tileSources[0]).toMatchObject({ type: 'image', url: '/static/raw/A.jpg' })
-    expect(cfg.tileSources[1]).toMatchObject({ type: 'image', url: '/static/raw/B.jpg' })
+    expect(cfg.tileSources[0]).toMatchObject({
+      type: 'image',
+      url: '/static/raw/A.jpg',
+      width: 256,
+      height: 256,
+    })
+    expect(cfg.tileSources[1]).toMatchObject({
+      type: 'image',
+      url: '/static/raw/B.jpg',
+      width: 256,
+      height: 256,
+    })
   })
 
-  it('honours server-side Y-flip by passing tile rows in collectionLayout', () => {
-    render(<MosaicCanvas manifest={manifest} />)
+  it('honours grid_w/grid_h by passing collectionRows and collectionColumns', () => {
+    render(<MosaicCanvas manifest={manifest} flakesByStem={flakesByStem} />)
     const cfg = (OpenSeadragon as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
       collectionTileSize: number
       collectionTileMargin: number
@@ -78,6 +123,21 @@ describe('MosaicCanvas', () => {
     expect(cfg.collectionColumns).toBe(2)
   })
 
+  it('allows callers to override the tile-URL builder', () => {
+    render(
+      <MosaicCanvas
+        manifest={manifest}
+        flakesByStem={flakesByStem}
+        tileUrlBuilder={(t) => `/custom/${t.stem}.png`}
+      />
+    )
+    const cfg = (OpenSeadragon as unknown as ReturnType<typeof vi.fn>).mock.calls[0][0] as {
+      tileSources: Array<{ url: string }>
+    }
+    expect(cfg.tileSources[0].url).toBe('/custom/A.png')
+    expect(cfg.tileSources[1].url).toBe('/custom/B.png')
+  })
+
   it('dims fail tiles by setting tile opacity to 0.5', () => {
     let world = 0
     mockViewer.world.getItemCount.mockImplementation(() => world)
@@ -86,7 +146,7 @@ describe('MosaicCanvas', () => {
     mockViewer.world.getItemAt.mockImplementation((i: number) =>
       i === 0 ? { setOpacity: setOpA } : { setOpacity: setOpB }
     )
-    render(<MosaicCanvas manifest={manifest} />)
+    render(<MosaicCanvas manifest={manifest} flakesByStem={flakesByStem} />)
     const handler = mockViewer.addHandler.mock.calls.find(
       (c: unknown[]) => c[0] === 'open'
     )?.[1] as () => void
@@ -97,8 +157,8 @@ describe('MosaicCanvas', () => {
   })
 
   it('draws a gold overlay on the selected tile via addOverlay', () => {
-    useExplorerStore.getState().setSelectedFlakeId('A:0')
-    render(<MosaicCanvas manifest={manifest} />)
+    useExplorerStore.getState().setSelectedFlakeId(100)
+    render(<MosaicCanvas manifest={manifest} flakesByStem={flakesByStem} />)
     expect(mockViewer.addOverlay).toHaveBeenCalled()
     const call = mockViewer.addOverlay.mock.calls[0][0] as { element: HTMLElement }
     expect(call.element.getAttribute('data-overlay')).toBe('selected-tile')
@@ -106,17 +166,17 @@ describe('MosaicCanvas', () => {
   })
 
   it('selects the first flake of the clicked tile on canvas-click', () => {
-    render(<MosaicCanvas manifest={manifest} />)
+    render(<MosaicCanvas manifest={manifest} flakesByStem={flakesByStem} />)
     const handler = mockViewer.addHandler.mock.calls.find(
       (c: unknown[]) => c[0] === 'canvas-click'
     )?.[1] as (ev: { position: { x: number; y: number } }) => void
     mockViewer.viewport.viewerElementToViewportCoordinates.mockReturnValueOnce({ x: 0.75, y: 0.5 })
     handler?.({ position: { x: 0, y: 0 } })
-    expect(useExplorerStore.getState().selectedFlakeId).toBe('B:0')
+    expect(useExplorerStore.getState().selectedFlakeId).toBe(200)
   })
 
   it('destroys the viewer on unmount', () => {
-    const { unmount } = render(<MosaicCanvas manifest={manifest} />)
+    const { unmount } = render(<MosaicCanvas manifest={manifest} flakesByStem={flakesByStem} />)
     unmount()
     expect(mockViewer.destroy).toHaveBeenCalled()
   })

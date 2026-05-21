@@ -1,11 +1,22 @@
 // web/src/components/explorer/MosaicCanvas.tsx
 import { useEffect, useRef } from 'react'
 import OpenSeadragon from '@/lib/openseadragon'
-import type { TileManifest } from '@/api/explorer'
+import type { TileManifestDto, TileManifestEntryDto, ExplorerFlakeRowDto } from '@/api/explorer'
 import { useExplorerStore } from '@/state/explorerSlice'
 
 interface Props {
-  manifest: TileManifest
+  manifest: TileManifestDto
+  /**
+   * Row data joined to the manifest's tiles by `stem`. The parent (Phase 9
+   * composer) computes this from `useExplorerFlakes` so MosaicCanvas does not
+   * own data fetching.
+   */
+  flakesByStem?: Record<string, ExplorerFlakeRowDto[]>
+  /**
+   * Optional URL builder so callers can choose a raw-image extension or
+   * substitute a thumbnail route. Defaults to `/static/raw/{stem}.jpg`.
+   */
+  tileUrlBuilder?: (t: TileManifestEntryDto) => string
 }
 
 interface OSDViewerLike {
@@ -26,27 +37,32 @@ interface OSDViewerLike {
   element: HTMLElement
 }
 
-export function MosaicCanvas({ manifest }: Props) {
+const DEFAULT_TILE_URL = (t: TileManifestEntryDto) => `/static/raw/${t.stem}.jpg`
+
+export function MosaicCanvas({ manifest, flakesByStem, tileUrlBuilder }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const viewerRef = useRef<OSDViewerLike | null>(null)
 
   const selectedFlakeId = useExplorerStore((s) => s.selectedFlakeId)
   const setSelectedFlakeId = useExplorerStore((s) => s.setSelectedFlakeId)
 
+  const buildUrl = tileUrlBuilder ?? DEFAULT_TILE_URL
+  const flakesMap: Record<string, ExplorerFlakeRowDto[]> = flakesByStem ?? {}
+
   useEffect(() => {
     if (!containerRef.current) return
     const tileSources = manifest.tiles.map((t) => ({
       type: 'image' as const,
-      url: t.url,
-      width: t.w,
-      height: t.h,
+      url: buildUrl(t),
+      width: t.width_px,
+      height: t.height_px,
       buildPyramid: false,
     }))
     const viewer = OpenSeadragon({
       element: containerRef.current,
       collectionMode: true,
-      collectionRows: manifest.rows,
-      collectionColumns: manifest.cols,
+      collectionRows: manifest.grid_h,
+      collectionColumns: manifest.grid_w,
       collectionTileSize: 1,
       collectionTileMargin: 0,
       tileSources,
@@ -61,8 +77,8 @@ export function MosaicCanvas({ manifest }: Props) {
       for (let i = 0; i < count; i++) {
         const tile = manifest.tiles[i]
         if (!tile) continue
-        const flakes = manifest.flakes_by_stem[tile.stem] ?? []
-        const allFail = flakes.length > 0 && flakes.every((f) => !f.passes_filter)
+        const flakes = flakesMap[tile.stem] ?? []
+        const allFail = flakes.length > 0 && flakes.every((f) => !f.pass)
         viewer.world.getItemAt(i).setOpacity(allFail ? 0.5 : 1)
       }
     })
@@ -70,11 +86,11 @@ export function MosaicCanvas({ manifest }: Props) {
     viewer.addHandler('canvas-click', (raw) => {
       const ev = raw as { position: { x: number; y: number } }
       const vp = viewer.viewport.viewerElementToViewportCoordinates(ev.position)
-      const col = Math.min(manifest.cols - 1, Math.max(0, Math.floor(vp.x * manifest.cols)))
-      const row = Math.min(manifest.rows - 1, Math.max(0, Math.floor(vp.y * manifest.rows)))
+      const col = Math.min(manifest.grid_w - 1, Math.max(0, Math.floor(vp.x * manifest.grid_w)))
+      const row = Math.min(manifest.grid_h - 1, Math.max(0, Math.floor(vp.y * manifest.grid_h)))
       const tile = manifest.tiles.find((t) => t.col === col && t.row === row)
       if (!tile) return
-      const first = (manifest.flakes_by_stem[tile.stem] ?? [])[0]
+      const first = (flakesMap[tile.stem] ?? [])[0]
       if (first) setSelectedFlakeId(first.flake_id)
     })
 
@@ -83,16 +99,16 @@ export function MosaicCanvas({ manifest }: Props) {
       viewerRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [manifest])
+  }, [manifest, flakesByStem])
 
   // Selected-tile gold overlay: re-render when selection changes.
   useEffect(() => {
     const viewer = viewerRef.current
     if (!viewer) return
     viewer.clearOverlays()
-    if (!selectedFlakeId) return
+    if (selectedFlakeId === null) return
     const tile = manifest.tiles.find((t) =>
-      (manifest.flakes_by_stem[t.stem] ?? []).some((f) => f.flake_id === selectedFlakeId)
+      (flakesMap[t.stem] ?? []).some((f) => f.flake_id === selectedFlakeId)
     )
     if (!tile) return
     const el = document.createElement('div')
@@ -104,7 +120,7 @@ export function MosaicCanvas({ manifest }: Props) {
       element: el,
       location: { x: tile.col, y: tile.row, width: 1, height: 1 },
     })
-  }, [selectedFlakeId, manifest])
+  }, [selectedFlakeId, manifest, flakesByStem])
 
   return (
     <div
