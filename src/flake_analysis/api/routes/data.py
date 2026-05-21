@@ -135,3 +135,12 @@ async def get_clustering_assignments(
     except FileNotFoundError as e:
         raise ClusteringNotFitted(expected_path=str(e).split("missing at ", 1)[-1])
     return arrow_or_json_response(table, accept_header=accept)
+
+
+@router.get("/clustering/seed_groups")
+async def get_clustering_seed_groups(
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+) -> list[dict]:
+    """Return 04_clustering/seed_groups.json. Missing file → []."""
+    return load_seed_groups(manifest.analysis_folder)
