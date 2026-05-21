@@ -138,3 +138,92 @@ def build_tile_manifest(analysis_folder: str | Path) -> TileManifest:
         params_hash=params_hash,
         tiles=tiles,
     )
+
+
+def _load_clustering_and_proximity(folder: Path) -> dict[str, Any]:
+    labels_p = folder / "04_clustering" / "labels.json"
+    asn_p = folder / "04_clustering" / "assignments.parquet"
+    flakes_p = folder / "05_domain_proximity" / "flake_assignments.parquet"
+    if not (labels_p.exists() and asn_p.exists() and flakes_p.exists()):
+        raise FileNotFoundError("Clustering or domain_proximity output missing")
+
+    labels = json.loads(labels_p.read_text(encoding="utf-8"))
+    asn = pd.read_parquet(asn_p)
+    fa = pd.read_parquet(flakes_p)
+
+    # Tolerate both legacy column names.
+    if "cluster_id" not in asn.columns and "cluster_label" in asn.columns:
+        asn = asn.rename(columns={"cluster_label": "cluster_id"})
+    if "posterior_p" not in asn.columns and "max_posterior" in asn.columns:
+        asn = asn.rename(columns={"max_posterior": "posterior_p"})
+    return {"labels": labels, "assignments": asn, "flake_assignments": fa}
+
+
+def build_flake_table(
+    analysis_folder: str | Path,
+    *,
+    include_labels: list[str],
+    exclude_labels: list[str],
+    size_min: Optional[int],
+    size_max: Optional[int],
+) -> pd.DataFrame:
+    """Port of tab_explorer.py:_build_flake_records + server-side filter (pinned #4).
+
+    Returns the FILTERED DataFrame (no `pass` column — only rows that pass).
+    Columns: flake_id, image_id, domains, groups, distance, clipped, pass.
+    """
+    folder = Path(analysis_folder)
+    inputs = _load_clustering_and_proximity(folder)
+    fa: pd.DataFrame = inputs["flake_assignments"]
+    asn: pd.DataFrame = inputs["assignments"]
+    labels: dict[str, Any] = inputs["labels"]
+
+    cid_to_name = {int(g["id"]): g["name"] for g in labels.get("groups", [])}
+    asn_idx = asn.set_index("domain_id")["cluster_id"].astype(int).to_dict()
+
+    rows: list[dict[str, Any]] = []
+    for flake_id, group in fa.groupby("flake_id"):
+        domain_ids = group["domain_id"].astype(int).tolist()
+        cluster_ids: set[int] = set()
+        for d in domain_ids:
+            cid = asn_idx.get(int(d))
+            if cid is not None and cid >= 0:
+                cluster_ids.add(int(cid))
+        names = sorted({cid_to_name.get(c, f"cluster_{c}") for c in cluster_ids})
+        image_id = int(group["image_id"].iloc[0]) if "image_id" in group.columns else 0
+        rows.append({
+            "flake_id": int(flake_id),
+            "image_id": image_id,
+            "domains": int(len(domain_ids)),
+            "groups": ", ".join(names) if names else "—",
+            "distance": "—",
+            "clipped": "no",
+            "_cluster_set": frozenset(cluster_ids),
+        })
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df.assign(**{"pass": pd.Series(dtype=bool)}).drop(columns=["_cluster_set"])
+
+    name_to_cid = {g["name"]: int(g["id"]) for g in labels.get("groups", [])}
+    inc_ids: Optional[set[int]] = (
+        {name_to_cid[n] for n in include_labels if n in name_to_cid}
+        if include_labels else None
+    )
+    exc_ids: set[int] = {name_to_cid[n] for n in exclude_labels if n in name_to_cid}
+
+    def _passes(cset: frozenset) -> bool:
+        if inc_ids is not None and inc_ids and not (cset & inc_ids):
+            return False
+        if exc_ids and (cset & exc_ids):
+            return False
+        return True
+
+    df["pass"] = df["_cluster_set"].apply(_passes)
+    if size_min is not None:
+        df.loc[df["domains"] < size_min, "pass"] = False
+    if size_max is not None:
+        df.loc[df["domains"] > size_max, "pass"] = False
+
+    out = df.drop(columns=["_cluster_set"])
+    return out.loc[out["pass"]].reset_index(drop=True)

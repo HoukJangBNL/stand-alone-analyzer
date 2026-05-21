@@ -143,3 +143,82 @@ def test_build_tile_manifest_skips_missing_thumbnails_for_unparseable_names(tmp_
     # Fallback: 2 images → grid_w=2, grid_h=1
     assert m.grid_w * m.grid_h >= 2
     assert {t.stem for t in m.tiles} == {"weird_name_0", "weird_name_1"}
+
+
+def _write_clustering_and_proximity(folder: Path) -> None:
+    (folder / "04_clustering").mkdir(parents=True, exist_ok=True)
+    (folder / "05_domain_proximity").mkdir(parents=True, exist_ok=True)
+    labels = {
+        "version": 1,
+        "n_clusters": 2,
+        "groups": [
+            {"id": 0, "name": "thin", "size": 3, "mean_rgb": [0, 0, 0]},
+            {"id": 1, "name": "thick", "size": 2, "mean_rgb": [0, 0, 0]},
+        ],
+        "assignments": {"10": 0, "11": 0, "12": 1, "20": 1, "21": 0},
+        "thresholds": {"0": 0.5, "1": 0.5},
+        "noise_label": -1,
+        "random_state": 42,
+        "fitted_at": "2026-05-21T00:00:00Z",
+    }
+    (folder / "04_clustering" / "labels.json").write_text(json.dumps(labels))
+    pd.DataFrame({
+        "domain_id": [10, 11, 12, 20, 21],
+        "cluster_id": [0, 0, 1, 1, 0],
+        "posterior_p": [0.9, 0.8, 0.85, 0.7, 0.95],
+    }).to_parquet(folder / "04_clustering" / "assignments.parquet", index=False)
+    pd.DataFrame({
+        "domain_id": [10, 11, 12, 20, 21],
+        "flake_id":  [100, 100, 100, 200, 200],
+        "flake_size": [3, 3, 3, 2, 2],
+        "image_id":  [0, 0, 0, 1, 1],
+    }).to_parquet(folder / "05_domain_proximity" / "flake_assignments.parquet", index=False)
+
+
+def test_build_flake_table_no_filter_returns_all(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import build_flake_table
+    _write_clustering_and_proximity(tmp_path)
+    df = build_flake_table(tmp_path,
+                           include_labels=[], exclude_labels=[],
+                           size_min=None, size_max=None)
+    assert len(df) == 2
+    assert set(df["flake_id"].tolist()) == {100, 200}
+
+
+def test_build_flake_table_include_filter_keeps_matching_only(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import build_flake_table
+    _write_clustering_and_proximity(tmp_path)
+    df = build_flake_table(tmp_path,
+                           include_labels=["thick"], exclude_labels=[],
+                           size_min=None, size_max=None)
+    # Flake 100 has cluster set {thin, thick}; flake 200 has {thick, thin} too.
+    # Both pass include={thick}.
+    assert set(df["flake_id"].tolist()) == {100, 200}
+
+
+def test_build_flake_table_exclude_filter_drops_matching(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import build_flake_table
+    _write_clustering_and_proximity(tmp_path)
+    df = build_flake_table(tmp_path,
+                           include_labels=[], exclude_labels=["thick"],
+                           size_min=None, size_max=None)
+    # Both flakes contain "thick" → both excluded.
+    assert df.empty
+
+
+def test_build_flake_table_size_min_max(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import build_flake_table
+    _write_clustering_and_proximity(tmp_path)
+    df = build_flake_table(tmp_path,
+                           include_labels=[], exclude_labels=[],
+                           size_min=3, size_max=3)
+    assert df["flake_id"].tolist() == [100]
+
+
+def test_build_flake_table_size_max_only(tmp_path: Path):
+    from flake_analysis.api.services.explorer_service import build_flake_table
+    _write_clustering_and_proximity(tmp_path)
+    df = build_flake_table(tmp_path,
+                           include_labels=[], exclude_labels=[],
+                           size_min=None, size_max=2)
+    assert df["flake_id"].tolist() == [200]
