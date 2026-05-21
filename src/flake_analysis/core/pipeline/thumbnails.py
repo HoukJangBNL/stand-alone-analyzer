@@ -44,13 +44,11 @@ import json
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from PIL import Image
 
-from flake_analysis.core._compat import msg
-
-ProgressCallback = Callable[[float, str], None]
+from flake_analysis.core._compat import ProgressCallback, msg
 
 
 # (lod_index, (width_px, height_px))
