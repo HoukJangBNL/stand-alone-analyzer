@@ -74,3 +74,29 @@ async def test_export_invalid_mode(tmp_path):
             assert r.status_code == 422
     finally:
         os.environ.pop("SAA_ANALYSIS_FOLDER", None)
+
+
+@pytest.mark.asyncio
+async def test_export_missing_file_returns_404(tmp_path):
+    """Verify SelectionNotFound (404) when selection.parquet does not exist."""
+    analysis = tmp_path / "proj"
+    analysis.mkdir()
+    raw = tmp_path / "raw"
+    raw.mkdir()
+    save_manifest(
+        Manifest(analysis_folder=str(analysis), raw_images_dir=str(raw)),
+        analysis,
+    )
+    os.environ["SAA_ANALYSIS_FOLDER"] = str(analysis)
+    try:
+        app = create_app()
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            r = await client.get(
+                "/api/v1/projects/local/selector/export",
+                params={"mode": "selected"},
+            )
+            assert r.status_code == 404
+            body = r.json()
+            assert body["error"]["code"] == "selection_not_found"
+    finally:
+        os.environ.pop("SAA_ANALYSIS_FOLDER", None)

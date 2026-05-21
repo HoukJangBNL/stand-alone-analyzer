@@ -163,15 +163,21 @@ async def export_selection(
     p = Path(manifest.analysis_folder) / "03_selector" / "selection.parquet"
     if not p.exists():
         raise SelectionNotFound(path=str(p))
-    df = pd.read_parquet(p)
-    if mode == "selected":
-        df = df[df["selected"].astype(bool)]
 
-    def _iter():
-        # Single-shot CSV (a few hundred KB even at 10⁵ rows; no need to chunk).
+    loop = asyncio.get_running_loop()
+
+    def _load_and_convert() -> str:
+        df = pd.read_parquet(p)
+        if mode == "selected":
+            df = df[df["selected"].astype(bool)]
         buf = io.StringIO()
         df.to_csv(buf, index=False)
-        yield buf.getvalue()
+        return buf.getvalue()
+
+    csv_data = await loop.run_in_executor(None, _load_and_convert)
+
+    def _iter():
+        yield csv_data
 
     headers = {
         "Content-Disposition": f'attachment; filename="selection_{mode}.csv"',
