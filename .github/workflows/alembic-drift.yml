@@ -1,0 +1,44 @@
+# .github/workflows/alembic-drift.yml
+name: alembic-drift
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: qpress
+          POSTGRES_PASSWORD: qpress
+          POSTGRES_DB: qpress
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qpress"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      SAA_DB_HOST: localhost
+      SAA_DB_PORT: "5432"
+      SAA_DB_USER: qpress
+      SAA_DB_PASSWORD: qpress
+      SAA_DB_NAME: qpress
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev]"
+      - name: Apply migrations
+        run: alembic upgrade head
+      - name: Check drift
+        run: python scripts/check_alembic_drift.py
