@@ -65,6 +65,12 @@ class ProjectBusy(AppError):
     message = "Project is currently locked by another operation"
 
 
+class DomainStatsNotFound(AppError):
+    code = "domain_stats_not_found"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Domain Stats not computed yet. Run Compute → Domain Stats first."
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()
