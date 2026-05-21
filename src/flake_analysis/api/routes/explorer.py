@@ -4,7 +4,13 @@ from fastapi import APIRouter, Depends, Query, Response
 
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
-from flake_analysis.api.errors import ArtifactMissing, ExplorerStateMissing, FlakeNotFound
+from flake_analysis.api.errors import (
+    ArtifactMissing,
+    ExplorerStateMissing,
+    FlakeNotFound,
+    PrerequisiteMissing,
+)
+from flake_analysis.api.mutex import acquire_project_lock
 from flake_analysis.api.schemas.explorer import (
     ExplorerFlakeDetail,
     ExplorerFlakeRow,
@@ -18,6 +24,7 @@ from flake_analysis.api.services.explorer_service import (
     build_flake_table,
     build_tile_manifest,
 )
+from flake_analysis.pipeline.explorer import load_explorer_state, save_explorer_state
 from flake_analysis.state.manifest import Manifest
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["explorer"])
@@ -114,3 +121,33 @@ async def get_explorer_flake_detail(
         raise ArtifactMissing(missing=str(e))
     except KeyError:
         raise FlakeNotFound(flake_id=flake_id)
+
+
+@router.post("/run/explorer/save_state", response_model=SaveExplorerStateResult)
+async def post_save_explorer_state(
+    project_id: str,
+    params: SaveExplorerStateParams,
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    """Synchronous save (pinned decision #12). NOT SSE.
+
+    Wraps pipeline.explorer.save_explorer_state, with the per-project mutex
+    held for the whole call (not lock+drain — synchronous JSON has no streaming).
+    """
+    async with acquire_project_lock(project_id):
+        nf = params.neighbor_filter.model_dump()
+        try:
+            result = save_explorer_state(
+                analysis_folder=manifest.analysis_folder,
+                include_labels=params.include_labels,
+                exclude_labels=params.exclude_labels,
+                neighbor_filter=nf,
+                selected_flake_ids=params.selected_flake_ids,
+            )
+        except RuntimeError as e:
+            raise PrerequisiteMissing(reason=str(e))
+    return SaveExplorerStateResult(
+        state_path=result["state_path"],
+        selected_count=result["selected_count"],
+    )
