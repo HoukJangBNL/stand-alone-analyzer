@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "stand-alone-analyzer"
-version = "0.2.18"
+version = "0.3.0"
 description = "React + FastAPI app for interactive 2D material flake analysis"
 readme = "README.md"
 license = "MIT"
