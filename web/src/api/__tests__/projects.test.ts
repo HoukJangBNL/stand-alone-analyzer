@@ -44,6 +44,21 @@ describe('api/projects', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(2)
   })
 
+  it('fetchProjects falls back to GET /projects/active on 405 (current backend)', async () => {
+    const active: ProjectHandle = { project_id: 'local', analysis_folder: '/x' }
+    const fetchSpy = vi.fn()
+      .mockResolvedValueOnce(new Response('method not allowed', { status: 405 }))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(active), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      )
+    vi.stubGlobal('fetch', fetchSpy)
+    expect(await fetchProjects()).toEqual([active])
+    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  })
+
   it('createProject POSTs the three paths and returns the handle', async () => {
     const handle: ProjectHandle = {
       project_id: 'p3',

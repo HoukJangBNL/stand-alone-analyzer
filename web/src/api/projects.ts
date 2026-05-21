@@ -54,7 +54,10 @@ async function unwrap<T>(resp: Response): Promise<T> {
  */
 export async function fetchProjects(): Promise<ProjectHandle[]> {
   const resp = await fetch('/api/v1/projects', { headers: { Accept: 'application/json' } })
-  if (resp.status === 404) {
+  // Backend currently exposes only POST /projects (no list yet). FastAPI replies
+  // 405 for GET on a path with another method, 404 if the path is absent — both
+  // mean "no list endpoint", fall back to the single active project.
+  if (resp.status === 404 || resp.status === 405) {
     return [await fetchActiveProject()]
   }
   const env = await unwrap<ProjectListEnvelope>(resp)
