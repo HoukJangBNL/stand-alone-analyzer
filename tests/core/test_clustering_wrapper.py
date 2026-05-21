@@ -416,3 +416,31 @@ def test_run_clustering_labels_json_schema():
         assert set(payload["thresholds"].keys()) == {"0", "1"}
         for v in payload["thresholds"].values():
             assert isinstance(v, float)
+
+
+def _run_two_blob(tmp: Path, **kwargs):
+    npz_path = tmp / "stats.npz"
+    sel_path = tmp / "selection.parquet"
+    out_dir = tmp / "out"
+    _make_two_blob_npz(npz_path)
+    _make_all_selected_parquet(sel_path, n=100)
+    seed_groups = [
+        {"name": "dark", "domain_ids": [0, 1, 2]},
+        {"name": "light", "domain_ids": [50, 51, 52]},
+    ]
+    return run_clustering(
+        npz_path, sel_path, seed_groups,
+        output_dir=out_dir, rgb_threshold=0.5, **kwargs,
+    )
+
+
+def test_run_clustering_accepts_reg_covar_and_records_in_params():
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_two_blob(Path(tmp), reg_covar=2.5)
+    assert result["params"]["reg_covar"] == 2.5
+
+
+def test_run_clustering_default_reg_covar_is_one():
+    with tempfile.TemporaryDirectory() as tmp:
+        result = _run_two_blob(Path(tmp))
+    assert result["params"]["reg_covar"] == 1.0
