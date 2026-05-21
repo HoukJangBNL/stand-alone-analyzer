@@ -511,3 +511,38 @@ def test_overlap_fog_bench_recall_and_leak_at_default_reg_covar():
         non_seeded = unseeded_blob_rows + fog_rows
         leak = sum(int(labels.loc[i]) >= 0 for i in non_seeded) / len(non_seeded)
         assert leak <= 0.05, f"unseeded/fog leak {leak} > 0.05"
+
+
+def test_run_clustering_step_records_reg_covar_in_manifest(tmp_path):
+    """After run_clustering_step, manifest must record reg_covar."""
+    from flake_analysis.pipeline.clustering import run_clustering_step
+    from flake_analysis.state.manifest import (
+        Manifest, StepEntry, load_manifest, save_manifest,
+    )
+
+    af = tmp_path / "analysis"
+    (af / "02_domain_stats").mkdir(parents=True)
+    (af / "03_selector").mkdir(parents=True)
+    _make_two_blob_npz(af / "02_domain_stats" / "stats.npz")
+    _make_all_selected_parquet(af / "03_selector" / "selection.parquet", n=100)
+
+    # Stub upstream manifest entries that run_clustering_step gates on.
+    stub = StepEntry(
+        completed_at="2026-05-21T00:00:00Z",
+        params={}, params_hash="sha256:0", input_hashes={},
+        outputs={}, reproducibility={},
+    )
+    manifest = Manifest()
+    manifest.steps["domain_stats"] = stub
+    manifest.steps["selector"] = stub
+    save_manifest(manifest, str(af))
+
+    run_clustering_step(
+        analysis_folder=str(af),
+        seed_groups=[
+            {"name": "dark", "domain_ids": [0, 1, 2]},
+            {"name": "light", "domain_ids": [50, 51, 52]},
+        ],
+        reg_covar=2.0,
+    )
+    assert load_manifest(str(af)).steps["clustering"].params["reg_covar"] == 2.0
