@@ -3,7 +3,9 @@ import type { LabelsJson, AssignmentsRows } from '@/api/clustering'
 import { SeedGroupEditor } from './SeedGroupEditor'
 import { FitScopeRadio } from './FitScopeRadio'
 import { InitialMahalanobisSlider } from './InitialMahalanobisSlider'
+import { RegCovarSlider } from './RegCovarSlider'
 import { FitGMMButton } from './FitGMMButton'
+import { AutoTuneButton } from './AutoTuneButton'
 import { PerClusterThresholdPanel } from './PerClusterThresholdPanel'
 import { LiveMahalanobisSlider } from './LiveMahalanobisSlider'
 import { ClusteringBrushingControls } from './ClusteringBrushingControls'
@@ -23,7 +25,11 @@ export function ClusteringRightRail({ projectId, labels, assignments }: Props) {
       <SeedGroupEditor />
       <FitScopeRadio />
       <InitialMahalanobisSlider />
-      <FitGMMButton projectId={projectId} />
+      <RegCovarSlider />
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <FitGMMButton projectId={projectId} />
+        <AutoTuneButton projectId={projectId} />
+      </div>
       {fitDone && (
         <>
           <PerClusterThresholdPanel labels={labels} assignments={assignments} />
