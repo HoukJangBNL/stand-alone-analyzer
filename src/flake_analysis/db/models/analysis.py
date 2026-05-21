@@ -9,8 +9,8 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
-    FetchedValue,
     ForeignKey,
     Index,
     Integer,
@@ -93,11 +93,33 @@ class Analysis(Base):
         nullable=False,
         server_default=text("'{}'::jsonb"),
     )
-    # GENERATED ALWAYS AS (...) STORED — never written by ORM, refresh after I/O.
+    # GENERATED ALWAYS AS (...) STORED — read-only in ORM.
+    # The Computed(...) expression below MUST mirror the SQL in
+    # alembic/versions/0001_initial_v6.py (CREATE TABLE analyses, status column).
+    # Keep both in lock-step; if you change one, change the other in the same PR.
+    # Computed is a subclass of FetchedValue and registers itself as both the
+    # server_default and server_onupdate generator, so the ORM RETURNING/refresh
+    # path automatically pulls the value PostgreSQL just computed. We therefore
+    # do NOT pass server_default=FetchedValue() / server_onupdate=FetchedValue()
+    # explicitly — SQLAlchemy raises ArgumentError if a Computed column does.
     status: Mapped[PipelineStatus] = mapped_column(
         _pipeline_status_enum,
-        server_default=FetchedValue(),
-        server_onupdate=FetchedValue(),
+        Computed(
+            """
+            CASE
+                WHEN steps_done ? 'failed'
+                    THEN 'failed'::pipeline_status
+                WHEN steps_done ? 'domain_proximity'
+                     AND (steps_done ->> 'domain_proximity')::boolean
+                    THEN 'completed'::pipeline_status
+                WHEN jsonb_typeof(steps_done) = 'object'
+                     AND steps_done <> '{}'::jsonb
+                    THEN 'running'::pipeline_status
+                ELSE 'pending'::pipeline_status
+            END
+            """,
+            persisted=True,
+        ),
         nullable=False,
     )
     notes: Mapped[str | None] = mapped_column(Text)
