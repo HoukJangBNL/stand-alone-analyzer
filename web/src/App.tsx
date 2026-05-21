@@ -8,6 +8,9 @@ const SelectorTab = lazy(() =>
 const ClusteringTab = lazy(() =>
   import('@/pages/ClusteringTab').then((m) => ({ default: m.ClusteringTab }))
 )
+const ExplorerTab = lazy(() =>
+  import('@/pages/ExplorerTab').then((m) => ({ default: m.ExplorerTab }))
+)
 
 function SelectorTabRoute() {
   const { projectId } = useParams<{ projectId: string }>()
@@ -27,6 +30,15 @@ function ClusteringTabRoute() {
   )
 }
 
+function ExplorerTabRoute() {
+  const { projectId } = useParams<{ projectId: string }>()
+  return (
+    <Suspense fallback={<div style={{ padding: 16 }}>Loading Explorer tab...</div>}>
+      <ExplorerTab projectId={projectId || 'local'} />
+    </Suspense>
+  )
+}
+
 export function App() {
   return (
     <BrowserRouter>
@@ -37,6 +49,7 @@ export function App() {
           <Route path="/projects/:projectId/compute" element={<ComputeTab />} />
           <Route path="/projects/:projectId/selector" element={<SelectorTabRoute />} />
           <Route path="/projects/:projectId/clustering" element={<ClusteringTabRoute />} />
+          <Route path="/projects/:projectId/explorer" element={<ExplorerTabRoute />} />
         </Routes>
       </div>
     </BrowserRouter>
