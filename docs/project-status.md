@@ -5,7 +5,7 @@
 > 디테일 디자인·DDL·운영 절차는 별도 문서로 링크 — 여기에는 **상태**만.
 
 **Last updated**: 2026-05-21
-**Current branch**: `feat/react-fastapi-migration`
+**Current branch**: `feat/migration-cutover` (post-cutover punch list 진행 중)
 **Schema version**: `v6` (alembic `0001_initial_v6` applied to RDS `qpress`)
 
 ---
