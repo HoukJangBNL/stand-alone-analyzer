@@ -11,7 +11,7 @@ interface RawImagePreviewProps {
 export function RawImagePreview({ projectId, domainId }: RawImagePreviewProps) {
   const [withContour, setWithContour] = useState(false)
   const url = useAnnotationPreview(projectId, domainId, withContour)
-  const { wrapperProps, imgStyle, reset } = usePanZoom()
+  const { wrapperRef, wrapperProps, imgStyle, reset } = usePanZoom()
 
   if (!url) {
     return (
@@ -35,6 +35,7 @@ export function RawImagePreview({ projectId, domainId }: RawImagePreviewProps) {
         <button onClick={reset} aria-label="Reset zoom">Reset</button>
       </div>
       <div
+        ref={wrapperRef}
         data-testid="panzoom-wrapper"
         {...wrapperProps}
         style={{
