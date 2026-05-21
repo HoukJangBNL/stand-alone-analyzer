@@ -99,3 +99,18 @@ async def get_explorer_flakes(
         for _, r in df.iterrows()
     ]
     return ExplorerFlakesResponse(rows=rows, total=len(rows))
+
+
+@router.get("/explorer/flake/{flake_id}", response_model=ExplorerFlakeDetail)
+async def get_explorer_flake_detail(
+    project_id: str,
+    flake_id: int,
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    try:
+        return build_flake_detail(manifest.analysis_folder, flake_id=flake_id)
+    except FileNotFoundError as e:
+        raise ArtifactMissing(missing=str(e))
+    except KeyError:
+        raise ArtifactMissing(missing=f"flake_id={flake_id}")
