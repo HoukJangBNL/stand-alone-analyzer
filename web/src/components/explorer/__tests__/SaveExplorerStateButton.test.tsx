@@ -66,7 +66,8 @@ describe('SaveExplorerStateButton', () => {
   })
 
   it('button is disabled while the mutation is pending', async () => {
-    let resolveFn: ((r: Response) => void) | null = null
+    type ResolveFn = (r: Response) => void
+    let resolveFn: ResolveFn | null = null
     vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((resolve) => {
       resolveFn = resolve
     })))
@@ -74,7 +75,7 @@ describe('SaveExplorerStateButton', () => {
     const btn = screen.getByRole('button', { name: /Save Explorer state/i }) as HTMLButtonElement
     fireEvent.click(btn)
     await waitFor(() => expect(btn.disabled).toBe(true))
-    resolveFn?.(new Response(JSON.stringify({ state_path: '/x', selected_count: null }),
+    ;(resolveFn as ResolveFn | null)?.(new Response(JSON.stringify({ state_path: '/x', selected_count: null }),
       { status: 200, headers: { 'content-type': 'application/json' } }))
     await waitFor(() => expect(btn.disabled).toBe(false))
   })
