@@ -13,23 +13,21 @@ export function DetailPanel({ projectId }: Props) {
   const flakeId = useExplorerStore((s) => s.selectedFlakeId)
   const { data, isLoading, isError } = useExplorerFlakeDetail(projectId, flakeId)
 
-  if (!flakeId) return <div>Select a flake to see details.</div>
+  if (flakeId === null) return <div>Select a flake to see details.</div>
   if (isLoading) return <div>Loading detail...</div>
   if (isError || !data) return <div>Failed to load flake detail.</div>
 
   return (
     <div data-testid="detail-panel" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-      <DetailIdentity flakeId={data.flake_id} stem={data.stem} passes={data.passes_filter} />
-      <DetailLabels labels={data.cluster_labels} />
-      <DetailDistance distanceUm={data.nearest_neighbour_um} />
-      {data.thumbnail_url && (
-        <img
-          src={data.thumbnail_url}
-          alt={data.flake_id}
-          data-testid="detail-thumbnail"
-          style={{ maxWidth: '100%', height: 'auto' }}
-        />
-      )}
+      {/*
+        ExplorerFlakeDetailDto has no `pass` or `thumbnail_url` field — the
+        pass chip is omitted here and the thumbnail is rendered elsewhere
+        when needed. Stem is also absent from detail; identity is keyed by
+        flake_id + image_id.
+      */}
+      <DetailIdentity flakeId={data.flake_id} imageId={data.image_id} />
+      <DetailLabels names={data.cluster_names} />
+      <DetailDistance distancePx={data.distance_px} />
     </div>
   )
 }

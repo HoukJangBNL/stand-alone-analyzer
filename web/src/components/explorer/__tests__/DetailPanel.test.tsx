@@ -23,30 +23,62 @@ describe('DetailPanel', () => {
   })
 
   it('fetches the flake detail and renders identity, labels, and distance', async () => {
-    useExplorerStore.getState().setSelectedFlakeId('A:0')
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({
-        flake_id: 'A:0',
-        stem: 'A',
-        passes_filter: true,
-        size_px: 200,
-        isolation_um: 4.5,
-        nearest_neighbour_um: 7.25,
-        cluster_labels: [{ label: 1, name: 'mono' }],
-        bbox_norm: [0.1, 0.1, 0.4, 0.4],
-        thumbnail_url: '/static/raw/A.jpg',
-      }), { status: 200, headers: { 'content-type': 'application/json' } })
-    ))
+    useExplorerStore.getState().setSelectedFlakeId(7)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            flake_id: 7,
+            image_id: 42,
+            domain_ids: [1, 2],
+            cluster_names: ['mono'],
+            bbox_xy: [0, 0, 10, 10],
+            mask_stats: { area_px: 200 },
+            distance_px: 7.25,
+            isolation_px: 5.0,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+      )
+    )
     wrap(<DetailPanel projectId="local" />)
-    expect(await screen.findByText('A:0')).not.toBeNull()
+    expect(await screen.findByText('7')).not.toBeNull()
+    expect(screen.getByText('42')).not.toBeNull()
     expect(screen.getByText('mono')).not.toBeNull()
     expect(screen.getByText(/7\.25/)).not.toBeNull()
+    expect(screen.getByText(/px/i)).not.toBeNull()
   })
 
   it('shows a loading message while the query is pending', () => {
-    useExplorerStore.getState().setSelectedFlakeId('A:0')
+    useExplorerStore.getState().setSelectedFlakeId(7)
     vi.stubGlobal('fetch', vi.fn(() => new Promise(() => { /* never */ })))
     wrap(<DetailPanel projectId="local" />)
     expect(screen.getByText(/Loading detail/i)).not.toBeNull()
+  })
+
+  it('does not render a pass chip (detail Dto has no pass field)', async () => {
+    useExplorerStore.getState().setSelectedFlakeId(7)
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            flake_id: 7,
+            image_id: 42,
+            domain_ids: [],
+            cluster_names: [],
+            bbox_xy: [0, 0, 10, 10],
+            mask_stats: {},
+            distance_px: null,
+            isolation_px: null,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } }
+        )
+      )
+    )
+    wrap(<DetailPanel projectId="local" />)
+    await screen.findByText('7')
+    expect(screen.queryByTestId('pass-chip')).toBeNull()
   })
 })
