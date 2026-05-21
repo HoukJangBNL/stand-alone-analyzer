@@ -1,6 +1,7 @@
 // web/src/hooks/__tests__/useStepProgress.test.ts
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
+import { toast } from 'sonner'
 import { useStepProgress } from '../useStepProgress'
 
 describe('useStepProgress', () => {
@@ -139,5 +140,36 @@ describe('useStepProgress.result', () => {
   it('result is null until done event arrives', () => {
     const { result } = renderHook(() => useStepProgress('local', 'selector'))
     expect(result.current.result).toBeNull()
+  })
+})
+
+describe('useStepProgress.toast on SSE error', () => {
+  it('calls toast.error with the SSE error envelope message', async () => {
+    const errSpy = vi.spyOn(toast, 'error').mockImplementation(() => 'mock-id')
+
+    const encoder = new TextEncoder()
+    const errorPayload = {
+      error: { code: 'pipeline_failed', message: 'background step crashed' },
+    }
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(`event: error\ndata: ${JSON.stringify(errorPayload)}\n\n`)
+        )
+        controller.close()
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(stream, { status: 200, headers: { 'content-type': 'text/event-stream' } })
+      )
+    )
+
+    const { result } = renderHook(() => useStepProgress('local', 'background'))
+
+    await act(async () => { await result.current.start({}) })
+    await waitFor(() => expect(result.current.status).toBe('error'))
+    expect(errSpy).toHaveBeenCalledWith('background step crashed')
   })
 })

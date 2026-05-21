@@ -1,10 +1,13 @@
 // web/src/hooks/useStepProgress.ts
 /**
  * useStepProgress hook per integrated design §6 (extended for Plan 2 to
- * surface the 'done' event's result payload).
+ * surface the 'done' event's result payload). W3.1 — also fires toast.error
+ * on SSE error events.
  */
 import { useState, useCallback, useRef } from 'react'
+import { toast } from 'sonner'
 import { parseEventStream } from '@/lib/sse'
+import { postSseRun } from '@/api/sseRun'
 
 type StepStatus = 'idle' | 'running' | 'done' | 'error'
 
@@ -27,20 +30,12 @@ export function useStepProgress<P = unknown, R = unknown>(
       setResult(null)
 
       try {
-        const response = await fetch(
-          `/api/v1/projects/${projectId}/run/${step}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(params),
-            signal: abortControllerRef.current.signal,
-          }
+        const response = await postSseRun(
+          projectId,
+          step,
+          params,
+          abortControllerRef.current.signal
         )
-
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`)
-        }
-
         for await (const event of parseEventStream(
           response,
           abortControllerRef.current.signal
@@ -54,17 +49,22 @@ export function useStepProgress<P = unknown, R = unknown>(
             setPct(1)
             break
           } else if (event.type === 'error') {
+            const msg = event.data.error?.message || 'Pipeline failed'
             setStatus('error')
-            setMessage(event.data.error?.message || 'Pipeline failed')
+            setMessage(msg)
+            toast.error(msg)
             break
           }
         }
-      } catch (err: any) {
-        if (err.name === 'AbortError') {
+      } catch (err: unknown) {
+        const e = err as { name?: string; message?: string }
+        if (e.name === 'AbortError') {
           setStatus('idle')
         } else {
+          const msg = e.message ?? 'Network error'
           setStatus('error')
-          setMessage(err.message)
+          setMessage(msg)
+          toast.error(msg)
         }
       }
     },

@@ -1,7 +1,9 @@
 // web/src/hooks/useClusteringRefit.ts
 import { useState, useCallback, useRef } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { parseEventStream } from '@/lib/sse'
+import { postSseRun } from '@/api/sseRun'
 import type { ClusteringRefitBody } from '@/api/clustering'
 
 interface RefitResult {
@@ -29,16 +31,12 @@ export function useClusteringRefit(projectId: string) {
       setMessage('')
       setResult(null)
       try {
-        const response = await fetch(
-          `/api/v1/projects/${projectId}/run/clustering/refit`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-            signal: abortRef.current.signal,
-          }
+        const response = await postSseRun(
+          projectId,
+          'clustering/refit',
+          body,
+          abortRef.current.signal
         )
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
         for await (const event of parseEventStream(response, abortRef.current.signal)) {
           if (event.type === 'progress') {
             setPct(event.data.pct)
@@ -52,17 +50,22 @@ export function useClusteringRefit(projectId: string) {
             qc.invalidateQueries({ queryKey: ['clustering', 'seed_groups', projectId] })
             break
           } else if (event.type === 'error') {
+            const msg = event.data.error?.message || 'Refit failed'
             setStatus('error')
-            setMessage(event.data.error?.message || 'Refit failed')
+            setMessage(msg)
+            toast.error(msg)
             break
           }
         }
-      } catch (err: any) {
-        if (err.name === 'AbortError') {
+      } catch (err: unknown) {
+        const e = err as { name?: string; message?: string }
+        if (e.name === 'AbortError') {
           setStatus('idle')
         } else {
+          const msg = e.message ?? 'Network error'
           setStatus('error')
-          setMessage(err.message)
+          setMessage(msg)
+          toast.error(msg)
         }
       }
     },
