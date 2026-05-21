@@ -9,8 +9,9 @@ Per plan v1 r9 §M2 PR 2.3.
 from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Dict, Optional
 
+from flake_analysis.core._compat import ProgressCallback
 from flake_analysis.core.pipeline.selector import run_selector as core_run_selector
 
 from flake_analysis.state.hashing import params_hash
@@ -21,9 +22,6 @@ from flake_analysis.state.manifest import (
     stamp_top_level,
 )
 from flake_analysis.state.paths import step_dir
-
-
-ProgressCallback = Callable[[float, str], None]
 
 
 def run_selector_step(
