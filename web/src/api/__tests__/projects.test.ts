@@ -7,7 +7,9 @@ import {
   type ProjectHandle,
 } from '@/api/projects'
 
-afterEach(() => vi.restoreAllMocks())
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 describe('api/projects', () => {
   it('fetchProjects returns the list when GET /projects succeeds', async () => {

@@ -118,13 +118,13 @@ describe('explorerSlice — selection + viewport', () => {
 
 describe('explorerSlice — W3.3 dead-control purge', () => {
   it('does not expose lodChoice / setLodChoice', () => {
-    const s = useExplorerStore.getState() as Record<string, unknown>
+    const s = useExplorerStore.getState() as unknown as Record<string, unknown>
     expect('lodChoice' in s).toBe(false)
     expect('setLodChoice' in s).toBe(false)
   })
 
   it('does not expose renderToggles / toggleRender', () => {
-    const s = useExplorerStore.getState() as Record<string, unknown>
+    const s = useExplorerStore.getState() as unknown as Record<string, unknown>
     expect('renderToggles' in s).toBe(false)
     expect('toggleRender' in s).toBe(false)
   })
