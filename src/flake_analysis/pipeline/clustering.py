@@ -59,7 +59,7 @@ def run_clustering_step(
     cluster_thresholds: Optional[Dict[int, float]] = None,
     fit_scope: str = "seeds",
     max_mahalanobis: float = 3.0,
-    reg_covar: float = 1.0,
+    reg_covar: float = 10.0,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Fit manual seed-group GMM and persist outputs.

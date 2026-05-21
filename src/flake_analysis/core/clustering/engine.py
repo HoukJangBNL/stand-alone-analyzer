@@ -73,7 +73,7 @@ class InteractiveClusteringEngine:
         tol: float = 1e-4,
         fit_scope: str = "seeds",
         max_mahalanobis: float = 3.0,
-        reg_covar: float = 1.0,
+        reg_covar: float = 10.0,
     ) -> InteractiveClusterResult:
         """Fit GMM on the seed-defined subset, then score everyone.
 

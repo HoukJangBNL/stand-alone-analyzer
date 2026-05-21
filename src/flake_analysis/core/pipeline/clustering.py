@@ -108,7 +108,7 @@ def run_clustering(
     tol: float = 1e-4,
     fit_scope: str = "seeds",
     max_mahalanobis: float = 3.0,
-    reg_covar: float = 1.0,
+    reg_covar: float = 10.0,
     progress_callback: Optional[ProgressCallback] = None,
 ) -> Dict[str, Any]:
     """Fit GMM with manual seed groups and persist labels + model.
