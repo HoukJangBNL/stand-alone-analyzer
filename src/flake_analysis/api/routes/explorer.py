@@ -151,3 +151,15 @@ async def post_save_explorer_state(
         state_path=result["state_path"],
         selected_count=result["selected_count"],
     )
+
+
+@router.get("/run/explorer/state")
+async def get_saved_explorer_state(
+    project_id: str,
+    manifest: Manifest = Depends(get_manifest),
+    user: User = Depends(get_current_user),
+):
+    state = load_explorer_state(manifest.analysis_folder)
+    if state is None:
+        raise ExplorerStateMissing()
+    return state
