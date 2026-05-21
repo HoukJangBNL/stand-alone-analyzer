@@ -57,4 +57,21 @@ describe('MetricRangeRow', () => {
     // ports tab_selector.py:181-184 — swap so committed range is [100, 500]
     expect(onChange).toHaveBeenCalledWith([100, 500])
   })
+
+  it('does not fire onChange on mount or on prop-driven prop sync', () => {
+    const onChange = vi.fn()
+    const { rerender } = render(
+      <MetricRangeRow metricKey="area" value={[0, 100]} onChange={onChange} />
+    )
+    // Advance past the debounce window without any user input.
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(onChange).not.toHaveBeenCalled()
+
+    // Parent drives a prop change (e.g. resetFilter) — must not feed back.
+    rerender(
+      <MetricRangeRow metricKey="area" value={[5, 50]} onChange={onChange} />
+    )
+    act(() => { vi.advanceTimersByTime(500) })
+    expect(onChange).not.toHaveBeenCalled()
+  })
 })
