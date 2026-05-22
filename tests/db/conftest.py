@@ -37,11 +37,24 @@ def pg_url() -> str:
 
 @pytest_asyncio.fixture()
 async def pg_session(pg_url: str) -> AsyncIterator[AsyncSession]:
-    """Per-test async session wrapped in a transaction that is rolled back."""
+    """Per-test async session wrapped in a transaction that is rolled back.
+
+    Uses ``join_transaction_mode="create_savepoint"`` so any ``session.commit()``
+    issued by the test (or by route handlers under test) is converted into a
+    SAVEPOINT release rather than committing the outer transaction. This keeps
+    the per-test rollback effective even when the code under test commits
+    explicitly — preventing rows from leaking into ``saa_test`` across runs
+    (e.g. the ``usage_events`` accumulation that previously broke
+    ``tests/api/test_admin_usage_route.py``).
+    """
     engine = create_async_engine(pg_url, future=True)
     async with engine.connect() as conn:
         trans = await conn.begin()
-        Session = async_sessionmaker(bind=conn, expire_on_commit=False)
+        Session = async_sessionmaker(
+            bind=conn,
+            expire_on_commit=False,
+            join_transaction_mode="create_savepoint",
+        )
         async with Session() as session:
             try:
                 yield session
