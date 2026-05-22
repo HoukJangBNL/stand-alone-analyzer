@@ -13,23 +13,37 @@ pytestmark = pytest.mark.pg
 
 
 @pytest.mark.asyncio
-async def test_admin_usage_requires_admin_role(
-    monkeypatch, pg_session, sample_user_factory
-):
+async def test_admin_usage_requires_admin_role(monkeypatch, pg_session):
     """GET /admin/usage returns 403 for non-admin users."""
-    # Enable dev bypass
-    monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
+    from uuid import uuid4
+    from flake_analysis.api.auth import User, get_current_user
+    from flake_analysis.api.deps import get_db_session
+    from flake_analysis.db.models import UserRole
 
-    # Create a member user (not admin)
-    await sample_user_factory(
-        email="member@test.com", cognito_sub="member-sub", role=UserRole.MEMBER
+    monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "0")
+
+    member = User(
+        id=uuid4(),
+        email="member@test.com",
+        cognito_sub="member-sub",
+        role=UserRole.MEMBER,
+        email_verified=True,
     )
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.get("/api/v1/admin/usage")
-        assert r.status_code == 403
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    app.dependency_overrides[get_current_user] = lambda: member
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.get("/api/v1/admin/usage")
+            assert r.status_code == 403
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+        app.dependency_overrides.pop(get_current_user, None)
 
 
 @pytest.mark.asyncio
@@ -37,6 +51,8 @@ async def test_admin_usage_returns_all_events(
     monkeypatch, pg_session, sample_user_factory
 ):
     """GET /admin/usage returns all usage events ordered by ts DESC."""
+    from flake_analysis.api.deps import get_db_session
+
     # Enable dev bypass
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
 
@@ -57,24 +73,39 @@ async def test_admin_usage_returns_all_events(
         email_verified=True,
     )
 
-    await emit(pg_session, domain_admin, "login", {"ip": "1.2.3.4"})
-    await emit(pg_session, domain_admin, "scan_run", {"step": "thumbnails"})
-    await emit(pg_session, domain_admin, "logout")
+    # NOW() is constant within a transaction, so emits in a single
+    # pg_session share a ts. Stagger ts explicitly so ORDER BY ts DESC is
+    # deterministic.
+    base = datetime.now(timezone.utc)
+    e1 = await emit(pg_session, domain_admin, "login", {"ip": "1.2.3.4"})
+    e1.ts = base - timedelta(seconds=2)
+    e2 = await emit(pg_session, domain_admin, "scan_run", {"step": "thumbnails"})
+    e2.ts = base - timedelta(seconds=1)
+    e3 = await emit(pg_session, domain_admin, "logout")
+    e3.ts = base
+    await pg_session.flush()
     await pg_session.commit()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.get("/api/v1/admin/usage")
-        assert r.status_code == 200
-        data = r.json()
-        assert "events" in data
-        events = data["events"]
-        assert len(events) == 3
-        # Check ordering (most recent first)
-        assert events[0]["kind"] == "logout"
-        assert events[1]["kind"] == "scan_run"
-        assert events[2]["kind"] == "login"
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.get("/api/v1/admin/usage")
+            assert r.status_code == 200
+            data = r.json()
+            assert "events" in data
+            events = data["events"]
+            assert len(events) == 3
+            # Check ordering (most recent first)
+            assert events[0]["kind"] == "logout"
+            assert events[1]["kind"] == "scan_run"
+            assert events[2]["kind"] == "login"
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
@@ -82,6 +113,8 @@ async def test_admin_usage_filters_by_user_id(
     monkeypatch, pg_session, sample_user_factory
 ):
     """GET /admin/usage?user_id=... filters events by user."""
+    from flake_analysis.api.deps import get_db_session
+
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
 
     # Create admin and two regular users
@@ -119,15 +152,22 @@ async def test_admin_usage_filters_by_user_id(
     await emit(pg_session, domain_user1, "logout")
     await pg_session.commit()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.get(f"/api/v1/admin/usage?user_id={user1.id}")
-        assert r.status_code == 200
-        data = r.json()
-        events = data["events"]
-        assert len(events) == 2  # Only user1's events
-        assert all(e["user_id"] == str(user1.id) for e in events)
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.get(f"/api/v1/admin/usage?user_id={user1.id}")
+            assert r.status_code == 200
+            data = r.json()
+            events = data["events"]
+            assert len(events) == 2  # Only user1's events
+            assert all(e["user_id"] == str(user1.id) for e in events)
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
@@ -135,6 +175,8 @@ async def test_admin_usage_filters_by_kind(
     monkeypatch, pg_session, sample_user_factory
 ):
     """GET /admin/usage?kind=... filters events by kind."""
+    from flake_analysis.api.deps import get_db_session
+
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
 
     admin = await sample_user_factory(
@@ -158,15 +200,22 @@ async def test_admin_usage_filters_by_kind(
     await emit(pg_session, domain_admin, "logout")
     await pg_session.commit()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.get("/api/v1/admin/usage?kind=scan_run")
-        assert r.status_code == 200
-        data = r.json()
-        events = data["events"]
-        assert len(events) == 2
-        assert all(e["kind"] == "scan_run" for e in events)
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.get("/api/v1/admin/usage?kind=scan_run")
+            assert r.status_code == 200
+            data = r.json()
+            events = data["events"]
+            assert len(events) == 2
+            assert all(e["kind"] == "scan_run" for e in events)
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
@@ -174,6 +223,8 @@ async def test_admin_usage_filters_by_time_range(
     monkeypatch, pg_session, sample_user_factory
 ):
     """GET /admin/usage?since=...&until=... filters by timestamp."""
+    from flake_analysis.api.deps import get_db_session
+
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
 
     admin = await sample_user_factory(
@@ -202,14 +253,26 @@ async def test_admin_usage_filters_by_time_range(
     since = (now - timedelta(minutes=5)).isoformat()
     until = (now + timedelta(minutes=5)).isoformat()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.get(f"/api/v1/admin/usage?since={since}&until={until}")
-        assert r.status_code == 200
-        data = r.json()
-        events = data["events"]
-        assert len(events) == 3
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            # Pass through params dict so httpx URL-encodes the "+00:00" in
+            # the ISO timestamps; otherwise FastAPI sees a space and 422s.
+            r = await c.get(
+                "/api/v1/admin/usage",
+                params={"since": since, "until": until},
+            )
+            assert r.status_code == 200
+            data = r.json()
+            events = data["events"]
+            assert len(events) == 3
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
@@ -217,6 +280,8 @@ async def test_admin_usage_aggregate_mode(
     monkeypatch, pg_session, sample_user_factory
 ):
     """GET /admin/usage?aggregate=true returns counts by kind."""
+    from flake_analysis.api.deps import get_db_session
+
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
 
     admin = await sample_user_factory(
@@ -243,17 +308,24 @@ async def test_admin_usage_aggregate_mode(
     await emit(pg_session, domain_admin, "logout")
     await pg_session.commit()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.get("/api/v1/admin/usage?aggregate=true")
-        assert r.status_code == 200
-        data = r.json()
-        assert "counts_by_kind" in data
-        counts = data["counts_by_kind"]
-        assert counts["login"] == 2
-        assert counts["scan_run"] == 3
-        assert counts["logout"] == 1
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.get("/api/v1/admin/usage?aggregate=true")
+            assert r.status_code == 200
+            data = r.json()
+            assert "counts_by_kind" in data
+            counts = data["counts_by_kind"]
+            assert counts["login"] == 2
+            assert counts["scan_run"] == 3
+            assert counts["logout"] == 1
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
@@ -261,6 +333,8 @@ async def test_admin_usage_respects_limit(
     monkeypatch, pg_session, sample_user_factory
 ):
     """GET /admin/usage?limit=N returns at most N events."""
+    from flake_analysis.api.deps import get_db_session
+
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
 
     admin = await sample_user_factory(
@@ -283,11 +357,18 @@ async def test_admin_usage_respects_limit(
         await emit(pg_session, domain_admin, "scan_run")
     await pg_session.commit()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.get("/api/v1/admin/usage?limit=3")
-        assert r.status_code == 200
-        data = r.json()
-        events = data["events"]
-        assert len(events) == 3
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.get("/api/v1/admin/usage?limit=3")
+            assert r.status_code == 200
+            data = r.json()
+            events = data["events"]
+            assert len(events) == 3
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
