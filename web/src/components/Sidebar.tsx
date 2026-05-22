@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router-dom'
 import { fetchProjects, fetchActiveProject, type ProjectHandle } from '@/api/projects'
 import { useProjectStore } from '@/state/projectSlice'
 import { CreateProjectForm } from './CreateProjectForm'
+import { LogoutMenu } from './auth/LogoutMenu'
 
 export function Sidebar() {
   const navigate = useNavigate()
@@ -103,6 +104,8 @@ export function Sidebar() {
           }}
         />
       )}
+
+      <LogoutMenu />
     </aside>
   )
 }
