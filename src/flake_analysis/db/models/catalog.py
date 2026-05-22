@@ -5,7 +5,17 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, Text, text
+from sqlalchemy import (
+    TIMESTAMP,
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -85,4 +95,27 @@ class Scan(Base):
         back_populates="scan",
         cascade="all, delete-orphan",
         passive_deletes=True,
+    )
+
+
+class Material(Base):
+    """Controlled vocabulary for scan material types.
+
+    `name` is the natural primary key; W5 uploads validate `scans.material`
+    as a foreign key to `materials.name`. New names are auto-added via
+    `INSERT ... ON CONFLICT DO NOTHING` on first user input.
+    """
+
+    __tablename__ = "materials"
+
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    created_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True),
+        server_default=func.now(),
+        nullable=False,
     )

@@ -13,7 +13,7 @@ from flake_analysis.db.models.auth import (
     UsageEvent,
     UserRole,
 )
-from flake_analysis.db.models.catalog import Model, Scan
+from flake_analysis.db.models.catalog import Material, Model, Scan
 from flake_analysis.db.models.domain_branch import (
     DomainAnalysis,
     DomainAssignment,
@@ -40,6 +40,7 @@ __all__ = [
     "FlakeAnalysis",
     "FlakeCuration",
     "Image",
+    "Material",
     "Model",
     "PipelineStatus",
     "PipelineStep",
