@@ -146,3 +146,37 @@ CREATE INDEX usage_events_kind_ts_idx    ON usage_events(kind,    ts DESC);
 - The `'system'` user is reconstructed with `id=1` only if it survived v7 with `legacy_id=1` originally; otherwise the BIGSERIAL assigns a fresh id and any code that hardcoded `id=1` will break. Same lesson as §3.5: never hardcode the system-user id.
 
 The migration roundtrip (`downgrade → base → upgrade head`) is verified clean against PostgreSQL 17 in CI before each release.
+
+---
+
+## v7.1 — W5-A delta (2026-05-22, alembic head `0003_w5a_materials_uploads`)
+
+### New table: `materials`
+
+Controlled vocabulary for scan material types. Auto-grows on free-input via `INSERT ... ON CONFLICT DO NOTHING` (W5-B will wire this on the API side).
+
+| Column | Type | Notes |
+|---|---|---|
+| `name` | TEXT | PRIMARY KEY |
+| `created_by_id` | UUID | FK → `users.id` ON DELETE SET NULL, nullable |
+| `created_at` | TIMESTAMPTZ | DEFAULT `NOW()`, NOT NULL |
+
+Seeded on migration: `graphene`, `MoS2`, `WSe2`, `hBN`, `WS2`.
+
+### `scans` deltas
+
+- `material` — was `TEXT NULL`, now `TEXT NOT NULL` with `FK → materials(name) ON DELETE RESTRICT`. Old partial index `scans_material_idx` dropped (no longer needed: every row has a value, and the FK gives PG an index-supported lookup path on `materials.name`).
+- New column `extra_metadata JSONB NOT NULL DEFAULT '{}'::jsonb` — free-form per-scan key/value (microscope model, sample id, etc.). ORM exposes as `Scan.extra_metadata: Mapped[dict]`.
+
+### `images` deltas
+
+- `grid_ix`, `grid_iy` — were `INT NULL`, now `INT NOT NULL`. Convention: 0-based, `(0, 0) = top-left`.
+- Old partial index `images_grid_idx` dropped, replaced by `UNIQUE(scan_id, grid_ix, grid_iy)` constraint named `images_scan_grid_uq` (every image now has a non-null grid position; full UNIQUE supersedes the partial index).
+
+### Migration order
+- Down-rev: `0002_v7_auth`
+- This rev: `0003_w5a_materials_uploads`
+
+### Pre-flight on non-empty databases
+
+This migration assumes every existing `scans` row has a non-null `material` and every existing `images` row has non-null `grid_ix`/`grid_iy`. Verified empty on `saa_test` 2026-05-22 (zero rows). Production DB state must be checked before running on prod (devops-engineer concern, W5-infra plan §pre-flight).
