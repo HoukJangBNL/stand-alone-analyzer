@@ -13,6 +13,12 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from flake_analysis.db.models import Material, Scan
+from flake_analysis.db.models.upload import (
+    UploadItem,
+    UploadItemStatus,
+    UploadSession,
+    UploadSessionStatus,
+)
 
 
 def normalize_material_name(raw: str) -> str:
@@ -78,3 +84,62 @@ async def create_scan(
     await session.flush()
     await session.refresh(scan)
     return scan
+
+
+async def get_or_create_upload_session(
+    session: AsyncSession,
+    *,
+    scan: Scan,
+    created_by_id: UUID,
+) -> UploadSession:
+    """Per scan, one active upload session. Reuse on subsequent presigns."""
+    stmt = (
+        select(UploadSession)
+        .where(UploadSession.scan_id == scan.id)
+        .where(UploadSession.status == UploadSessionStatus.ACTIVE)
+        .limit(1)
+    )
+    existing = (await session.execute(stmt)).scalar_one_or_none()
+    if existing is not None:
+        return existing
+
+    upl = UploadSession(
+        scan_id=scan.id,
+        total_files=scan.image_count,
+        created_by_id=created_by_id,
+    )
+    session.add(upl)
+    await session.flush()
+    await session.refresh(upl)
+    return upl
+
+
+async def create_upload_item(
+    session: AsyncSession,
+    *,
+    upload_session: UploadSession,
+    sha256: str,
+    filename: str,
+    size_bytes: int,
+    grid_ix: int,
+    grid_iy: int,
+    s3_uri: str,
+) -> UploadItem:
+    """Insert a pending upload_item. Uniqueness on (session_id, sha256) is
+    enforced by the existing DB constraint — caller catches IntegrityError
+    and translates to 409.
+    """
+    item = UploadItem(
+        session_id=upload_session.id,
+        sha256=sha256,
+        filename=filename,
+        size_bytes=size_bytes,
+        grid_ix=grid_ix,
+        grid_iy=grid_iy,
+        s3_uri=s3_uri,
+        status=UploadItemStatus.PENDING,
+    )
+    session.add(item)
+    await session.flush()
+    await session.refresh(item)
+    return item

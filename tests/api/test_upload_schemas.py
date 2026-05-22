@@ -37,3 +37,47 @@ def test_material_create_normalizes_name():
 def test_material_create_response():
     r = MaterialCreateResponse(name="graphene", created=True)
     assert r.created is True
+
+
+from flake_analysis.api.schemas.upload import (
+    PresignRequest,
+    PresignResponse,
+    CompleteRequest,
+    FinalizeResponse,
+)
+
+
+def test_presign_request_validates_sha256_hex():
+    good = PresignRequest(
+        filename="t.tif", sha256="a" * 64, grid_ix=0, grid_iy=0, size_bytes=1024,
+    )
+    assert good.sha256 == "a" * 64
+    with pytest.raises(ValidationError):
+        PresignRequest(filename="t.tif", sha256="zz", grid_ix=0, grid_iy=0, size_bytes=1024)
+
+
+def test_presign_request_rejects_negative_grid():
+    with pytest.raises(ValidationError):
+        PresignRequest(
+            filename="t.tif", sha256="a" * 64, grid_ix=-1, grid_iy=0, size_bytes=1024,
+        )
+
+
+def test_presign_response_round_trip():
+    r = PresignResponse(
+        put_url="https://s3.example/sig",
+        headers={"x-amz-checksum-sha256": "QkFTRTY0=="},
+        upload_item_id=42,
+        s3_uri="s3://qpress-uploads/dev/scans/1/images/aa.tif",
+    )
+    assert r.upload_item_id == 42
+
+
+def test_complete_request_basic():
+    c = CompleteRequest(width=1024, height=768)
+    assert c.width == 1024
+
+
+def test_finalize_response():
+    f = FinalizeResponse(status="ready", missing=0)
+    assert f.status == "ready"
