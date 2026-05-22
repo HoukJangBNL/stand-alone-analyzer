@@ -1,6 +1,12 @@
 # W5 — Upload Flow (S3 Presigned URL + upload_sessions/items) Implementation Plan
 
-> **Status: SKETCH + DECISIONS-PENDING.** This plan captures the architectural shape and the decisions the user/PM must lock before a TDD-grade plan can be written. Do NOT execute as-is — the open decisions in §"Decisions Pending" must be resolved first; once resolved, PM rewrites this file with task-level steps using the same template as W3.5/W2.4.
+> **Status: SUPERSEDED (2026-05-22).** D-block decisions resolved on 2026-05-22 and the executable plan was split into three task-level files:
+> - `2026-05-22-W5-A-schema.md` — DB schema (materials + scans/images deltas)
+> - `2026-05-22-W5-B-api.md` — FastAPI presigned PUT + scan lifecycle
+> - `2026-05-22-W5-C-frontend.md` — React upload modal
+> - `2026-05-22-W5-infra.md` — AWS S3 bucket + CORS + IAM
+>
+> Read this file only for original architectural intent / risk register. Do NOT execute.
 
 > **For agentic workers (after sign-off):** REQUIRED SUB-SKILL: superpowers:subagent-driven-development.
 
