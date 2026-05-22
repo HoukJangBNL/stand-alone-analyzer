@@ -3,8 +3,9 @@ from __future__ import annotations
 import asyncio
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 from flake_analysis.api.auth import User, get_current_user
-from flake_analysis.api.deps import get_manifest
+from flake_analysis.api.deps import get_db_session, get_manifest
 from flake_analysis.api.mutex import acquire_project_lock
 from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.api.schemas.compute import (
@@ -27,6 +28,7 @@ async def run_thumbnails(
     params: ThumbnailsParams,
     manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Run thumbnails step with SSE progress."""
     # Acquire the project lock synchronously so a contended request gets an
@@ -36,6 +38,12 @@ async def run_thumbnails(
     # it in the generator's finally block.
     lock_cm = acquire_project_lock(project_id)
     await lock_cm.__aenter__()
+
+    # Emit usage event BEFORE starting the SSE stream
+    from flake_analysis.api.services.usage import emit
+
+    await emit(session, user, "scan_run", {"step": "thumbnails", "project_id": project_id})
+    await session.commit()
 
     bridge = ProgressBridge()
 
@@ -80,6 +88,7 @@ async def run_background(
     params: BackgroundParams,
     manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Run background generation step with SSE progress."""
     # Acquire the project lock synchronously so a contended request gets an
@@ -89,6 +98,12 @@ async def run_background(
     # it in the generator's finally block.
     lock_cm = acquire_project_lock(project_id)
     await lock_cm.__aenter__()
+
+    # Emit usage event BEFORE starting the SSE stream
+    from flake_analysis.api.services.usage import emit
+
+    await emit(session, user, "scan_run", {"step": "background", "project_id": project_id})
+    await session.commit()
 
     bridge = ProgressBridge()
 
@@ -134,6 +149,7 @@ async def run_domain_stats(
     params: DomainStatsParams,
     manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Run domain stats step with SSE progress."""
     # Acquire the project lock synchronously so a contended request gets an
@@ -143,6 +159,12 @@ async def run_domain_stats(
     # it in the generator's finally block.
     lock_cm = acquire_project_lock(project_id)
     await lock_cm.__aenter__()
+
+    # Emit usage event BEFORE starting the SSE stream
+    from flake_analysis.api.services.usage import emit
+
+    await emit(session, user, "scan_run", {"step": "domain_stats", "project_id": project_id})
+    await session.commit()
 
     bridge = ProgressBridge()
 
@@ -187,6 +209,7 @@ async def run_domain_proximity(
     params: DomainProximityParams,
     manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Run domain proximity step with SSE progress."""
     # Acquire the project lock synchronously so a contended request gets an
@@ -196,6 +219,12 @@ async def run_domain_proximity(
     # it in the generator's finally block.
     lock_cm = acquire_project_lock(project_id)
     await lock_cm.__aenter__()
+
+    # Emit usage event BEFORE starting the SSE stream
+    from flake_analysis.api.services.usage import emit
+
+    await emit(session, user, "scan_run", {"step": "domain_proximity", "project_id": project_id})
+    await session.commit()
 
     bridge = ProgressBridge()
 
