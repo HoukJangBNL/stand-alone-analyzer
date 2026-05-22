@@ -32,7 +32,6 @@ async def upsert_from_claims(
     email_verified = claims.get("email_verified", False)
     email_verified_at = datetime.now(timezone.utc) if email_verified else None
 
-    # Upsert using INSERT ... ON CONFLICT (cognito_sub) DO UPDATE
     stmt = (
         insert(UserModel)
         .values(
@@ -48,14 +47,17 @@ async def upsert_from_claims(
                 "email_verified_at": email_verified_at,
             },
         )
-        .returning(UserModel.id)
     )
-
-    result = await session.execute(stmt)
-    user_id = result.scalar_one()
+    # Use RETURNING * via the ORM-style returning so we get a populated model.
+    stmt = stmt.returning(UserModel)
+    result = await session.execute(
+        stmt,
+        execution_options={"populate_existing": True},
+    )
+    user = result.scalar_one()
     await session.commit()
-
-    # Fetch the full user to return
-    select_stmt = select(UserModel).where(UserModel.id == user_id)
-    result = await session.execute(select_stmt)
-    return result.scalar_one()
+    # populate_existing already refreshed the identity-map entry, but if the
+    # upsert was an UPDATE the in-memory attributes may be stale. Expire and
+    # refresh to read the post-commit state authoritatively.
+    await session.refresh(user)
+    return user
