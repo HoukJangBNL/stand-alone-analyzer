@@ -205,3 +205,94 @@ aws --profile qpress --region us-east-2 ec2 delete-security-group \
 - 오너 집/사무실 IP가 변하면 §2.3 절차 그대로. 자주 바뀌면 스크립트화.
 - 팀 합류 시: SSH key 배포 대신 **AWS SSM Session Manager** 또는 VPN 검토 (SG inbound 0개로 운영 가능). _아직 안 함, future option._
 - 스키마 버전 = **v6**. Breaking change 생기면 `db-schema-v7.md` + 새 alembic revision으로 진행. `db-schema-v6.md`는 동결.
+
+---
+
+## 7. S3 Uploads Bucket Operations (`qpress-uploads`)
+
+> **Status**: Provisioned 2026-05-22 (W5-infra). Source-of-truth JSON: [`infra/s3/`](../infra/s3/). Audit script: [`scripts/s3/dryrun.sh`](../scripts/s3/dryrun.sh).
+
+### 7.1 인프라 인벤토리 (S3)
+
+| 항목 | 값 |
+|---|---|
+| Bucket | `qpress-uploads` (us-east-2) |
+| Encryption | SSE-S3 (AES256), bucket-key enabled |
+| Public access | 4/4 blocked |
+| Versioning | **disabled** (D1 — orphan cleanup via lifecycle) |
+| Object Ownership | BucketOwnerEnforced (no ACLs) |
+| CORS allowed origins | `localhost:5173`, `localhost:5174` (dev-only; prod added later via fast-follow `put-bucket-cors`) |
+| Lifecycle rules | `dev/` 30d expire / multipart abort 7d / `dev/uploads-pending/` 1d expire |
+| Bucket policy | denies cross-prefix writes via `aws:PrincipalTag/Env` |
+| IAM policy (dev) | `arn:aws:iam::931886963315:policy/qpress-api-s3-uploads-dev` |
+| IAM policy (prod) | `arn:aws:iam::931886963315:policy/qpress-api-s3-uploads-prod` |
+| Local dev user | `qpress-dev-local` (tag `Env=dev`, profile = `qpress-dev-local`) |
+| Prod role | `qpress-api-prod` (tag `Env=prod`) — **deferred until prod EC2 stands up** |
+
+### 7.2 일상 작업 — 드리프트 점검
+
+```bash
+bash scripts/s3/dryrun.sh
+```
+
+읽기 전용. PASS/FAIL을 항목별로 출력. CI에 매일 한 번 돌리는 게 권장 (Task 6 follow-up).
+
+### 7.3 변경 적용 워크플로
+
+전부 PM이 사용자 승인 후에만 실행. 디테일은 [`docs/superpowers/plans/2026-05-22-W5-infra.md`](superpowers/plans/2026-05-22-W5-infra.md) 참조.
+
+순서 중요:
+1. CORS / lifecycle / IAM 정책 변경은 JSON 파일 수정 → PM이 dry-run (`get-*`)으로 현재 상태 캡처 → 사용자 "go" → PM이 `put-*` 실행 → `get-*`로 사후 검증.
+2. Bucket 자체 파라미터 (encryption, ownership) 는 거의 안 바뀜. 바꿀 일이 생기면 새 plan 만들어서 진행.
+3. IAM principal (사용자/역할) 추가 시: **반드시 `Env` 태그**(`dev` 또는 `prod`) 부여 — 안 그러면 bucket policy의 third deny statement가 모든 PutObject를 차단.
+
+### 7.4 Prod role attach (deferred)
+
+W7 (GPU workers) 또는 prod EC2 fleet plan이 들어오면 그때:
+
+```bash
+aws --profile qpress iam create-role --role-name qpress-api-prod \
+  --assume-role-policy-document file://<trust-policy-for-ec2>.json
+
+aws --profile qpress iam tag-role --role-name qpress-api-prod \
+  --tags Key=Env,Value=prod Key=ManagedBy,Value=W5-infra
+
+aws --profile qpress iam attach-role-policy --role-name qpress-api-prod \
+  --policy-arn arn:aws:iam::931886963315:policy/qpress-api-s3-uploads-prod
+```
+
+이 단계 끝나면 `dryrun.sh`에 prod role 검사 항목 추가.
+
+### 7.5 Emergency rollback (전체 버킷 제거)
+
+> ⚠️ **Destructive — 사용자 승인 필수.** 객체가 있으면 먼저 비워야 함.
+
+```bash
+# 1) 모든 객체 삭제 (dev/ + prod/ + uploads-pending/)
+aws --profile qpress --region us-east-2 s3 rm s3://qpress-uploads --recursive
+
+# 2) 진행 중인 multipart uploads abort
+aws --profile qpress --region us-east-2 s3api list-multipart-uploads \
+  --bucket qpress-uploads --query 'Uploads[].[Key,UploadId]' --output text | \
+  while read KEY UID; do
+    [[ -n "$UID" ]] && aws --profile qpress --region us-east-2 s3api abort-multipart-upload \
+      --bucket qpress-uploads --key "$KEY" --upload-id "$UID"
+  done
+
+# 3) Bucket policy / lifecycle / CORS 제거 (delete-bucket이 이것들 있으면 거부할 수 있음)
+aws --profile qpress --region us-east-2 s3api delete-bucket-policy --bucket qpress-uploads
+aws --profile qpress --region us-east-2 s3api delete-bucket-lifecycle --bucket qpress-uploads
+aws --profile qpress --region us-east-2 s3api delete-bucket-cors --bucket qpress-uploads
+
+# 4) Bucket 삭제
+aws --profile qpress --region us-east-2 s3api delete-bucket --bucket qpress-uploads
+```
+
+IAM 정리는 `docs/superpowers/plans/2026-05-22-W5-infra.md` Task 4.7 참고.
+
+### 7.6 Trouble-shooting
+
+- **`AccessDenied` from dev user PUT to `dev/`** → Env 태그 빠진 듯. `aws iam list-user-tags --user-name qpress-dev-local`. 결과에 `Env=dev` 없으면 Step 4.5의 `tag-user` 명령 다시.
+- **CORS preflight 실패** → 브라우저 dev tools → Network → OPTIONS 요청의 응답 헤더 확인. `Access-Control-Allow-Origin` 누락이면 `infra/s3/cors.json`의 `AllowedOrigins`에 현재 origin 추가 → Step 2.3 재적용.
+- **`x-amz-checksum-sha256` 헤더 검증 실패** → CORS의 `AllowedHeaders` + `ExposeHeaders` 양쪽에 들어있는지 확인. 한쪽만 있으면 SDK가 검증 못 함.
+- **드리프트 발견 (`dryrun.sh` FAIL)** → 항목별 `get-*` 명령으로 현재 상태 dump → `infra/s3/*.json`과 diff → PM이 의도한 변경인지 사용자 확인 → 의도 X면 해당 task의 apply 명령 재실행으로 복구.
