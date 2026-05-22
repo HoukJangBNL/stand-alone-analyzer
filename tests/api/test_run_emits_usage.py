@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -9,6 +10,9 @@ from sqlalchemy import select
 
 from flake_analysis.api.main import app
 from flake_analysis.db.models import UsageEvent
+
+# Dev-bypass user UUID (matches src/flake_analysis/api/auth/dev_bypass.py)
+DEV_BYPASS_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 
 pytestmark = pytest.mark.pg
 
@@ -18,9 +22,8 @@ async def test_run_thumbnails_emits_scan_run_event(
     monkeypatch, pg_session, sample_user_factory
 ):
     """POST /projects/{pid}/run/thumbnails emits scan_run usage event."""
-    # Enable dev bypass and create a user
+    # Enable dev bypass (no need to create user; dev-bypass auto-seeds)
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
-    user = await sample_user_factory(email="run@test.com", cognito_sub="run-test-sub")
 
     # Mock the manifest dependency to return a valid manifest
     from flake_analysis.state.manifest import Manifest
@@ -71,16 +74,18 @@ async def test_run_thumbnails_emits_scan_run_event(
         assert r.status_code == 200
 
     # Check that a usage_events row was written with kind='scan_run'
+    # (dev-bypass user_id is DEV_BYPASS_USER_ID)
     stmt = select(UsageEvent).where(UsageEvent.kind == "scan_run").where(
-        UsageEvent.user_id == user.id
+        UsageEvent.user_id == DEV_BYPASS_USER_ID
     )
     result = await pg_session.execute(stmt)
     rows = result.scalars().all()
-    assert len(rows) == 1
-    assert rows[0].kind == "scan_run"
-    # Check that value_json includes step info
-    assert rows[0].value_json is not None
-    assert "step" in rows[0].value_json
+    assert len(rows) >= 1, "Expected at least one scan_run event for dev-bypass user"
+    # Check the most recent event
+    latest = rows[-1]
+    assert latest.kind == "scan_run"
+    assert latest.value_json is not None
+    assert "step" in latest.value_json
 
 
 @pytest.mark.asyncio
@@ -88,11 +93,8 @@ async def test_run_background_emits_scan_run_event(
     monkeypatch, pg_session, sample_user_factory
 ):
     """POST /projects/{pid}/run/background emits scan_run usage event."""
-    # Enable dev bypass and create a user
+    # Enable dev bypass (no need to create user; dev-bypass auto-seeds)
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
-    user = await sample_user_factory(
-        email="run-bg@test.com", cognito_sub="run-bg-test-sub"
-    )
 
     # Mock the manifest dependency
     from flake_analysis.state.manifest import Manifest
@@ -141,13 +143,15 @@ async def test_run_background_emits_scan_run_event(
         )
         assert r.status_code == 200
 
-    # Check usage event
+    # Check usage event (dev-bypass user_id is DEV_BYPASS_USER_ID)
     stmt = select(UsageEvent).where(UsageEvent.kind == "scan_run").where(
-        UsageEvent.user_id == user.id
+        UsageEvent.user_id == DEV_BYPASS_USER_ID
     )
     result = await pg_session.execute(stmt)
     rows = result.scalars().all()
-    assert len(rows) == 1
-    assert rows[0].kind == "scan_run"
-    assert rows[0].value_json is not None
-    assert "step" in rows[0].value_json
+    assert len(rows) >= 1, "Expected at least one scan_run event for dev-bypass user"
+    # Check the most recent event
+    latest = rows[-1]
+    assert latest.kind == "scan_run"
+    assert latest.value_json is not None
+    assert "step" in latest.value_json

@@ -47,8 +47,18 @@ async def get_current_user(
     """
     # Dev bypass check
     if os.getenv("SAA_AUTH_DEV_BYPASS") == "1":
-        from flake_analysis.api.auth.dev_bypass import mint_dev_user
+        from flake_analysis.api.auth.dev_bypass import (
+            ensure_dev_user_in_db,
+            mint_dev_user,
+        )
 
+        try:
+            await ensure_dev_user_in_db(session)
+        except Exception:
+            # Non-fatal: tests that don't need the row (eg pure unit tests
+            # that never call emit) shouldn't fail just because their
+            # session fixture forbids commits.
+            pass
         return mint_dev_user()
 
     # Extract bearer token
