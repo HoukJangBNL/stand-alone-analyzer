@@ -17,6 +17,8 @@ pytestmark = pytest.mark.pg
 @pytest.mark.asyncio
 async def test_auth_callback_emits_login_event(monkeypatch, rsa_key, pg_session):
     """POST /auth/callback writes a usage_events row with kind='login'."""
+    from flake_analysis.api.deps import get_db_session
+
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "0")
     monkeypatch.setenv("SAA_COGNITO_HOSTED_UI_DOMAIN", "https://test.auth.example.com")
     monkeypatch.setenv("SAA_COGNITO_APP_CLIENT_ID", "test-client-id")
@@ -67,15 +69,22 @@ async def test_auth_callback_emits_login_event(monkeypatch, rsa_key, pg_session)
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda: mock_client)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post(
-            "/api/v1/auth/callback",
-            json={
-                "code": "test-auth-code",
-                "redirect_uri": "http://localhost:5173/auth/callback",
-            },
-        )
-        assert r.status_code == 200
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/auth/callback",
+                json={
+                    "code": "test-auth-code",
+                    "redirect_uri": "http://localhost:5173/auth/callback",
+                },
+            )
+            assert r.status_code == 200
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
     # Check that a usage_events row was written with kind='login'
     stmt = select(UsageEvent).where(UsageEvent.kind == "login")
@@ -88,12 +97,17 @@ async def test_auth_callback_emits_login_event(monkeypatch, rsa_key, pg_session)
 @pytest.mark.asyncio
 async def test_auth_logout_emits_logout_event(monkeypatch, pg_session, sample_user_factory):
     """POST /auth/logout writes a usage_events row with kind='logout'."""
+    from flake_analysis.api.deps import get_db_session
+
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
     monkeypatch.setenv("SAA_COGNITO_HOSTED_UI_DOMAIN", "https://test.auth.example.com")
     monkeypatch.setenv("SAA_COGNITO_APP_CLIENT_ID", "test-client-id")
 
-    # Create a user in the DB for dev bypass mode to pick up
-    user = await sample_user_factory(email="logout@test.com", cognito_sub="logout-test-sub")
+    # Create a user in the DB so the FK constraint holds for legacy reasons.
+    # NOTE: dev-bypass mode resolves current_user via mint_dev_user(), which
+    # uses a hard-coded dev UUID — NOT this factory user. So the logout event
+    # the route emits will be attributed to the dev user, not `user`.
+    await sample_user_factory(email="logout@test.com", cognito_sub="logout-test-sub")
 
     # Mock httpx.AsyncClient.post for global sign-out call
     mock_response = MagicMock()
@@ -108,15 +122,24 @@ async def test_auth_logout_emits_logout_event(monkeypatch, pg_session, sample_us
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda: mock_client)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        # Set a refresh cookie
-        c.cookies.set("refresh", "some-refresh-token")
+    async def _yield_pg_session():
+        yield pg_session
 
-        r = await c.post("/api/v1/auth/logout")
-        assert r.status_code == 200
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            # Set a refresh cookie
+            c.cookies.set("refresh", "some-refresh-token")
 
-    # Check that a usage_events row was written with kind='logout'
-    stmt = select(UsageEvent).where(UsageEvent.kind == "logout").where(UsageEvent.user_id == user.id)
+            r = await c.post("/api/v1/auth/logout")
+            assert r.status_code == 200
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+    # Check that a usage_events row was written with kind='logout'.
+    # Don't filter by user_id: dev-bypass attributes the event to the
+    # hard-coded dev user, not the factory user.
+    stmt = select(UsageEvent).where(UsageEvent.kind == "logout")
     result = await pg_session.execute(stmt)
     rows = result.scalars().all()
     assert len(rows) == 1
