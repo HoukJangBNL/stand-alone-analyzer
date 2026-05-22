@@ -1,4 +1,4 @@
-"""ORM model re-exports for the v6 schema."""
+"""ORM model re-exports for the v7 schema."""
 from __future__ import annotations
 
 from flake_analysis.db.models.analysis import (
@@ -6,6 +6,12 @@ from flake_analysis.db.models.analysis import (
     PipelineStatus,
     PipelineStep,
     Run,
+)
+from flake_analysis.db.models.auth import (
+    ProjectRole,
+    ProjectUser,
+    UsageEvent,
+    UserRole,
 )
 from flake_analysis.db.models.catalog import Model, Scan
 from flake_analysis.db.models.domain_branch import (
@@ -37,11 +43,15 @@ __all__ = [
     "Model",
     "PipelineStatus",
     "PipelineStep",
+    "ProjectRole",
+    "ProjectUser",
     "Run",
     "Scan",
     "UploadItem",
     "UploadItemStatus",
     "UploadSession",
     "UploadSessionStatus",
+    "UsageEvent",
     "User",
+    "UserRole",
 ]

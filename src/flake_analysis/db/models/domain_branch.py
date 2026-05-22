@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
@@ -16,6 +17,7 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB, REAL
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from flake_analysis.db.base import Base
@@ -69,8 +71,8 @@ class DomainAnalysis(Base):
         nullable=False,
         server_default=text("NOW()"),
     )
-    created_by_id: Mapped[int | None] = mapped_column(
-        BigInteger,
+    created_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
         ForeignKey("users.id"),
     )
 

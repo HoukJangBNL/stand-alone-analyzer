@@ -4,20 +4,22 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING
+from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
+    CHAR,
     DateTime,
     ForeignKey,
     Index,
     Integer,
-    String,
     Text,
     UniqueConstraint,
     text,
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import REAL
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from flake_analysis.db.base import Base
@@ -86,8 +88,8 @@ class UploadSession(Base):
         nullable=False,
         server_default=text("NOW()"),
     )
-    created_by_id: Mapped[int | None] = mapped_column(
-        BigInteger,
+    created_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
         ForeignKey("users.id"),
     )
 
@@ -121,7 +123,7 @@ class Image(Base):
         ForeignKey("scans.id", ondelete="CASCADE"),
         nullable=False,
     )
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     s3_uri: Mapped[str] = mapped_column(Text, nullable=False)
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -166,7 +168,7 @@ class UploadItem(Base):
         ForeignKey("upload_sessions.id", ondelete="CASCADE"),
         nullable=False,
     )
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    sha256: Mapped[str] = mapped_column(CHAR(64), nullable=False)
     filename: Mapped[str] = mapped_column(Text, nullable=False)
     size_bytes: Mapped[int | None] = mapped_column(BigInteger)
     status: Mapped[UploadItemStatus] = mapped_column(

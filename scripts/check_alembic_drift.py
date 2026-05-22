@@ -12,6 +12,7 @@ from alembic.migration import MigrationContext
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from flake_analysis.db import Base, get_db_url
+import flake_analysis.db.models  # noqa: F401  # register all ORM tables on Base.metadata
 
 
 async def compute_drift(engine: AsyncEngine, metadata) -> list[Any]:

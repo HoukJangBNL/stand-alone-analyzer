@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Literal
+from uuid import UUID
 
 from sqlalchemy import (
     BigInteger,
@@ -20,6 +21,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB, REAL
+from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from flake_analysis.db.base import Base
@@ -102,6 +104,8 @@ class Analysis(Base):
     # path automatically pulls the value PostgreSQL just computed. We therefore
     # do NOT pass server_default=FetchedValue() / server_onupdate=FetchedValue()
     # explicitly — SQLAlchemy raises ArgumentError if a Computed column does.
+    # nullable=True to match v6 DDL (Postgres can't infer NOT NULL from a
+     # GENERATED ALWAYS expression even though our CASE always returns a value).
     status: Mapped[PipelineStatus] = mapped_column(
         _pipeline_status_enum,
         Computed(
@@ -120,7 +124,6 @@ class Analysis(Base):
             """,
             persisted=True,
         ),
-        nullable=False,
     )
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
@@ -133,8 +136,8 @@ class Analysis(Base):
         nullable=False,
         server_default=text("NOW()"),
     )
-    created_by_id: Mapped[int | None] = mapped_column(
-        BigInteger,
+    created_by_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
         ForeignKey("users.id"),
     )
 
