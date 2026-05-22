@@ -7,8 +7,10 @@ from typing import Annotated
 import httpx
 from fastapi import APIRouter, Body, Cookie, Depends, Response
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from flake_analysis.api.auth import User, get_current_user
+from flake_analysis.api.deps import get_db_session
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -59,12 +61,15 @@ async def get_me(user: Annotated[User, Depends(get_current_user)]) -> AuthMeResp
 @router.post("/callback")
 async def auth_callback(
     req: AuthCallbackRequest = Body(...),
+    session: Annotated[AsyncSession, Depends(get_db_session)] = None,
 ) -> AuthCallbackResponse:
     """Exchange authorization code for tokens and set refresh cookie.
 
     Calls Cognito's oauth2/token endpoint with the authorization code.
     Returns the id_token and user profile, and sets a refresh token
     as an HttpOnly, Secure, SameSite=Lax cookie.
+
+    Upserts the user in the DB and emits a login usage event.
     """
     domain = os.environ["SAA_COGNITO_HOSTED_UI_DOMAIN"]
     client_id = os.environ["SAA_COGNITO_APP_CLIENT_ID"]
@@ -94,13 +99,33 @@ async def auth_callback(
 
     id_token_claims = jwt.get_unverified_claims(tokens["id_token"])
 
+    # Upsert user in DB
+    from flake_analysis.api.auth.users import upsert_from_claims
+
+    user_model = await upsert_from_claims(session, id_token_claims)
+
+    # Emit login usage event
+    from flake_analysis.api.services.usage import emit
+    from flake_analysis.db.models.auth import UserRole
+
+    # Convert ORM user to domain User for emit
+    domain_user = User(
+        id=user_model.id,
+        email=user_model.email,
+        cognito_sub=user_model.cognito_sub,
+        role=user_model.role,
+        email_verified=user_model.email_verified_at is not None,
+    )
+    await emit(session, domain_user, "login")
+    await session.commit()
+
     # Build user response
     user_data = AuthMeResponse(
-        id=id_token_claims["sub"],
-        email=id_token_claims.get("email", ""),
-        role="member",  # New users always start as member
-        email_verified=id_token_claims.get("email_verified", False),
-        cognito_sub=id_token_claims["sub"],
+        id=str(user_model.id),
+        email=user_model.email,
+        role=user_model.role.value,
+        email_verified=user_model.email_verified_at is not None,
+        cognito_sub=user_model.cognito_sub,
     )
 
     # Create response with refresh cookie
@@ -128,13 +153,23 @@ async def auth_callback(
 
 @router.post("/logout")
 async def auth_logout(
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
     refresh: Annotated[str | None, Cookie()] = None,
 ) -> AuthLogoutResponse:
     """Clear refresh cookie and call Cognito global sign-out.
 
     Clears the refresh cookie by setting Max-Age=0, and calls Cognito's
     global sign-out endpoint if a refresh token is present.
+
+    Emits a logout usage event for the current user.
     """
+    # Emit logout usage event
+    from flake_analysis.api.services.usage import emit
+
+    await emit(session, user, "logout")
+    await session.commit()
+
     response = Response(
         content=AuthLogoutResponse(success=True).model_dump_json(),
         media_type="application/json",
@@ -169,8 +204,5 @@ async def auth_logout(
             except Exception:
                 # Best-effort sign-out; don't fail if Cognito is unreachable
                 pass
-
-    # TODO(W6.4): emit usage event
-    # usage.emit(kind='logout', user_id=...)
 
     return response

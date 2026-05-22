@@ -1,4 +1,4 @@
-"""Route tests for /auth/me, /auth/callback, /auth/logout (W6.2.5)."""
+"""Usage event tests for /auth routes (W6.4.2)."""
 from __future__ import annotations
 
 import time
@@ -6,45 +6,17 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 
 from flake_analysis.api.main import app
+from flake_analysis.db.models import UsageEvent
+
+pytestmark = pytest.mark.pg
 
 
 @pytest.mark.asyncio
-@pytest.mark.pg
-async def test_auth_me_returns_user(signed_token, monkeypatch, pg_session):
-    """GET /auth/me with valid token returns user profile."""
-    # Disable dev bypass for this test
-    monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "0")
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get(
-            "/api/v1/auth/me",
-            headers={"Authorization": f"Bearer {signed_token}"},
-        )
-        assert r.status_code == 200
-        data = r.json()
-        assert data["email"] == "test@example.com"
-        assert data["cognito_sub"] == "test-user-1"
-        assert data["email_verified"] is True
-        assert "id" in data
-        assert "role" in data
-
-
-@pytest.mark.asyncio
-async def test_auth_me_rejects_missing_token(monkeypatch):
-    """GET /auth/me without Authorization header returns 401."""
-    monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "0")
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/api/v1/auth/me")
-        assert r.status_code == 401
-
-
-@pytest.mark.asyncio
-@pytest.mark.pg
-async def test_auth_callback_exchanges_code(monkeypatch, rsa_key, pg_session):
-    """POST /auth/callback exchanges code for tokens and sets refresh cookie."""
+async def test_auth_callback_emits_login_event(monkeypatch, rsa_key, pg_session):
+    """POST /auth/callback writes a usage_events row with kind='login'."""
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "0")
     monkeypatch.setenv("SAA_COGNITO_HOSTED_UI_DOMAIN", "https://test.auth.example.com")
     monkeypatch.setenv("SAA_COGNITO_APP_CLIENT_ID", "test-client-id")
@@ -61,8 +33,8 @@ async def test_auth_callback_exchanges_code(monkeypatch, rsa_key, pg_session):
 
     fake_id_token = jwt.encode(
         {
-            "sub": "callback-test-user",
-            "email": "callback@test.com",
+            "sub": "login-test-user",
+            "email": "login@test.com",
             "email_verified": True,
             "aud": "test-client-id",
             "iss": "https://test.example/pool",
@@ -104,29 +76,24 @@ async def test_auth_callback_exchanges_code(monkeypatch, rsa_key, pg_session):
             },
         )
         assert r.status_code == 200
-        data = r.json()
-        assert data["id_token"] == fake_id_token
-        assert data["expires_in"] == 3600
-        assert data["user"]["email"] == "callback@test.com"
-        assert data["user"]["cognito_sub"] == "callback-test-user"
-        # Check that refresh cookie is set
-        cookies = r.cookies
-        assert "refresh" in cookies
-        refresh_cookie = cookies["refresh"]
-        assert refresh_cookie == "fake-refresh-token"
+
+    # Check that a usage_events row was written with kind='login'
+    stmt = select(UsageEvent).where(UsageEvent.kind == "login")
+    result = await pg_session.execute(stmt)
+    rows = result.scalars().all()
+    assert len(rows) == 1
+    assert rows[0].kind == "login"
 
 
 @pytest.mark.asyncio
-@pytest.mark.pg
-async def test_auth_logout_clears_refresh_cookie(monkeypatch, pg_session, sample_user_factory):
-    """POST /auth/logout clears refresh cookie and returns success."""
-    # Use dev bypass mode so we can use the default dev user
+async def test_auth_logout_emits_logout_event(monkeypatch, pg_session, sample_user_factory):
+    """POST /auth/logout writes a usage_events row with kind='logout'."""
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
     monkeypatch.setenv("SAA_COGNITO_HOSTED_UI_DOMAIN", "https://test.auth.example.com")
     monkeypatch.setenv("SAA_COGNITO_APP_CLIENT_ID", "test-client-id")
 
-    # Create a user for dev bypass to find
-    await sample_user_factory(email="dev@example.com", cognito_sub="dev-user")
+    # Create a user in the DB for dev bypass mode to pick up
+    user = await sample_user_factory(email="logout@test.com", cognito_sub="logout-test-sub")
 
     # Mock httpx.AsyncClient.post for global sign-out call
     mock_response = MagicMock()
@@ -142,14 +109,15 @@ async def test_auth_logout_clears_refresh_cookie(monkeypatch, pg_session, sample
     monkeypatch.setattr(httpx, "AsyncClient", lambda: mock_client)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        # Set a refresh cookie first
+        # Set a refresh cookie
         c.cookies.set("refresh", "some-refresh-token")
 
         r = await c.post("/api/v1/auth/logout")
         assert r.status_code == 200
-        data = r.json()
-        assert data["success"] is True
 
-        # Check that refresh cookie is cleared (max-age=0)
-        set_cookie_headers = r.headers.get_list("set-cookie")
-        assert any("refresh=" in h and "Max-Age=0" in h for h in set_cookie_headers)
+    # Check that a usage_events row was written with kind='logout'
+    stmt = select(UsageEvent).where(UsageEvent.kind == "logout").where(UsageEvent.user_id == user.id)
+    result = await pg_session.execute(stmt)
+    rows = result.scalars().all()
+    assert len(rows) == 1
+    assert rows[0].kind == "logout"
