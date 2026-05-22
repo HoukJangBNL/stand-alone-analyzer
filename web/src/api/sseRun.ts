@@ -7,6 +7,7 @@
  * itself, not the response status.
  */
 import { ApiError } from '@/api/selector'
+import { getAuthHeaders } from '@/api/authHeaders'
 
 export async function postSseRun(
   projectId: string,
@@ -16,7 +17,8 @@ export async function postSseRun(
 ): Promise<Response> {
   const response = await fetch(`/api/v1/projects/${projectId}/run/${step}`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...getAuthHeaders() },
+    credentials: 'include',
     body: JSON.stringify(body),
     signal,
   })

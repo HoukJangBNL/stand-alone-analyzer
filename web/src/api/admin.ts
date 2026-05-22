@@ -1,5 +1,6 @@
 // web/src/api/admin.ts
 import { ApiError } from '@/api/selector'
+import { getAuthHeaders } from '@/api/authHeaders'
 import type { UserRole } from '@/api/auth'
 
 async function unwrap<T>(resp: Response): Promise<T> {
@@ -49,7 +50,7 @@ export async function fetchUsage(params?: UsageQueryParams): Promise<UsageEvent[
   if (params?.aggregate) query.set('aggregate', 'true')
 
   const resp = await fetch(`/api/v1/admin/usage?${query}`, {
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...getAuthHeaders() },
     credentials: 'include',
   })
   return unwrap<UsageEvent[]>(resp)
@@ -58,7 +59,7 @@ export async function fetchUsage(params?: UsageQueryParams): Promise<UsageEvent[
 export async function updateUserRole(userId: string, role: UserRole): Promise<void> {
   const resp = await fetch(`/api/v1/admin/users/${userId}/role`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...getAuthHeaders() },
     credentials: 'include',
     body: JSON.stringify({ role }),
   })
@@ -70,6 +71,7 @@ export async function updateUserRole(userId: string, role: UserRole): Promise<vo
 export async function deactivateUser(userId: string): Promise<void> {
   const resp = await fetch(`/api/v1/admin/users/${userId}/deactivate`, {
     method: 'POST',
+    headers: getAuthHeaders(),
     credentials: 'include',
   })
   if (!resp.ok) {
@@ -80,6 +82,7 @@ export async function deactivateUser(userId: string): Promise<void> {
 export async function reactivateUser(userId: string): Promise<void> {
   const resp = await fetch(`/api/v1/admin/users/${userId}/reactivate`, {
     method: 'POST',
+    headers: getAuthHeaders(),
     credentials: 'include',
   })
   if (!resp.ok) {
@@ -96,7 +99,7 @@ export async function updateProjectAcl(
 ): Promise<void> {
   const resp = await fetch(`/api/v1/admin/projects/${projectId}/acl`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...getAuthHeaders() },
     credentials: 'include',
     body: JSON.stringify({ user_id: userId, project_role: projectRole }),
   })
@@ -108,6 +111,7 @@ export async function updateProjectAcl(
 export async function deleteProjectAcl(projectId: string, userId: string): Promise<void> {
   const resp = await fetch(`/api/v1/admin/projects/${projectId}/acl/${userId}`, {
     method: 'DELETE',
+    headers: getAuthHeaders(),
     credentials: 'include',
   })
   if (!resp.ok) {

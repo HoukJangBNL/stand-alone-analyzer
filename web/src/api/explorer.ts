@@ -1,5 +1,6 @@
 // web/src/api/explorer.ts
 import { ApiError } from '@/api/selector'
+import { getAuthHeaders } from '@/api/authHeaders'
 
 async function unwrap<T>(resp: Response): Promise<T> {
   if (!resp.ok) {
@@ -86,7 +87,7 @@ export interface SaveExplorerStateResultDto {
 export async function fetchTileManifest(projectId: string): Promise<TileManifestDto> {
   const resp = await fetch(
     `/api/v1/projects/${projectId}/explorer/tile_manifest`,
-    { headers: { Accept: 'application/json' } }
+    { headers: { Accept: 'application/json', ...getAuthHeaders() }, credentials: 'include' }
   )
   return unwrap<TileManifestDto>(resp)
 }
@@ -94,7 +95,7 @@ export async function fetchTileManifest(projectId: string): Promise<TileManifest
 export async function fetchExplorerGrid(projectId: string): Promise<TileManifestDto> {
   const resp = await fetch(
     `/api/v1/projects/${projectId}/explorer/grid`,
-    { headers: { Accept: 'application/json' } }
+    { headers: { Accept: 'application/json', ...getAuthHeaders() }, credentials: 'include' }
   )
   return unwrap<TileManifestDto>(resp)
 }
@@ -117,7 +118,7 @@ export async function fetchExplorerFlakes(
   if (q.sizeMax !== null) params.set('size_max', String(q.sizeMax))
   const qs = params.toString()
   const url = `/api/v1/projects/${projectId}/explorer/flakes${qs ? `?${qs}` : ''}`
-  const resp = await fetch(url, { headers: { Accept: 'application/json' } })
+  const resp = await fetch(url, { headers: { Accept: 'application/json', ...getAuthHeaders() }, credentials: 'include' })
   return unwrap<ExplorerFlakesResponseDto>(resp)
 }
 
@@ -127,7 +128,7 @@ export async function fetchExplorerFlakeDetail(
 ): Promise<ExplorerFlakeDetailDto> {
   const resp = await fetch(
     `/api/v1/projects/${projectId}/explorer/flake/${flakeId}`,
-    { headers: { Accept: 'application/json' } }
+    { headers: { Accept: 'application/json', ...getAuthHeaders() }, credentials: 'include' }
   )
   return unwrap<ExplorerFlakeDetailDto>(resp)
 }
@@ -140,7 +141,8 @@ export async function saveExplorerState(
     `/api/v1/projects/${projectId}/run/explorer/save_state`,
     {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...getAuthHeaders() },
+      credentials: 'include',
       body: JSON.stringify(body),
     }
   )
@@ -150,7 +152,7 @@ export async function saveExplorerState(
 export async function getExplorerState(projectId: string): Promise<any> {
   const resp = await fetch(
     `/api/v1/projects/${projectId}/run/explorer/state`,
-    { headers: { Accept: 'application/json' } }
+    { headers: { Accept: 'application/json', ...getAuthHeaders() }, credentials: 'include' }
   )
   return unwrap<any>(resp)
 }

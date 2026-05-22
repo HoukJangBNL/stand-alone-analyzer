@@ -1,5 +1,6 @@
 // web/src/api/clustering.ts
 import { ApiError } from '@/api/selector'
+import { getAuthHeaders } from '@/api/authHeaders'
 
 async function unwrap<T>(resp: Response): Promise<T> {
   if (!resp.ok) {
@@ -72,7 +73,7 @@ export interface ApplyThresholdsBody {
 export async function fetchClusteringLabels(projectId: string): Promise<LabelsJson> {
   const resp = await fetch(
     `/api/v1/projects/${projectId}/data/clustering/labels`,
-    { headers: { Accept: 'application/json' } }
+    { headers: { Accept: 'application/json', ...getAuthHeaders() }, credentials: 'include' }
   )
   return unwrap<LabelsJson>(resp)
 }
@@ -82,7 +83,7 @@ export async function fetchClusteringAssignments(
 ): Promise<AssignmentsRows> {
   const resp = await fetch(
     `/api/v1/projects/${projectId}/data/clustering/assignments`,
-    { headers: { Accept: 'application/json' } }
+    { headers: { Accept: 'application/json', ...getAuthHeaders() }, credentials: 'include' }
   )
   return unwrap<AssignmentsRows>(resp)
 }
@@ -92,7 +93,7 @@ export async function fetchClusteringSeedGroups(
 ): Promise<SeedGroupDto[]> {
   const resp = await fetch(
     `/api/v1/projects/${projectId}/data/clustering/seed_groups`,
-    { headers: { Accept: 'application/json' } }
+    { headers: { Accept: 'application/json', ...getAuthHeaders() }, credentials: 'include' }
   )
   return unwrap<SeedGroupDto[]>(resp)
 }

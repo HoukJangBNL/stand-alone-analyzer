@@ -3,6 +3,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { App } from '@/App'
+import { useAuthStore } from '@/state/authSlice'
 
 vi.mock('openseadragon', () => ({
   default: vi.fn(() => ({
@@ -34,6 +35,12 @@ describe('App route registration — Explorer', () => {
       )
     )
     window.history.pushState({}, '', '/projects/local/explorer')
+    useAuthStore.setState({
+      status: 'authenticated',
+      currentUser: { id: 'u1', email: 'test@example.com', role: 'member', email_verified: true },
+      idToken: 'tok',
+      error: null,
+    })
   })
 
   it('renders ExplorerTab when navigating to /projects/local/explorer', async () => {

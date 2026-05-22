@@ -6,6 +6,7 @@
  * onError / isError contract clean.
  */
 
+import { getAuthHeaders } from '@/api/authHeaders'
 import type { SelectorApiParams } from '@/state/selectorSlice'
 
 export class ApiError extends Error {
@@ -64,7 +65,8 @@ export interface DomainStats {
 
 export async function fetchDomainStats(projectId: string): Promise<DomainStats> {
   const resp = await fetch(`/api/v1/projects/${projectId}/data/domain_stats`, {
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...getAuthHeaders() },
+    credentials: 'include',
   })
   return unwrap<DomainStats>(resp)
 }
@@ -76,7 +78,8 @@ export interface SelectionRows {
 
 export async function fetchSelection(projectId: string): Promise<SelectionRows> {
   const resp = await fetch(`/api/v1/projects/${projectId}/data/selector/selection`, {
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...getAuthHeaders() },
+    credentials: 'include',
   })
   return unwrap<SelectionRows>(resp)
 }
@@ -101,7 +104,8 @@ export async function postCommit(
 ): Promise<CommitSummary> {
   const resp = await fetch(`/api/v1/projects/${projectId}/selector/commit`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...getAuthHeaders() },
+    credentials: 'include',
     body: JSON.stringify(body),
   })
   return unwrap<CommitSummary>(resp)

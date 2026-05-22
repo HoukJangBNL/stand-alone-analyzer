@@ -2,8 +2,14 @@ import { lazy, Suspense, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useParams, useNavigate } from 'react-router-dom'
 import { Toaster } from 'sonner'
 import { ComputeTab } from './pages/ComputeTab'
+import { LoginPage } from './pages/LoginPage'
+import { SignupPage } from './pages/SignupPage'
+import { AdminPage } from './pages/AdminPage'
 import { Sidebar } from '@/components/Sidebar'
+import { RequireAuth } from '@/components/auth/RequireAuth'
+import { RequireRole } from '@/components/auth/RequireRole'
 import { useProjectStore } from '@/state/projectSlice'
+import { useCurrentUser } from '@/hooks/useCurrentUser'
 
 const SelectorTab = lazy(() =>
   import('@/pages/SelectorTab').then((m) => ({ default: m.SelectorTab }))
@@ -67,6 +73,84 @@ function HomeRedirect() {
   return null
 }
 
+function AppContent() {
+  useCurrentUser()
+  return (
+    <div
+      data-testid="app-root-layout"
+      style={{
+        display: 'grid',
+        gridTemplateColumns: '220px 1fr',
+        minHeight: '100vh',
+      }}
+    >
+      <Sidebar />
+      <main style={{ padding: '20px', minWidth: 0 }}>
+        <h1>Stand-Alone Analyzer</h1>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/signup" element={<SignupPage />} />
+          <Route
+            path="/admin"
+            element={
+              <RequireAuth>
+                <RequireRole role="admin">
+                  <AdminPage />
+                </RequireRole>
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/"
+            element={
+              <RequireAuth>
+                <HomeRedirect />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/projects/:projectId/compute"
+            element={
+              <RequireAuth>
+                <ProjectSync />
+                <ComputeTab />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/projects/:projectId/selector"
+            element={
+              <RequireAuth>
+                <ProjectSync />
+                <SelectorTabRoute />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/projects/:projectId/clustering"
+            element={
+              <RequireAuth>
+                <ProjectSync />
+                <ClusteringTabRoute />
+              </RequireAuth>
+            }
+          />
+          <Route
+            path="/projects/:projectId/explorer"
+            element={
+              <RequireAuth>
+                <ProjectSync />
+                <ExplorerTabRoute />
+              </RequireAuth>
+            }
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </main>
+    </div>
+  )
+}
+
 export function App() {
   return (
     <BrowserRouter>
@@ -76,59 +160,7 @@ export function App() {
         richColors
         closeButton
       />
-      <div
-        data-testid="app-root-layout"
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '220px 1fr',
-          minHeight: '100vh',
-        }}
-      >
-        <Sidebar />
-        <main style={{ padding: '20px', minWidth: 0 }}>
-          <h1>Stand-Alone Analyzer</h1>
-          <Routes>
-            <Route path="/" element={<HomeRedirect />} />
-            <Route
-              path="/projects/:projectId/compute"
-              element={
-                <>
-                  <ProjectSync />
-                  <ComputeTab />
-                </>
-              }
-            />
-            <Route
-              path="/projects/:projectId/selector"
-              element={
-                <>
-                  <ProjectSync />
-                  <SelectorTabRoute />
-                </>
-              }
-            />
-            <Route
-              path="/projects/:projectId/clustering"
-              element={
-                <>
-                  <ProjectSync />
-                  <ClusteringTabRoute />
-                </>
-              }
-            />
-            <Route
-              path="/projects/:projectId/explorer"
-              element={
-                <>
-                  <ProjectSync />
-                  <ExplorerTabRoute />
-                </>
-              }
-            />
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </main>
-      </div>
+      <AppContent />
     </BrowserRouter>
   )
 }

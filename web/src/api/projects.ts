@@ -1,5 +1,6 @@
 // web/src/api/projects.ts
 import { ApiError } from '@/api/selector'
+import { getAuthHeaders } from '@/api/authHeaders'
 
 export interface ProjectHandle {
   project_id: string
@@ -53,7 +54,10 @@ async function unwrap<T>(resp: Response): Promise<T> {
  * single-element list. When backend W2.1 ships the real list, no caller change.
  */
 export async function fetchProjects(): Promise<ProjectHandle[]> {
-  const resp = await fetch('/api/v1/projects', { headers: { Accept: 'application/json' } })
+  const resp = await fetch('/api/v1/projects', {
+    headers: { Accept: 'application/json', ...getAuthHeaders() },
+    credentials: 'include',
+  })
   // Backend currently exposes only POST /projects (no list yet). FastAPI replies
   // 405 for GET on a path with another method, 404 if the path is absent — both
   // mean "no list endpoint", fall back to the single active project.
@@ -66,7 +70,8 @@ export async function fetchProjects(): Promise<ProjectHandle[]> {
 
 export async function fetchActiveProject(): Promise<ProjectHandle> {
   const resp = await fetch('/api/v1/projects/active', {
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...getAuthHeaders() },
+    credentials: 'include',
   })
   return unwrap<ProjectHandle>(resp)
 }
@@ -74,7 +79,8 @@ export async function fetchActiveProject(): Promise<ProjectHandle> {
 export async function createProject(body: CreateProjectBody): Promise<ProjectHandle> {
   const resp = await fetch('/api/v1/projects', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+    headers: { 'Content-Type': 'application/json', Accept: 'application/json', ...getAuthHeaders() },
+    credentials: 'include',
     body: JSON.stringify(body),
   })
   return unwrap<ProjectHandle>(resp)
