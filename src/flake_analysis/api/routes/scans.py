@@ -4,14 +4,18 @@ from __future__ import annotations
 import os
 from typing import Annotated
 
+from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_db_session
 from flake_analysis.api.schemas.upload import (
+    CompleteRequest,
+    CompleteResponse,
     CreateScanRequest,
     PresignRequest,
     PresignResponse,
@@ -19,7 +23,7 @@ from flake_analysis.api.schemas.upload import (
 )
 from flake_analysis.api.services import s3_presign, upload_service
 from flake_analysis.db.models import Scan
-from flake_analysis.db.models.upload import Image, UploadItem
+from flake_analysis.db.models.upload import Image, UploadItem, UploadItemStatus
 
 router = APIRouter(tags=["scans"])
 
@@ -170,3 +174,79 @@ async def presign_image_put(
         upload_item_id=item.id,
         s3_uri=s3_uri,
     )
+
+
+@router.post(
+    "/scans/{scan_id}/images/{upload_item_id}/complete",
+    response_model=CompleteResponse,
+)
+async def complete_image(
+    scan_id: int,
+    upload_item_id: int,
+    req: CompleteRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> CompleteResponse:
+    """Promote a pending upload_item to a canonical images row.
+
+    Idempotent: if the upload_item is already UPLOADED with image_id set,
+    return that image_id without re-running head_object or re-inserting.
+    """
+    bucket = os.environ.get("SAA_S3_BUCKET")
+    if not bucket:
+        raise HTTPException(status_code=500, detail="SAA_S3_BUCKET not configured")
+
+    item = (await session.execute(
+        select(UploadItem)
+        .options(selectinload(UploadItem.session))
+        .where(UploadItem.id == upload_item_id)
+    )).scalar_one_or_none()
+    if item is None:
+        raise HTTPException(status_code=404, detail=f"upload_item {upload_item_id} not found")
+    if item.session.scan_id != scan_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"upload_item {upload_item_id} does not belong to scan {scan_id}",
+        )
+
+    # Idempotency short-circuit
+    if item.status == UploadItemStatus.UPLOADED and item.image_id is not None:
+        return CompleteResponse(image_id=item.image_id)
+
+    # Verify the S3 object exists
+    if item.s3_uri is None or not item.s3_uri.startswith(f"s3://{bucket}/"):
+        raise HTTPException(status_code=409, detail="upload_item has invalid s3_uri")
+    key = item.s3_uri[len(f"s3://{bucket}/"):]
+    try:
+        s3_presign.head_object(bucket=bucket, key=key)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("404", "NoSuchKey", "NotFound"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"S3 object {key} not found - upload did not complete",
+            ) from exc
+        raise HTTPException(status_code=500, detail=f"S3 head_object failed: {code}") from exc
+
+    # Insert canonical Image row
+    image = Image(
+        scan_id=scan_id,
+        sha256=item.sha256,
+        s3_uri=item.s3_uri,
+        width=req.width,
+        height=req.height,
+        filename=item.filename,
+        grid_ix=item.grid_ix if item.grid_ix is not None else 0,
+        grid_iy=item.grid_iy if item.grid_iy is not None else 0,
+    )
+    session.add(image)
+    try:
+        await session.flush()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail=f"image insert conflict: {exc.orig}") from exc
+
+    item.status = UploadItemStatus.UPLOADED
+    item.image_id = image.id
+    await session.commit()
+    return CompleteResponse(image_id=image.id)
