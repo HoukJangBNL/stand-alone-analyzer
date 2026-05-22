@@ -1,0 +1,22 @@
+{
+  "Rules": [
+    {
+      "ID": "dev-expire-30d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "dev/"},
+      "Expiration": {"Days": 30}
+    },
+    {
+      "ID": "abort-multipart-7d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": ""},
+      "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 7}
+    },
+    {
+      "ID": "dev-uploads-pending-1d",
+      "Status": "Enabled",
+      "Filter": {"Prefix": "dev/uploads-pending/"},
+      "Expiration": {"Days": 1}
+    }
+  ]
+}
