@@ -1,7 +1,7 @@
 """Test admin routes (role management, ACL, deactivation)."""
 import pytest
 from uuid import uuid4
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from flake_analysis.api.auth import User
 from flake_analysis.api.main import create_app
@@ -59,11 +59,11 @@ async def test_admin_change_role_happy_path(pg_session, admin_user) -> None:
     app.dependency_overrides[get_current_user] = lambda: admin_user
     app.dependency_overrides[get_db_session] = lambda: pg_session
 
-    client = TestClient(app)
-    resp = client.post(
-        f"/api/v1/admin/users/{target_id}/role",
-        json={"role": "operator"},
-    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/v1/admin/users/{target_id}/role",
+            json={"role": "operator"},
+        )
     assert resp.status_code == 200
     assert resp.json()["role"] == "operator"
 
@@ -90,15 +90,16 @@ async def test_admin_change_role_rejects_non_admin(member_user) -> None:
 
     app.dependency_overrides[get_db_session] = mock_db
 
-    client = TestClient(app)
-    resp = client.post(
-        f"/api/v1/admin/users/{uuid4()}/role",
-        json={"role": "admin"},
-    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/v1/admin/users/{uuid4()}/role",
+            json={"role": "admin"},
+        )
     assert resp.status_code == 403
 
 
-def test_admin_change_role_rejects_self_demotion(admin_user) -> None:
+@pytest.mark.asyncio
+async def test_admin_change_role_rejects_self_demotion(admin_user) -> None:
     """Admin cannot demote themselves below admin."""
     from flake_analysis.api.auth import get_current_user
     from flake_analysis.api.deps import get_db_session
@@ -115,11 +116,11 @@ def test_admin_change_role_rejects_self_demotion(admin_user) -> None:
 
     app.dependency_overrides[get_db_session] = mock_db
 
-    client = TestClient(app)
-    resp = client.post(
-        f"/api/v1/admin/users/{admin_user.id}/role",
-        json={"role": "member"},
-    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            f"/api/v1/admin/users/{admin_user.id}/role",
+            json={"role": "member"},
+        )
     assert resp.status_code == 400
     assert "Cannot demote yourself" in resp.json()["detail"]
 
@@ -150,8 +151,8 @@ async def test_admin_deactivate_user(pg_session, admin_user) -> None:
     app.dependency_overrides[get_current_user] = lambda: admin_user
     app.dependency_overrides[get_db_session] = lambda: pg_session
 
-    client = TestClient(app)
-    resp = client.post(f"/api/v1/admin/users/{target_id}/deactivate")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(f"/api/v1/admin/users/{target_id}/deactivate")
     assert resp.status_code == 200
 
     # Verify deactivated_at is set
@@ -159,7 +160,8 @@ async def test_admin_deactivate_user(pg_session, admin_user) -> None:
     assert target_user.deactivated_at is not None
 
 
-def test_admin_deactivate_rejects_self(admin_user) -> None:
+@pytest.mark.asyncio
+async def test_admin_deactivate_rejects_self(admin_user) -> None:
     """Admin cannot deactivate themselves."""
     from flake_analysis.api.auth import get_current_user
     from flake_analysis.api.deps import get_db_session
@@ -175,8 +177,8 @@ def test_admin_deactivate_rejects_self(admin_user) -> None:
 
     app.dependency_overrides[get_db_session] = mock_db
 
-    client = TestClient(app)
-    resp = client.post(f"/api/v1/admin/users/{admin_user.id}/deactivate")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(f"/api/v1/admin/users/{admin_user.id}/deactivate")
     assert resp.status_code == 400
     assert "Cannot deactivate yourself" in resp.json()["detail"]
 
@@ -206,8 +208,8 @@ async def test_admin_reactivate_user(pg_session, admin_user) -> None:
     app.dependency_overrides[get_current_user] = lambda: admin_user
     app.dependency_overrides[get_db_session] = lambda: pg_session
 
-    client = TestClient(app)
-    resp = client.post(f"/api/v1/admin/users/{target_id}/reactivate")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(f"/api/v1/admin/users/{target_id}/reactivate")
     assert resp.status_code == 200
 
     # Verify deactivated_at is cleared
@@ -243,11 +245,11 @@ async def test_admin_grant_acl(pg_session, admin_user) -> None:
     app.dependency_overrides[get_current_user] = lambda: admin_user
     app.dependency_overrides[get_db_session] = lambda: pg_session
 
-    client = TestClient(app)
-    resp = client.post(
-        "/api/v1/admin/projects/test-proj/acl",
-        json={"user_id": str(target_id), "project_role": "viewer"},
-    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/admin/projects/test-proj/acl",
+            json={"user_id": str(target_id), "project_role": "viewer"},
+        )
     assert resp.status_code == 200
 
     # Verify ACL row created
@@ -279,11 +281,11 @@ async def test_admin_grant_acl_rejects_non_admin(member_user) -> None:
 
     app.dependency_overrides[get_db_session] = mock_db
 
-    client = TestClient(app)
-    resp = client.post(
-        "/api/v1/admin/projects/test-proj/acl",
-        json={"user_id": str(uuid4()), "project_role": "editor"},
-    )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.post(
+            "/api/v1/admin/projects/test-proj/acl",
+            json={"user_id": str(uuid4()), "project_role": "editor"},
+        )
     assert resp.status_code == 403
 
 
@@ -320,8 +322,8 @@ async def test_admin_revoke_acl(pg_session, admin_user) -> None:
     app.dependency_overrides[get_current_user] = lambda: admin_user
     app.dependency_overrides[get_db_session] = lambda: pg_session
 
-    client = TestClient(app)
-    resp = client.delete(f"/api/v1/admin/projects/test-proj/acl/{target_id}")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        resp = await c.delete(f"/api/v1/admin/projects/test-proj/acl/{target_id}")
     assert resp.status_code == 200
 
     # Verify ACL row deleted
