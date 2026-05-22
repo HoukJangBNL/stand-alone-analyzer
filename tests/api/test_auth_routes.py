@@ -45,6 +45,8 @@ async def test_auth_me_rejects_missing_token(monkeypatch):
 @pytest.mark.pg
 async def test_auth_callback_exchanges_code(monkeypatch, rsa_key, pg_session):
     """POST /auth/callback exchanges code for tokens and sets refresh cookie."""
+    from flake_analysis.api.deps import get_db_session
+
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "0")
     monkeypatch.setenv("SAA_COGNITO_HOSTED_UI_DOMAIN", "https://test.auth.example.com")
     monkeypatch.setenv("SAA_COGNITO_APP_CLIENT_ID", "test-client-id")
@@ -95,25 +97,32 @@ async def test_auth_callback_exchanges_code(monkeypatch, rsa_key, pg_session):
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda: mock_client)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.post(
-            "/api/v1/auth/callback",
-            json={
-                "code": "test-auth-code",
-                "redirect_uri": "http://localhost:5173/auth/callback",
-            },
-        )
-        assert r.status_code == 200
-        data = r.json()
-        assert data["id_token"] == fake_id_token
-        assert data["expires_in"] == 3600
-        assert data["user"]["email"] == "callback@test.com"
-        assert data["user"]["cognito_sub"] == "callback-test-user"
-        # Check that refresh cookie is set
-        cookies = r.cookies
-        assert "refresh" in cookies
-        refresh_cookie = cookies["refresh"]
-        assert refresh_cookie == "fake-refresh-token"
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/auth/callback",
+                json={
+                    "code": "test-auth-code",
+                    "redirect_uri": "http://localhost:5173/auth/callback",
+                },
+            )
+            assert r.status_code == 200
+            data = r.json()
+            assert data["id_token"] == fake_id_token
+            assert data["expires_in"] == 3600
+            assert data["user"]["email"] == "callback@test.com"
+            assert data["user"]["cognito_sub"] == "callback-test-user"
+            # Check that refresh cookie is set
+            cookies = r.cookies
+            assert "refresh" in cookies
+            refresh_cookie = cookies["refresh"]
+            assert refresh_cookie == "fake-refresh-token"
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
