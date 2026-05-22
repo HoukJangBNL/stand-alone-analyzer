@@ -88,6 +88,20 @@ def upgrade() -> None:
         "WHERE email IS NOT NULL;"
     )
 
+    # Per-project ACL. ``project_id`` is TEXT because the projects table is
+    # not yet modelled (W2.x); composite PK + cascading FK to users keeps
+    # rows aligned with their owning user.
+    op.execute("""
+        CREATE TABLE project_users (
+            project_id    TEXT NOT NULL,
+            user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            project_role  project_role NOT NULL,
+            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            PRIMARY KEY (project_id, user_id)
+        );
+    """)
+    op.execute("CREATE INDEX project_users_user_idx ON project_users(user_id);")
+
 
 def downgrade() -> None:
     """Best-effort reversion to v6 shape.
@@ -96,8 +110,10 @@ def downgrade() -> None:
     (their UUID has no v6 equivalent). Existing legacy rows are preserved
     by re-issuing fresh BIGSERIAL ids.
     """
-    # Mirror upgrade in reverse: shadow table back to BIGSERIAL, rewire,
-    # drop ENUMs.
+    # Mirror upgrade in reverse: drop v7-only tables, then shadow ``users``
+    # back to BIGSERIAL, rewire, drop ENUMs.
+    op.execute("DROP TABLE IF EXISTS project_users;")
+
     op.execute("""
         CREATE TABLE users_v6 (
             id         BIGSERIAL PRIMARY KEY,
