@@ -1,0 +1,38 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyDevPrincipalsWritingProd",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": ["s3:PutObject", "s3:PutObjectTagging"],
+      "Resource": "arn:aws:s3:::qpress-uploads/prod/*",
+      "Condition": {
+        "StringEquals": {"aws:PrincipalTag/Env": "dev"}
+      }
+    },
+    {
+      "Sid": "DenyProdPrincipalsWritingDev",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": ["s3:PutObject", "s3:PutObjectTagging"],
+      "Resource": "arn:aws:s3:::qpress-uploads/dev/*",
+      "Condition": {
+        "StringEquals": {"aws:PrincipalTag/Env": "prod"}
+      }
+    },
+    {
+      "Sid": "DenyUntaggedPrincipalsWritingAnyPrefix",
+      "Effect": "Deny",
+      "Principal": "*",
+      "Action": ["s3:PutObject", "s3:PutObjectTagging"],
+      "Resource": [
+        "arn:aws:s3:::qpress-uploads/dev/*",
+        "arn:aws:s3:::qpress-uploads/prod/*"
+      ],
+      "Condition": {
+        "Null": {"aws:PrincipalTag/Env": "true"}
+      }
+    }
+  ]
+}
