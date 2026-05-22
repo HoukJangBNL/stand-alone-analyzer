@@ -14,6 +14,7 @@ from tests.db.conftest import (  # noqa: F401
     pg_session,
     pg_url,
     sample_analysis_factory,
+    sample_user_factory,
 )
 
 

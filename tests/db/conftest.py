@@ -88,3 +88,35 @@ async def sample_analysis_factory(pg_session):
         return a
 
     return _make
+
+
+@pytest_asyncio.fixture()
+async def sample_user_factory(pg_session):
+    """Insert a User row and return the User model.
+
+    Uses ``flush`` + ``refresh`` instead of ``commit`` so the per-test
+    rollback in ``pg_session`` still cleans up.
+    """
+    from flake_analysis.db.models import User, UserRole
+
+    counter = {"n": 0}
+
+    async def _make(
+        email: str | None = None,
+        role: UserRole = UserRole.MEMBER,
+        cognito_sub: str | None = None,
+    ) -> "User":
+        counter["n"] += 1
+        suffix = counter["n"]
+        u = User(
+            email=email or f"test-user-{suffix}@example.com",
+            cognito_sub=cognito_sub or f"test-cognito-sub-{suffix}",
+            role=role,
+            email_verified=True,
+        )
+        pg_session.add(u)
+        await pg_session.flush()
+        await pg_session.refresh(u)
+        return u
+
+    return _make
