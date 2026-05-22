@@ -59,33 +59,42 @@ async def test_run_thumbnails_emits_scan_run_event(
         mock_run_thumbnails_step,
     )
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.post(
-            "/api/v1/projects/test-project/run/thumbnails",
-            json={
-                "raw_ext": ".tif",
-                "quality": 85,
-                "force_recompute": False,
-            },
-        )
-        # The response is SSE stream, so we just check it started
-        assert r.status_code == 200
+    from flake_analysis.api.deps import get_db_session
 
-    # Check that a usage_events row was written with kind='scan_run'
-    # (dev-bypass user_id is DEV_BYPASS_USER_ID)
-    stmt = select(UsageEvent).where(UsageEvent.kind == "scan_run").where(
-        UsageEvent.user_id == DEV_BYPASS_USER_ID
-    )
-    result = await pg_session.execute(stmt)
-    rows = result.scalars().all()
-    assert len(rows) >= 1, "Expected at least one scan_run event for dev-bypass user"
-    # Check the most recent event
-    latest = rows[-1]
-    assert latest.kind == "scan_run"
-    assert latest.value_json is not None
-    assert "step" in latest.value_json
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.post(
+                "/api/v1/projects/test-project/run/thumbnails",
+                json={
+                    "raw_ext": ".tif",
+                    "quality": 85,
+                    "force_recompute": False,
+                },
+            )
+            # The response is SSE stream, so we just check it started
+            assert r.status_code == 200
+
+        # Check that a usage_events row was written with kind='scan_run'
+        # (dev-bypass user_id is DEV_BYPASS_USER_ID)
+        stmt = select(UsageEvent).where(UsageEvent.kind == "scan_run").where(
+            UsageEvent.user_id == DEV_BYPASS_USER_ID
+        )
+        result = await pg_session.execute(stmt)
+        rows = result.scalars().all()
+        assert len(rows) >= 1, "Expected at least one scan_run event for dev-bypass user"
+        # Check the most recent event
+        latest = rows[-1]
+        assert latest.kind == "scan_run"
+        assert latest.value_json is not None
+        assert "step" in latest.value_json
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
@@ -129,29 +138,38 @@ async def test_run_background_emits_scan_run_event(
         "flake_analysis.api.routes.run.run_background_step", mock_run_background_step
     )
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.post(
-            "/api/v1/projects/test-project/run/background",
-            json={
-                "seed": 42,
-                "max_images": 10,
-                "gaussian_sigma": 1.5,
-                "method": "robust",
-            },
-        )
-        assert r.status_code == 200
+    from flake_analysis.api.deps import get_db_session
 
-    # Check usage event (dev-bypass user_id is DEV_BYPASS_USER_ID)
-    stmt = select(UsageEvent).where(UsageEvent.kind == "scan_run").where(
-        UsageEvent.user_id == DEV_BYPASS_USER_ID
-    )
-    result = await pg_session.execute(stmt)
-    rows = result.scalars().all()
-    assert len(rows) >= 1, "Expected at least one scan_run event for dev-bypass user"
-    # Check the most recent event
-    latest = rows[-1]
-    assert latest.kind == "scan_run"
-    assert latest.value_json is not None
-    assert "step" in latest.value_json
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.post(
+                "/api/v1/projects/test-project/run/background",
+                json={
+                    "seed": 42,
+                    "max_images": 10,
+                    "gaussian_sigma": 1.5,
+                    "method": "robust",
+                },
+            )
+            assert r.status_code == 200
+
+        # Check usage event (dev-bypass user_id is DEV_BYPASS_USER_ID)
+        stmt = select(UsageEvent).where(UsageEvent.kind == "scan_run").where(
+            UsageEvent.user_id == DEV_BYPASS_USER_ID
+        )
+        result = await pg_session.execute(stmt)
+        rows = result.scalars().all()
+        assert len(rows) >= 1, "Expected at least one scan_run event for dev-bypass user"
+        # Check the most recent event
+        latest = rows[-1]
+        assert latest.kind == "scan_run"
+        assert latest.value_json is not None
+        assert "step" in latest.value_json
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
