@@ -11,6 +11,7 @@ teardown so we never leave rows behind.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from typing import AsyncIterator
 
 import pytest
@@ -112,7 +113,7 @@ async def sample_user_factory(pg_session):
             email=email or f"test-user-{suffix}@example.com",
             cognito_sub=cognito_sub or f"test-cognito-sub-{suffix}",
             role=role,
-            email_verified=True,
+            email_verified_at=datetime.now(timezone.utc),
         )
         pg_session.add(u)
         await pg_session.flush()
