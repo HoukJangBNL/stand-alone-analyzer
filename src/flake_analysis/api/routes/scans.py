@@ -6,7 +6,7 @@ from typing import Annotated
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -17,11 +17,15 @@ from flake_analysis.api.schemas.upload import (
     CompleteRequest,
     CompleteResponse,
     CreateScanRequest,
+    FinalizeResponse,
+    ImageSummary,
     PresignRequest,
     PresignResponse,
+    ScanDetailResponse,
     ScanResponse,
 )
 from flake_analysis.api.services import s3_presign, upload_service
+from flake_analysis.api.services.usage import emit as emit_usage
 from flake_analysis.db.models import Scan
 from flake_analysis.db.models.upload import Image, UploadItem, UploadItemStatus
 
@@ -250,3 +254,80 @@ async def complete_image(
     item.image_id = image.id
     await session.commit()
     return CompleteResponse(image_id=image.id)
+
+
+@router.post(
+    "/scans/{scan_id}/finalize",
+    response_model=FinalizeResponse,
+)
+async def finalize_scan(
+    scan_id: int,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> FinalizeResponse:
+    scan = (await session.execute(
+        select(Scan).where(Scan.id == scan_id)
+    )).scalar_one_or_none()
+    if scan is None:
+        raise HTTPException(status_code=404, detail=f"scan {scan_id} not found")
+
+    uploaded = (await session.execute(
+        select(func.count(Image.id)).where(Image.scan_id == scan_id)
+    )).scalar_one()
+    missing = max(scan.image_count - int(uploaded), 0)
+    if missing > 0:
+        raise HTTPException(
+            status_code=409,
+            detail={"status": "incomplete", "missing": missing,
+                    "uploaded": int(uploaded), "expected": scan.image_count},
+        )
+
+    await emit_usage(session, user, "scan_uploaded", {"scan_id": scan_id})
+    await session.commit()
+    return FinalizeResponse(status="ready", missing=0)
+
+
+@router.get(
+    "/scans/{scan_id}",
+    response_model=ScanDetailResponse,
+)
+async def get_scan(
+    scan_id: int,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ScanDetailResponse:
+    scan = (await session.execute(
+        select(Scan).where(Scan.id == scan_id)
+    )).scalar_one_or_none()
+    if scan is None:
+        raise HTTPException(status_code=404, detail=f"scan {scan_id} not found")
+
+    images = (await session.execute(
+        select(Image).where(Image.scan_id == scan_id).order_by(Image.id)
+    )).scalars().all()
+    if images:
+        ix_vals = [im.grid_ix for im in images]
+        iy_vals = [im.grid_iy for im in images]
+        ix_range: tuple[int, int] | None = (min(ix_vals), max(ix_vals))
+        iy_range: tuple[int, int] | None = (min(iy_vals), max(iy_vals))
+    else:
+        ix_range = None
+        iy_range = None
+
+    return ScanDetailResponse(
+        scan_id=scan.id,
+        name=scan.name,
+        material=scan.material,
+        image_count=scan.image_count,
+        extra_metadata=scan.extra_metadata,
+        uploaded_count=len(images),
+        grid_ix_range=ix_range,
+        grid_iy_range=iy_range,
+        images=[
+            ImageSummary(
+                image_id=im.id, grid_ix=im.grid_ix, grid_iy=im.grid_iy,
+                s3_uri=im.s3_uri, sha256=im.sha256,
+            )
+            for im in images
+        ],
+    )
