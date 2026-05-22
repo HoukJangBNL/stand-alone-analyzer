@@ -14,21 +14,30 @@ from flake_analysis.api.main import app
 @pytest.mark.pg
 async def test_auth_me_returns_user(signed_token, monkeypatch, pg_session):
     """GET /auth/me with valid token returns user profile."""
+    from flake_analysis.api.deps import get_db_session
+
     # Disable dev bypass for this test
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "0")
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get(
-            "/api/v1/auth/me",
-            headers={"Authorization": f"Bearer {signed_token}"},
-        )
-        assert r.status_code == 200
-        data = r.json()
-        assert data["email"] == "test@example.com"
-        assert data["cognito_sub"] == "test-user-1"
-        assert data["email_verified"] is True
-        assert "id" in data
-        assert "role" in data
+    async def _yield_pg_session():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get(
+                "/api/v1/auth/me",
+                headers={"Authorization": f"Bearer {signed_token}"},
+            )
+            assert r.status_code == 200
+            data = r.json()
+            assert data["email"] == "test@example.com"
+            assert data["cognito_sub"] == "test-user-1"
+            assert data["email_verified"] is True
+            assert "id" in data
+            assert "role" in data
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
@@ -129,6 +138,8 @@ async def test_auth_callback_exchanges_code(monkeypatch, rsa_key, pg_session):
 @pytest.mark.pg
 async def test_auth_logout_clears_refresh_cookie(monkeypatch, pg_session, sample_user_factory):
     """POST /auth/logout clears refresh cookie and returns success."""
+    from flake_analysis.api.deps import get_db_session
+
     # Use dev bypass mode so we can use the default dev user
     monkeypatch.setenv("SAA_AUTH_DEV_BYPASS", "1")
     monkeypatch.setenv("SAA_COGNITO_HOSTED_UI_DOMAIN", "https://test.auth.example.com")
@@ -150,15 +161,22 @@ async def test_auth_logout_clears_refresh_cookie(monkeypatch, pg_session, sample
 
     monkeypatch.setattr(httpx, "AsyncClient", lambda: mock_client)
 
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        # Set a refresh cookie first
-        c.cookies.set("refresh", "some-refresh-token")
+    async def _yield_pg_session():
+        yield pg_session
 
-        r = await c.post("/api/v1/auth/logout")
-        assert r.status_code == 200
-        data = r.json()
-        assert data["success"] is True
+    app.dependency_overrides[get_db_session] = _yield_pg_session
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            # Set a refresh cookie first
+            c.cookies.set("refresh", "some-refresh-token")
 
-        # Check that refresh cookie is cleared (max-age=0)
-        set_cookie_headers = r.headers.get_list("set-cookie")
-        assert any("refresh=" in h and "Max-Age=0" in h for h in set_cookie_headers)
+            r = await c.post("/api/v1/auth/logout")
+            assert r.status_code == 200
+            data = r.json()
+            assert data["success"] is True
+
+            # Check that refresh cookie is cleared (max-age=0)
+            set_cookie_headers = r.headers.get_list("set-cookie")
+            assert any("refresh=" in h and "Max-Age=0" in h for h in set_cookie_headers)
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
