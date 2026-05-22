@@ -9,6 +9,7 @@ from flake_analysis.api.logging_ctx import RequestIdMiddleware
 from flake_analysis.api.errors import AppError, app_error_handler
 from flake_analysis.api.routes import (
     health, version, projects, data, run, selector, clustering, explorer, static, auth, admin, admin_usage,
+    materials, scans,
 )
 
 @asynccontextmanager
@@ -52,6 +53,8 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
     app.include_router(admin_usage.router, prefix="/api/v1")
+    app.include_router(materials.router, prefix="/api/v1")
+    app.include_router(scans.router, prefix="/api/v1")
     app.include_router(projects.router, prefix="/api/v1")
     app.include_router(data.router, prefix="/api/v1")
     app.include_router(run.router, prefix="/api/v1")
