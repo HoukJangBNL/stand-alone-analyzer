@@ -10,12 +10,12 @@ from sqlalchemy import (
     BigInteger,
     DateTime,
     ForeignKey,
-    Index,
     Integer,
     Text,
     func,
     text,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -49,18 +49,21 @@ class Scan(Base):
     """User upload batch / experiment unit."""
 
     __tablename__ = "scans"
-    __table_args__ = (
-        Index(
-            "scans_material_idx",
-            "material",
-            postgresql_where=text("material IS NOT NULL"),
-        ),
-    )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
-    material: Mapped[str | None] = mapped_column(Text)
+    material: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("materials.name", ondelete="RESTRICT"),
+        nullable=False,
+    )
     description: Mapped[str | None] = mapped_column(Text)
+    extra_metadata: Mapped[dict] = mapped_column(
+        JSONB,
+        server_default=text("'{}'::jsonb"),
+        nullable=False,
+        default=dict,
+    )
     image_count: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

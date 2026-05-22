@@ -107,14 +107,8 @@ class Image(Base):
     __tablename__ = "images"
     __table_args__ = (
         UniqueConstraint("scan_id", "sha256", name="images_scan_id_sha256_key"),
+        UniqueConstraint("scan_id", "grid_ix", "grid_iy", name="images_scan_grid_uq"),
         Index("images_scan_idx", "scan_id"),
-        Index(
-            "images_grid_idx",
-            "scan_id",
-            "grid_ix",
-            "grid_iy",
-            postgresql_where=text("grid_ix IS NOT NULL AND grid_iy IS NOT NULL"),
-        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -128,8 +122,8 @@ class Image(Base):
     width: Mapped[int] = mapped_column(Integer, nullable=False)
     height: Mapped[int] = mapped_column(Integer, nullable=False)
     filename: Mapped[str | None] = mapped_column(Text)
-    grid_ix: Mapped[int | None] = mapped_column(Integer)
-    grid_iy: Mapped[int | None] = mapped_column(Integer)
+    grid_ix: Mapped[int] = mapped_column(Integer, nullable=False)
+    grid_iy: Mapped[int] = mapped_column(Integer, nullable=False)
     stage_x_um: Mapped[float | None] = mapped_column(REAL)
     stage_y_um: Mapped[float | None] = mapped_column(REAL)
     pixel_size_um: Mapped[float | None] = mapped_column(REAL)

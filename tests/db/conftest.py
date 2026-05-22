@@ -73,7 +73,8 @@ async def sample_analysis_factory(pg_session):
         )
         pg_session.add(m)
         await pg_session.flush()
-        s = Scan(name=f"test-scan-{suffix}")
+        # `material` is now NOT NULL + FK→materials(name); use seeded "graphene".
+        s = Scan(name=f"test-scan-{suffix}", material="graphene")
         pg_session.add(s)
         await pg_session.flush()
         a = Analysis(

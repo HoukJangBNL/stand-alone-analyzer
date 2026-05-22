@@ -24,7 +24,8 @@ pytestmark = [pytest.mark.pg, pytest.mark.asyncio]
 
 
 async def _seed_scan_and_model(session: AsyncSession) -> tuple[int, int]:
-    scan = Scan(name="t-scan", image_count=0)
+    # `material` is now NOT NULL + FK→materials(name); use the seeded "graphene".
+    scan = Scan(name="t-scan", material="graphene", image_count=0)
     model = Model(name="t-model", base_model="sam2", s3_uri="s3://x/y")
     session.add_all([scan, model])
     await session.flush()
