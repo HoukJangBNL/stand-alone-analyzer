@@ -102,6 +102,27 @@ def upgrade() -> None:
     """)
     op.execute("CREATE INDEX project_users_user_idx ON project_users(user_id);")
 
+    # Usage telemetry. ``value_json`` is JSONB so per-event payloads (e.g.
+    # ``{"analysis_id": 42}``) can evolve without migrations. Composite
+    # indexes serve the two expected access patterns: per-user history and
+    # per-kind aggregates, both ordered by recency.
+    op.execute("""
+        CREATE TABLE usage_events (
+            id          BIGSERIAL PRIMARY KEY,
+            user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            kind        TEXT NOT NULL,
+            value_json  JSONB,
+            ts          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+    """)
+    # Index name matches the plan's shape test substring ``"user_id"``.
+    op.execute(
+        "CREATE INDEX usage_events_user_id_ts_idx ON usage_events(user_id, ts DESC);"
+    )
+    op.execute(
+        "CREATE INDEX usage_events_kind_ts_idx ON usage_events(kind, ts DESC);"
+    )
+
 
 def downgrade() -> None:
     """Best-effort reversion to v6 shape.
@@ -112,6 +133,7 @@ def downgrade() -> None:
     """
     # Mirror upgrade in reverse: drop v7-only tables, then shadow ``users``
     # back to BIGSERIAL, rewire, drop ENUMs.
+    op.execute("DROP TABLE IF EXISTS usage_events;")
     op.execute("DROP TABLE IF EXISTS project_users;")
 
     op.execute("""
