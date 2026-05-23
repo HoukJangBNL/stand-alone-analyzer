@@ -1,5 +1,5 @@
 from flake_analysis.state.paths import (
-    PIPELINE_STEPS, SUBDIRS, ARTIFACTS, step_dir, manifest_path,
+    PIPELINE_STEPS, SUBDIRS, ARTIFACTS, step_dir,
 )
 from pathlib import Path
 
@@ -22,10 +22,6 @@ def test_artifacts_per_step():
 def test_step_dir():
     p = step_dir("/tmp/run", "background")
     assert p == Path("/tmp/run/01_background")
-
-
-def test_manifest_path():
-    assert manifest_path("/tmp/run") == Path("/tmp/run/manifest.json")
 
 
 def test_step_dir_unknown_raises():

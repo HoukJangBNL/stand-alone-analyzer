@@ -8,7 +8,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any, Dict, Optional, List
 
-from flake_analysis.state.paths import PIPELINE_STEPS, manifest_path
+from flake_analysis.state.paths import PIPELINE_STEPS, analysis_folder
 
 MANIFEST_VERSION = 1
 
@@ -37,7 +37,7 @@ class Manifest:
 
 def load_manifest(analysis_folder: str | Path) -> Manifest:
     """Load manifest.json, or return a fresh Manifest if file does not exist."""
-    p = manifest_path(analysis_folder)
+    p = Path(analysis_folder) / "manifest.json"
     if not p.exists():
         return Manifest()
     raw = json.loads(p.read_text(encoding="utf-8"))
@@ -51,7 +51,7 @@ def load_manifest(analysis_folder: str | Path) -> Manifest:
 
 def save_manifest(manifest: Manifest, analysis_folder: str | Path) -> None:
     """Atomic write of manifest.json."""
-    p = manifest_path(analysis_folder)
+    p = Path(analysis_folder) / "manifest.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     payload = asdict(manifest)
     tmp = p.with_suffix(".json.tmp")
@@ -110,3 +110,23 @@ def step_status(manifest: Manifest, step: str) -> str:
     # compare upstream input_hashes to current upstream params_hash.
     # For PR 2.1, just return 'done' if completed_at is set.
     return "done"
+
+
+def load_manifest_for_scan(
+    root: str | Path, project_id: str, scan_id: int
+) -> Manifest:
+    """Load manifest for a (project_id, scan_id) pair (D5)."""
+    folder = analysis_folder(root, project_id, scan_id)
+    return load_manifest(folder)
+
+
+def save_manifest_for_scan(
+    manifest: Manifest,
+    *,
+    root: str | Path,
+    project_id: str,
+    scan_id: int,
+) -> None:
+    """Atomic write of manifest.json for a (project_id, scan_id) pair (D5)."""
+    folder = analysis_folder(root, project_id, scan_id)
+    save_manifest(manifest, folder)

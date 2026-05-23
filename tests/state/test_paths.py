@@ -1,8 +1,6 @@
 """W10-B: per-scan filesystem layout."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from flake_analysis.state.paths import (
