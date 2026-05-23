@@ -43,6 +43,65 @@ async def sample_project_factory(pg_session, sample_user_factory):
 
 
 @pytest_asyncio.fixture()
+async def active_material(pg_session):
+    """Materials are seeded by alembic but tests may run on an empty DB.
+
+    Returns the canonical "graphene" Material row, inserting it on demand.
+    Idempotent: returns existing row when present (e.g. seeded via 0001).
+    """
+    from flake_analysis.db.models import Material
+
+    existing = await pg_session.get(Material, "graphene")
+    if existing is not None:
+        return existing
+    m = Material(name="graphene")
+    pg_session.add(m)
+    await pg_session.flush()
+    await pg_session.refresh(m)
+    return m
+
+
+@pytest_asyncio.fixture()
+async def active_project(pg_session, sample_user_factory):
+    """Insert a fresh `projects` row owned by an auto-created dev user.
+
+    Returns the Project ORM instance. Use `active_scan` instead when a Scan
+    is needed — `active_scan` depends on `active_project` so a single
+    Project row is shared.
+    """
+    from flake_analysis.db.models import Project
+
+    user = await sample_user_factory()
+    p = Project(name="w10-active-project", owner_id=user.id)
+    pg_session.add(p)
+    await pg_session.flush()
+    await pg_session.refresh(p)
+    return p
+
+
+@pytest_asyncio.fixture()
+async def active_scan(pg_session, active_project, active_material):
+    """Insert a Scan under `active_project`. Returns the Scan.
+
+    Replaces the legacy `_active_project` setter — every test that used to
+    mutate the global now injects `active_scan` and reads `.project_id` /
+    `.id` off the returned ORM instance.
+    """
+    from flake_analysis.db.models import Scan
+
+    s = Scan(
+        name="w10-active-scan",
+        material=active_material.name,
+        project_id=active_project.id,
+        image_count=4,
+    )
+    pg_session.add(s)
+    await pg_session.flush()
+    await pg_session.refresh(s)
+    return s
+
+
+@pytest_asyncio.fixture()
 async def sample_scan_factory(pg_session, sample_user_factory):
     """Insert a Scan and return it.
 
