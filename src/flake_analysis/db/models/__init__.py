@@ -20,6 +20,7 @@ from flake_analysis.db.models.domain_branch import (
     DomainGroup,
 )
 from flake_analysis.db.models.flake_branch import FlakeAnalysis, FlakeCuration
+from flake_analysis.db.models.projects import Project
 from flake_analysis.db.models.sam import Domain, Flake
 from flake_analysis.db.models.upload import (
     Image,
@@ -44,6 +45,7 @@ __all__ = [
     "Model",
     "PipelineStatus",
     "PipelineStep",
+    "Project",
     "ProjectRole",
     "ProjectUser",
     "Run",
