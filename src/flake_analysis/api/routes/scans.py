@@ -68,6 +68,34 @@ async def create_scan(
     )
 
 
+@router.get("/projects/{project_id}/scans")
+async def list_scans_for_project(
+    project_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> dict:
+    """List scans belonging to a project, newest first."""
+    rows = (
+        await session.execute(
+            select(Scan)
+            .where(Scan.project_id == project_id)
+            .order_by(Scan.created_at.desc())
+        )
+    ).scalars().all()
+    return {
+        "scans": [
+            {
+                "scan_id": r.id,
+                "name": r.name,
+                "material": r.material,
+                "image_count": r.image_count,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ]
+    }
+
+
 @router.post(
     "/scans/{scan_id}/images/presign",
     response_model=PresignResponse,

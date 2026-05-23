@@ -20,26 +20,56 @@ from tests.db.conftest import (  # noqa: F401
 
 
 @pytest_asyncio.fixture()
+async def sample_project_factory(pg_session, sample_user_factory):
+    """Insert a Project owned by the given user and return it.
+
+    The W10-C route tests need to scope multiple projects to the same user
+    (e.g. "list scans for project A but not project B"). Callers must pass
+    `owner` explicitly so ownership is deterministic.
+    """
+    from flake_analysis.db.models import Project
+
+    counter = {"n": 0}
+
+    async def _make(*, owner) -> "Project":
+        counter["n"] += 1
+        p = Project(name=f"sample-project-{counter['n']}", owner_id=owner.id)
+        pg_session.add(p)
+        await pg_session.flush()
+        await pg_session.refresh(p)
+        return p
+
+    return _make
+
+
+@pytest_asyncio.fixture()
 async def sample_scan_factory(pg_session, sample_user_factory):
-    """Insert a User + Project + Scan and return the Scan.
+    """Insert a Scan and return it.
+
+    No-arg call (`await sample_scan_factory()`) auto-creates a fresh User +
+    Project so existing W10-B tests keep working. Pass `project=` to scope
+    the scan to an existing project (W10-C listing tests). Pass `name=` to
+    override the auto-generated scan name.
 
     Mirrors the W6 `sample_user_factory` pattern; W10-A made `scans.project_id`
-    a FK->projects.id RESTRICT NOT NULL so we must construct a real Project first.
-    Used by W10-B test_deps.py and W10-C route tests.
+    a FK->projects.id RESTRICT NOT NULL so we must construct a real Project
+    when none is supplied.
     """
     from flake_analysis.db.models import Project, Scan
 
     counter = {"n": 0}
 
-    async def _make() -> "Scan":
+    async def _make(*, project=None, name=None) -> "Scan":
         counter["n"] += 1
         suffix = counter["n"]
-        u = await sample_user_factory()
-        p = Project(name=f"test-project-{suffix}", owner_id=u.id)
-        pg_session.add(p)
-        await pg_session.flush()
-        await pg_session.refresh(p)
-        s = Scan(name=f"test-scan-{suffix}", material="graphene", project_id=p.id)
+        if project is None:
+            u = await sample_user_factory()
+            project = Project(name=f"test-project-{suffix}", owner_id=u.id)
+            pg_session.add(project)
+            await pg_session.flush()
+            await pg_session.refresh(project)
+        s_name = name or f"test-scan-{suffix}"
+        s = Scan(name=s_name, material="graphene", project_id=project.id)
         pg_session.add(s)
         await pg_session.flush()
         await pg_session.refresh(s)
