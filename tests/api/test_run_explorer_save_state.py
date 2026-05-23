@@ -4,16 +4,38 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
 
-from flake_analysis.api.main import create_app
-from flake_analysis.state.manifest import Manifest
+from flake_analysis.api.errors import AppError, app_error_handler
+from flake_analysis.api.logging_ctx import RequestIdMiddleware
+from flake_analysis.api.routes import explorer as explorer_route
+from flake_analysis.state.paths import analysis_folder
+
+SID = 42
+
+
+def _make_app() -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.add_exception_handler(AppError, app_error_handler)
+    app.include_router(explorer_route.router, prefix="/api/v1")
+    return app
+
+
+@pytest.fixture(autouse=True)
+def _clear_scan_locks():
+    from flake_analysis.api import mutex
+    mutex._scan_locks.clear()
+    yield
+    mutex._scan_locks.clear()
 
 
 def _seed_for_save(folder: Path) -> None:
     """Need clustering+proximity steps committed for save_explorer_state to succeed."""
-    (folder / "04_clustering").mkdir(parents=True)
-    (folder / "05_domain_proximity").mkdir(parents=True)
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "04_clustering").mkdir(parents=True, exist_ok=True)
+    (folder / "05_domain_proximity").mkdir(parents=True, exist_ok=True)
     (folder / "04_clustering" / "labels.json").write_text(json.dumps({
         "version": 1, "n_clusters": 1,
         "groups": [{"id": 0, "name": "thin", "size": 1, "mean_rgb": [0, 0, 0]}],
@@ -38,12 +60,11 @@ def _seed_for_save(folder: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_save_state_returns_json_200_not_sse(tmp_path: Path):
-    _seed_for_save(tmp_path)
-    app = create_app()
-    manifest = Manifest(analysis_folder=str(tmp_path))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+async def test_save_state_returns_json_200_not_sse(tmp_path: Path, monkeypatch):
+    folder = analysis_folder(tmp_path, "local", SID)
+    _seed_for_save(folder)
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+    app = _make_app()
 
     body = {
         "include_labels": ["thin"],
@@ -53,7 +74,10 @@ async def test_save_state_returns_json_200_not_sse(tmp_path: Path):
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.post("/api/v1/projects/local/run/explorer/save_state", json=body)
+        resp = await ac.post(
+            f"/api/v1/projects/local/scans/{SID}/run/explorer/save_state",
+            json=body,
+        )
 
     assert resp.status_code == 200
     # Must NOT be SSE — content-type stays application/json
@@ -65,12 +89,11 @@ async def test_save_state_returns_json_200_not_sse(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_save_state_persists_selected_flake_ids(tmp_path: Path):
-    _seed_for_save(tmp_path)
-    app = create_app()
-    manifest = Manifest(analysis_folder=str(tmp_path))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+async def test_save_state_persists_selected_flake_ids(tmp_path: Path, monkeypatch):
+    folder = analysis_folder(tmp_path, "local", SID)
+    _seed_for_save(folder)
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+    app = _make_app()
 
     body = {
         "include_labels": [],
@@ -81,29 +104,32 @@ async def test_save_state_persists_selected_flake_ids(tmp_path: Path):
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.post("/api/v1/projects/local/run/explorer/save_state", json=body)
+        resp = await ac.post(
+            f"/api/v1/projects/local/scans/{SID}/run/explorer/save_state",
+            json=body,
+        )
     assert resp.status_code == 200
     payload = resp.json()
     assert payload["selected_count"] == 3
     # selected_flakes.parquet was written
-    sel_p = tmp_path / "06_explorer" / "selected_flakes.parquet"
+    sel_p = folder / "06_explorer" / "selected_flakes.parquet"
     assert sel_p.exists()
     df = pd.read_parquet(sel_p)
     assert df["flake_id"].tolist() == [100, 200, 300]
 
 
 @pytest.mark.asyncio
-async def test_save_state_409_when_clustering_not_committed(tmp_path: Path):
+async def test_save_state_409_when_clustering_not_committed(tmp_path: Path, monkeypatch):
     """Pipeline raises RuntimeError → route returns 409 prerequisite_missing."""
-    (tmp_path / "manifest.json").write_text(json.dumps({
-        "version": 1, "analysis_folder": str(tmp_path),
-        "raw_images_dir": str(tmp_path / "raw"),
+    folder = analysis_folder(tmp_path, "local", SID)
+    folder.mkdir(parents=True)
+    (folder / "manifest.json").write_text(json.dumps({
+        "version": 1, "analysis_folder": str(folder),
+        "raw_images_dir": str(folder / "raw"),
         "steps": {},  # No clustering / domain_proximity
     }))
-    app = create_app()
-    manifest = Manifest(analysis_folder=str(tmp_path))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+    app = _make_app()
 
     body = {
         "include_labels": [], "exclude_labels": [],
@@ -112,19 +138,21 @@ async def test_save_state_409_when_clustering_not_committed(tmp_path: Path):
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        resp = await ac.post("/api/v1/projects/local/run/explorer/save_state", json=body)
+        resp = await ac.post(
+            f"/api/v1/projects/local/scans/{SID}/run/explorer/save_state",
+            json=body,
+        )
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "prerequisite_missing"
 
 
 @pytest.mark.asyncio
-async def test_save_state_releases_lock_on_success(tmp_path: Path):
+async def test_save_state_releases_lock_on_success(tmp_path: Path, monkeypatch):
     """Two consecutive saves must both succeed (lock cleanly released)."""
-    _seed_for_save(tmp_path)
-    app = create_app()
-    manifest = Manifest(analysis_folder=str(tmp_path))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+    folder = analysis_folder(tmp_path, "local", SID)
+    _seed_for_save(folder)
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+    app = _make_app()
 
     body = {
         "include_labels": ["thin"], "exclude_labels": [],
@@ -133,7 +161,13 @@ async def test_save_state_releases_lock_on_success(tmp_path: Path):
     }
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
-        r1 = await ac.post("/api/v1/projects/local/run/explorer/save_state", json=body)
-        r2 = await ac.post("/api/v1/projects/local/run/explorer/save_state", json=body)
+        r1 = await ac.post(
+            f"/api/v1/projects/local/scans/{SID}/run/explorer/save_state",
+            json=body,
+        )
+        r2 = await ac.post(
+            f"/api/v1/projects/local/scans/{SID}/run/explorer/save_state",
+            json=body,
+        )
     assert r1.status_code == 200
     assert r2.status_code == 200

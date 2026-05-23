@@ -10,7 +10,7 @@ from flake_analysis.api.errors import (
     FlakeNotFound,
     PrerequisiteMissing,
 )
-from flake_analysis.api.mutex import acquire_project_lock
+from flake_analysis.api.mutex import acquire_scan_lock
 from flake_analysis.api.schemas.explorer import (
     ExplorerFlakeDetail,
     ExplorerFlakeRow,
@@ -25,9 +25,10 @@ from flake_analysis.api.services.explorer_service import (
     build_tile_manifest,
 )
 from flake_analysis.pipeline.explorer import load_explorer_state, save_explorer_state
-from flake_analysis.state.manifest import Manifest
 
-router = APIRouter(prefix="/projects/{project_id}", tags=["explorer"])
+router = APIRouter(
+    prefix="/projects/{project_id}/scans/{scan_id}", tags=["explorer"]
+)
 
 
 def _etag_for(manifest_obj: TileManifest) -> str:
@@ -38,11 +39,12 @@ def _etag_for(manifest_obj: TileManifest) -> str:
 @router.get("/explorer/tile_manifest", response_model=TileManifest)
 async def get_tile_manifest(
     project_id: str,
+    scan_id: int,
     response: Response,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
     """Return the canonical TileManifest. Cache 24h, immutable per (params_hash, signature)."""
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
     try:
         tm = build_tile_manifest(manifest.analysis_folder)
     except FileNotFoundError as e:
@@ -55,11 +57,12 @@ async def get_tile_manifest(
 @router.get("/explorer/grid", response_model=TileManifest)
 async def get_explorer_grid(
     project_id: str,
+    scan_id: int,
     response: Response,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
     """Pinned decision #11: canonical alias of /tile_manifest per mosaic-viewer §4."""
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
     try:
         tm = build_tile_manifest(manifest.analysis_folder)
     except FileNotFoundError as e:
@@ -72,14 +75,15 @@ async def get_explorer_grid(
 @router.get("/explorer/flakes", response_model=ExplorerFlakesResponse)
 async def get_explorer_flakes(
     project_id: str,
+    scan_id: int,
     include: str = Query("", description="Comma-separated cluster names"),
     exclude: str = Query("", description="Comma-separated cluster names"),
     size_min: int | None = Query(None, ge=1),
     size_max: int | None = Query(None, ge=1),
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
     """Server-side filter per pinned decision #4."""
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
     inc = [s for s in include.split(",") if s] if include else []
     exc = [s for s in exclude.split(",") if s] if exclude else []
     try:
@@ -111,10 +115,11 @@ async def get_explorer_flakes(
 @router.get("/explorer/flake/{flake_id}", response_model=ExplorerFlakeDetail)
 async def get_explorer_flake_detail(
     project_id: str,
+    scan_id: int,
     flake_id: int,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
     try:
         return build_flake_detail(manifest.analysis_folder, flake_id=flake_id)
     except FileNotFoundError as e:
@@ -126,16 +131,17 @@ async def get_explorer_flake_detail(
 @router.post("/run/explorer/save_state", response_model=SaveExplorerStateResult)
 async def post_save_explorer_state(
     project_id: str,
+    scan_id: int,
     params: SaveExplorerStateParams,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
     """Synchronous save (pinned decision #12). NOT SSE.
 
-    Wraps pipeline.explorer.save_explorer_state, with the per-project mutex
+    Wraps pipeline.explorer.save_explorer_state, with the per-scan mutex
     held for the whole call (not lock+drain — synchronous JSON has no streaming).
     """
-    async with acquire_project_lock(project_id):
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    async with acquire_scan_lock(scan_id):
         nf = params.neighbor_filter.model_dump()
         try:
             result = save_explorer_state(
@@ -156,9 +162,10 @@ async def post_save_explorer_state(
 @router.get("/run/explorer/state")
 async def get_saved_explorer_state(
     project_id: str,
-    manifest: Manifest = Depends(get_manifest),
+    scan_id: int,
     user: User = Depends(get_current_user),
 ):
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
     state = load_explorer_state(manifest.analysis_folder)
     if state is None:
         raise ExplorerStateMissing()

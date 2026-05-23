@@ -6,19 +6,42 @@ ignored; server picks from the candidate set and echoes the chosen value.
 """
 import json
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 import pytest
+from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from flake_analysis.api.main import create_app
+from flake_analysis.api.errors import AppError, app_error_handler
+from flake_analysis.api.logging_ctx import RequestIdMiddleware
+from flake_analysis.api.routes import clustering as clustering_route
 from flake_analysis.state.manifest import Manifest, StepEntry, save_manifest
+from flake_analysis.state.paths import analysis_folder
+
+SID = 42
 
 
-def _seed_analysis(tmp_path: Path) -> Manifest:
-    """Build a minimal analysis_folder with stats.npz + selection.parquet."""
-    af = tmp_path / "analysis"
+def _make_app() -> FastAPI:
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.add_exception_handler(AppError, app_error_handler)
+    app.include_router(clustering_route.router, prefix="/api/v1")
+    return app
+
+
+@pytest.fixture(autouse=True)
+def _clear_scan_locks():
+    from flake_analysis.api import mutex
+    mutex._scan_locks.clear()
+    yield
+    mutex._scan_locks.clear()
+
+
+def _seed_analysis(tmp_path: Path, pid: str = "local", sid: int = SID) -> Path:
+    """Build a minimal per-scan analysis folder with stats.npz + selection.parquet."""
+    af = analysis_folder(tmp_path, pid, sid)
     (af / "02_domain_stats").mkdir(parents=True)
     (af / "03_selector").mkdir(parents=True)
     rng = np.random.default_rng(0)
@@ -43,7 +66,7 @@ def _seed_analysis(tmp_path: Path) -> Manifest:
     )
     # Persist to disk so wrapper's load_manifest() picks up the prereq StepEntries.
     save_manifest(m, af)
-    return m
+    return af
 
 
 def _find_done_payload(text: str) -> dict | None:
@@ -57,35 +80,34 @@ def _find_done_payload(text: str) -> dict | None:
 
 
 @pytest.mark.asyncio
-async def test_refit_forwards_reg_covar_and_echoes_in_done(tmp_path):
-    app = create_app()
-    m = _seed_analysis(tmp_path)
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": m
-    try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-            body = {
-                "seed_groups": [
-                    {"name": "a", "domain_ids": [0, 1, 2]},
-                    {"name": "b", "domain_ids": [15, 16, 17]},
-                ],
-                "reg_covar": 3.0,
-            }
-            text = ""
-            async with c.stream(
-                "POST", "/api/v1/projects/local/run/clustering/refit", json=body
-            ) as resp:
-                async for chunk in resp.aiter_text():
-                    text += chunk
-            done_event = _find_done_payload(text)
-            assert done_event is not None, f"no done event in stream:\n{text}"
-            assert done_event["result"]["reg_covar_chosen"] == 3.0
+async def test_refit_forwards_reg_covar_and_echoes_in_done(tmp_path, monkeypatch):
+    af = _seed_analysis(tmp_path)
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+    app = _make_app()
 
-            # Manifest must record the value forwarded.
-            entry = json.loads((Path(m.analysis_folder) / "manifest.json").read_text())
-            assert entry["steps"]["clustering"]["params"]["reg_covar"] == 3.0
-    finally:
-        app.dependency_overrides.clear()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        body = {
+            "seed_groups": [
+                {"name": "a", "domain_ids": [0, 1, 2]},
+                {"name": "b", "domain_ids": [15, 16, 17]},
+            ],
+            "reg_covar": 3.0,
+        }
+        text = ""
+        async with c.stream(
+            "POST",
+            f"/api/v1/projects/local/scans/{SID}/run/clustering/refit",
+            json=body,
+        ) as resp:
+            async for chunk in resp.aiter_text():
+                text += chunk
+        done_event = _find_done_payload(text)
+        assert done_event is not None, f"no done event in stream:\n{text}"
+        assert done_event["result"]["reg_covar_chosen"] == 3.0
+
+        # Manifest must record the value forwarded.
+        entry = json.loads((af / "manifest.json").read_text())
+        assert entry["steps"]["clustering"]["params"]["reg_covar"] == 3.0
 
 
 @pytest.mark.asyncio
@@ -110,39 +132,38 @@ async def test_refit_auto_tune_returns_chosen_from_candidates(tmp_path, monkeypa
         fake_auto_tune,
     )
 
-    app = create_app()
-    m = _seed_analysis(tmp_path)
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": m
-    try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-            body = {
-                "seed_groups": [
-                    {"name": "a", "domain_ids": [0, 1, 2]},
-                    {"name": "b", "domain_ids": [15, 16, 17]},
-                ],
-                "auto_tune": True,
-                "reg_covar": 0.1,  # MUST be ignored when auto_tune=True
-            }
-            text = ""
-            async with c.stream(
-                "POST", "/api/v1/projects/local/run/clustering/refit", json=body
-            ) as resp:
-                async for chunk in resp.aiter_text():
-                    text += chunk
-            done_event = _find_done_payload(text)
-            assert done_event is not None, f"no done event in stream:\n{text}"
-            chosen = done_event["result"]["reg_covar_chosen"]
-            assert chosen == sentinel, "route did not use auto_tune_reg_covar's return"
+    af = _seed_analysis(tmp_path)
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+    app = _make_app()
 
-            entry = json.loads((Path(m.analysis_folder) / "manifest.json").read_text())
-            # The wrapper received the optimiser's pick, NOT the schema's 0.1.
-            assert entry["steps"]["clustering"]["params"]["reg_covar"] == sentinel
-            assert entry["steps"]["clustering"]["params"]["reg_covar"] != 0.1
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+        body = {
+            "seed_groups": [
+                {"name": "a", "domain_ids": [0, 1, 2]},
+                {"name": "b", "domain_ids": [15, 16, 17]},
+            ],
+            "auto_tune": True,
+            "reg_covar": 0.1,  # MUST be ignored when auto_tune=True
+        }
+        text = ""
+        async with c.stream(
+            "POST",
+            f"/api/v1/projects/local/scans/{SID}/run/clustering/refit",
+            json=body,
+        ) as resp:
+            async for chunk in resp.aiter_text():
+                text += chunk
+        done_event = _find_done_payload(text)
+        assert done_event is not None, f"no done event in stream:\n{text}"
+        chosen = done_event["result"]["reg_covar_chosen"]
+        assert chosen == sentinel, "route did not use auto_tune_reg_covar's return"
 
-            # Sanity: route built the auto-tune inputs (RGB shape (n_selected, 3) and
-            # two seed groups with three positions each).
-            assert captured["points_shape"] == (30, 3)
-            assert captured["seeds"] == [[0, 1, 2], [15, 16, 17]]
-    finally:
-        app.dependency_overrides.clear()
+        entry = json.loads((af / "manifest.json").read_text())
+        # The wrapper received the optimiser's pick, NOT the schema's 0.1.
+        assert entry["steps"]["clustering"]["params"]["reg_covar"] == sentinel
+        assert entry["steps"]["clustering"]["params"]["reg_covar"] != 0.1
+
+        # Sanity: route built the auto-tune inputs (RGB shape (n_selected, 3) and
+        # two seed groups with three positions each).
+        assert captured["points_shape"] == (30, 3)
+        assert captured["seeds"] == [[0, 1, 2], [15, 16, 17]]

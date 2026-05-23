@@ -3,10 +3,41 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
 
-from flake_analysis.api.main import create_app
-from flake_analysis.state.manifest import Manifest
+from flake_analysis.api.errors import AppError, app_error_handler
+from flake_analysis.api.logging_ctx import RequestIdMiddleware
+from flake_analysis.api.routes import clustering as clustering_route
+from flake_analysis.state.manifest import Manifest, save_manifest
+from flake_analysis.state.paths import analysis_folder
+
+SID = 42
+
+
+def _make_app() -> FastAPI:
+    """Mini-app exposing only the clustering router (W10-C.4c)."""
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.add_exception_handler(AppError, app_error_handler)
+    app.include_router(clustering_route.router, prefix="/api/v1")
+    return app
+
+
+@pytest.fixture(autouse=True)
+def _clear_scan_locks():
+    from flake_analysis.api import mutex
+    mutex._scan_locks.clear()
+    yield
+    mutex._scan_locks.clear()
+
+
+def _setup(tmp_path: Path, monkeypatch, pid: str = "local", sid: int = SID) -> Path:
+    folder = analysis_folder(tmp_path, pid, sid)
+    folder.mkdir(parents=True)
+    save_manifest(Manifest(analysis_folder=str(folder)), folder)
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+    return folder
 
 
 def _write_minimal_clustering(folder: Path) -> None:
@@ -34,17 +65,17 @@ def _write_minimal_clustering(folder: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_apply_thresholds_streams_error_without_clustering(tmp_path: Path):
-    app = create_app()
-    manifest = Manifest(analysis_folder=str(tmp_path))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+async def test_apply_thresholds_streams_error_without_clustering(tmp_path: Path, monkeypatch):
+    _setup(tmp_path, monkeypatch)
+    app = _make_app()
 
     body = {"cluster_thresholds": {0: 0.7}}
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         async with ac.stream(
-            "POST", "/api/v1/projects/local/run/clustering/apply_thresholds", json=body
+            "POST",
+            f"/api/v1/projects/local/scans/{SID}/run/clustering/apply_thresholds",
+            json=body,
         ) as r:
             assert r.status_code == 200
             text = ""
@@ -54,21 +85,19 @@ async def test_apply_thresholds_streams_error_without_clustering(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_apply_thresholds_streams_done_with_summary(tmp_path: Path):
-    _write_minimal_clustering(tmp_path)
-    # apply_thresholds also reads/writes manifest.json — write a minimal one.
-    (tmp_path / "manifest.json").write_text(json.dumps({"version": 1, "steps": {}}))
+async def test_apply_thresholds_streams_done_with_summary(tmp_path: Path, monkeypatch):
+    folder = _setup(tmp_path, monkeypatch)
+    _write_minimal_clustering(folder)
 
-    app = create_app()
-    manifest = Manifest(analysis_folder=str(tmp_path))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+    app = _make_app()
 
     body = {"cluster_thresholds": {0: 0.5, 1: 0.5}}
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         async with ac.stream(
-            "POST", "/api/v1/projects/local/run/clustering/apply_thresholds", json=body
+            "POST",
+            f"/api/v1/projects/local/scans/{SID}/run/clustering/apply_thresholds",
+            json=body,
         ) as r:
             assert r.status_code == 200
             text = ""

@@ -2,7 +2,7 @@
 
 POST /run/clustering/refit — SSE (expensive: GMM EM).
 POST /run/clustering/apply_thresholds — SSE (cheap: parquet rewrite).
-Both share the same per-project mutex (acquire_project_lock(pid)).
+Both share the same per-scan mutex (acquire_scan_lock(scan_id)).
 """
 from __future__ import annotations
 import asyncio
@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
-from flake_analysis.api.mutex import acquire_project_lock
+from flake_analysis.api.mutex import acquire_scan_lock
 from flake_analysis.api.schemas.clustering import (
     ApplyThresholdsParams,
     ClusteringRefitParams,
@@ -24,9 +24,10 @@ from flake_analysis.api.schemas.clustering import (
 from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.core.clustering.auto_opt import auto_tune_reg_covar
 from flake_analysis.pipeline.clustering import apply_thresholds, run_clustering_step
-from flake_analysis.state.manifest import Manifest
 
-router = APIRouter(prefix="/projects/{project_id}", tags=["clustering"])
+router = APIRouter(
+    prefix="/projects/{project_id}/scans/{scan_id}", tags=["clustering"]
+)
 
 
 def _build_auto_tune_inputs(
@@ -66,12 +67,13 @@ def _build_auto_tune_inputs(
 @router.post("/run/clustering/refit")
 async def run_clustering_refit(
     project_id: str,
+    scan_id: int,
     params: ClusteringRefitParams,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
     """Fit GMM with manual seed groups (SSE). Lock+drain pattern."""
-    lock_cm = acquire_project_lock(project_id)
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
 
     bridge = ProgressBridge()
@@ -142,12 +144,13 @@ async def run_clustering_refit(
 @router.post("/run/clustering/apply_thresholds")
 async def run_clustering_apply_thresholds(
     project_id: str,
+    scan_id: int,
     params: ApplyThresholdsParams,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
     """Rewrite assignments.parquet with new thresholds + max_mahalanobis (SSE). Lock+drain."""
-    lock_cm = acquire_project_lock(project_id)
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
 
     bridge = ProgressBridge()
