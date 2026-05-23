@@ -3,6 +3,7 @@ import { useStepProgress } from '@/hooks/useStepProgress'
 
 interface StepCardProps {
   projectId: string
+  scanId?: number | null
   step: string
   stepName: string
 }

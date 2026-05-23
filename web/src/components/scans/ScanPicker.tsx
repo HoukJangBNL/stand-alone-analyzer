@@ -6,15 +6,13 @@ import { listScansForProject, type ScanSummary } from '@/api/upload'
 import { useProjectStore } from '@/state/projectSlice'
 import { UploadModal } from '@/components/upload/UploadModal'
 
-interface PickerParams {
-  projectId?: string
-  scanId?: string
-  tab?: string
-}
-
 export function ScanPicker() {
   const navigate = useNavigate()
-  const { projectId: urlPid, scanId: urlSid, tab } = useParams<PickerParams>()
+  const { projectId: urlPid, scanId: urlSid, tab } = useParams<{
+    projectId: string
+    scanId?: string
+    tab?: string
+  }>()
   const sliceProject = useProjectStore((s) => s.activeProjectId)
   const setActiveScan = useProjectStore((s) => s.setActiveScanId)
   const projectId = urlPid ?? sliceProject ?? null

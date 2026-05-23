@@ -7,9 +7,15 @@ import { CommitButton } from '@/components/selector/CommitButton'
 
 interface SelectorTabProps {
   projectId: string
+  scanId?: number | null
 }
 
-export function SelectorTab({ projectId }: SelectorTabProps) {
+export function SelectorTab({ projectId, scanId = null }: SelectorTabProps) {
+  if (!scanId) return <p data-testid="selector-tab-no-scan">스캔을 선택하세요.</p>
+  return <SelectorTabBody projectId={projectId} scanId={scanId} />
+}
+
+function SelectorTabBody({ projectId }: { projectId: string; scanId: number }) {
   const { data, isLoading, error } = useDomainStats(projectId)
 
   if (isLoading) {

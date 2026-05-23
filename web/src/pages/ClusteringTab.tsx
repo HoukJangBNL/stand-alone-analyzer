@@ -11,9 +11,15 @@ import { ApiError } from '@/api/selector'
 
 interface Props {
   projectId: string
+  scanId?: number | null
 }
 
-export function ClusteringTab({ projectId }: Props) {
+export function ClusteringTab({ projectId, scanId = null }: Props) {
+  if (!scanId) return <p data-testid="clustering-tab-no-scan">스캔을 선택하세요.</p>
+  return <ClusteringTabBody projectId={projectId} scanId={scanId} />
+}
+
+function ClusteringTabBody({ projectId }: { projectId: string; scanId: number }) {
   const stats = useDomainStats(projectId)
   const labels = useClusteringLabels(projectId)
   const assignments = useClusteringAssignments(projectId)

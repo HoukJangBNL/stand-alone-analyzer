@@ -11,9 +11,15 @@ import type { ExplorerFlakeRowDto } from '@/api/explorer'
 
 interface Props {
   projectId: string
+  scanId?: number | null
 }
 
-export function ExplorerTab({ projectId }: Props) {
+export function ExplorerTab({ projectId, scanId = null }: Props) {
+  if (!scanId) return <p data-testid="explorer-tab-no-scan">스캔을 선택하세요.</p>
+  return <ExplorerTabBody projectId={projectId} scanId={scanId} />
+}
+
+function ExplorerTabBody({ projectId }: { projectId: string; scanId: number }) {
   const { data: manifest, isLoading, error } = useTileManifest(projectId)
   const include = useExplorerStore((s) => s.includeLabels)
   const exclude = useExplorerStore((s) => s.excludeLabels)

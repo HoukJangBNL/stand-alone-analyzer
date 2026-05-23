@@ -23,13 +23,8 @@ const ExplorerTab = lazy(() =>
   import('@/pages/ExplorerTab').then((m) => ({ default: m.ExplorerTab }))
 )
 
-interface RouteParams {
-  projectId?: string
-  scanId?: string
-}
-
 function SelectorTabRoute() {
-  const { projectId, scanId } = useParams<RouteParams>()
+  const { projectId, scanId } = useParams<{ projectId: string; scanId?: string }>()
   return (
     <Suspense fallback={<div style={{ padding: 16 }}>Loading Selector tab...</div>}>
       <SelectorTab projectId={projectId || ''} scanId={scanId ? Number(scanId) : null} />
@@ -38,7 +33,7 @@ function SelectorTabRoute() {
 }
 
 function ClusteringTabRoute() {
-  const { projectId, scanId } = useParams<RouteParams>()
+  const { projectId, scanId } = useParams<{ projectId: string; scanId?: string }>()
   return (
     <Suspense fallback={<div style={{ padding: 16 }}>Loading Clustering tab...</div>}>
       <ClusteringTab projectId={projectId || ''} scanId={scanId ? Number(scanId) : null} />
@@ -47,7 +42,7 @@ function ClusteringTabRoute() {
 }
 
 function ExplorerTabRoute() {
-  const { projectId, scanId } = useParams<RouteParams>()
+  const { projectId, scanId } = useParams<{ projectId: string; scanId?: string }>()
   return (
     <Suspense fallback={<div style={{ padding: 16 }}>Loading Explorer tab...</div>}>
       <ExplorerTab projectId={projectId || ''} scanId={scanId ? Number(scanId) : null} />
@@ -60,7 +55,7 @@ function ExplorerTabRoute() {
  * inside a tiny harness without booting the whole app.
  */
 export function ProjectScanSync() {
-  const { projectId, scanId } = useParams<RouteParams>()
+  const { projectId, scanId } = useParams<{ projectId: string; scanId?: string }>()
   const sliceProject = useProjectStore((s) => s.activeProjectId)
   const sliceScan = useProjectStore((s) => s.activeScanId)
   const setProject = useProjectStore((s) => s.setActiveProjectId)
