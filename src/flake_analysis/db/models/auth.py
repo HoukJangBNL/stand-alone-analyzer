@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from sqlalchemy import (
@@ -23,9 +23,12 @@ from sqlalchemy import (
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from flake_analysis.db.base import Base
+
+if TYPE_CHECKING:
+    from flake_analysis.db.models.projects import Project
 
 
 class UserRole(str, Enum):
@@ -55,8 +58,8 @@ _project_role_enum = postgresql.ENUM(
 class ProjectUser(Base):
     """Per-project ACL row: grants ``project_role`` to ``user`` on ``project_id``.
 
-    ``project_id`` is TEXT because the projects table is not yet modelled
-    (W2.x). Composite PK ``(project_id, user_id)`` keeps grants idempotent.
+    ``project_id`` is TEXT FK to ``projects.id`` (W10-A). Composite PK
+    ``(project_id, user_id)`` keeps grants idempotent.
     """
 
     __tablename__ = "project_users"
@@ -65,7 +68,11 @@ class ProjectUser(Base):
         Index("project_users_user_idx", "user_id"),
     )
 
-    project_id: Mapped[str] = mapped_column(Text, nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+    )
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
@@ -80,6 +87,8 @@ class ProjectUser(Base):
         nullable=False,
         server_default=text("NOW()"),
     )
+
+    project: Mapped["Project"] = relationship(back_populates="users")
 
 
 class UsageEvent(Base):

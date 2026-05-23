@@ -23,6 +23,7 @@ from flake_analysis.db.base import Base
 
 if TYPE_CHECKING:
     from flake_analysis.db.models.analysis import Analysis
+    from flake_analysis.db.models.projects import Project
     from flake_analysis.db.models.upload import Image, UploadSession
 
 
@@ -52,6 +53,11 @@ class Scan(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     name: Mapped[str] = mapped_column(Text, nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     material: Mapped[str] = mapped_column(
         Text,
         ForeignKey("materials.name", ondelete="RESTRICT"),
@@ -84,6 +90,7 @@ class Scan(Base):
         ForeignKey("users.id"),
     )
 
+    project: Mapped[Project] = relationship(back_populates="scans")
     images: Mapped[list[Image]] = relationship(
         back_populates="scan",
         cascade="all, delete-orphan",
