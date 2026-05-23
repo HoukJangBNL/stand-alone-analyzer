@@ -6,7 +6,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_db_session, get_manifest
-from flake_analysis.api.mutex import acquire_project_lock
+from flake_analysis.api.mutex import acquire_scan_lock
 from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.api.schemas.compute import (
     BackgroundParams,
@@ -14,35 +14,43 @@ from flake_analysis.api.schemas.compute import (
     DomainStatsParams,
     ThumbnailsParams,
 )
-from flake_analysis.state.manifest import Manifest
 from flake_analysis.pipeline.background import run_background_step
 from flake_analysis.pipeline.domain_proximity import run_domain_proximity_step
 from flake_analysis.pipeline.domain_stats import run_domain_stats_step
 from flake_analysis.pipeline.thumbnails import run_thumbnails_step
 
-router = APIRouter(prefix="/projects/{project_id}/run", tags=["run"])
+router = APIRouter(
+    prefix="/projects/{project_id}/scans/{scan_id}/run", tags=["run"]
+)
 
 @router.post("/thumbnails")
 async def run_thumbnails(
     project_id: str,
+    scan_id: int,
     params: ThumbnailsParams,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Run thumbnails step with SSE progress."""
-    # Acquire the project lock synchronously so a contended request gets an
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+
+    # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
     # that opens and immediately errors. The lock must be held for the lifetime
     # of the generator, so we enter the context manager manually here and exit
     # it in the generator's finally block.
-    lock_cm = acquire_project_lock(project_id)
+    lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
 
     # Emit usage event BEFORE starting the SSE stream
     from flake_analysis.api.services.usage import emit
 
-    await emit(session, user, "scan_run", {"step": "thumbnails", "project_id": project_id})
+    await emit(
+        session,
+        user,
+        "scan_run",
+        {"step": "thumbnails", "project_id": project_id, "scan_id": scan_id},
+    )
     await session.commit()
 
     bridge = ProgressBridge()
@@ -85,24 +93,31 @@ async def run_thumbnails(
 @router.post("/background")
 async def run_background(
     project_id: str,
+    scan_id: int,
     params: BackgroundParams,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Run background generation step with SSE progress."""
-    # Acquire the project lock synchronously so a contended request gets an
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+
+    # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
     # that opens and immediately errors. The lock must be held for the lifetime
     # of the generator, so we enter the context manager manually here and exit
     # it in the generator's finally block.
-    lock_cm = acquire_project_lock(project_id)
+    lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
 
     # Emit usage event BEFORE starting the SSE stream
     from flake_analysis.api.services.usage import emit
 
-    await emit(session, user, "scan_run", {"step": "background", "project_id": project_id})
+    await emit(
+        session,
+        user,
+        "scan_run",
+        {"step": "background", "project_id": project_id, "scan_id": scan_id},
+    )
     await session.commit()
 
     bridge = ProgressBridge()
@@ -146,24 +161,31 @@ async def run_background(
 @router.post("/domain_stats")
 async def run_domain_stats(
     project_id: str,
+    scan_id: int,
     params: DomainStatsParams,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Run domain stats step with SSE progress."""
-    # Acquire the project lock synchronously so a contended request gets an
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+
+    # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
     # that opens and immediately errors. The lock must be held for the lifetime
     # of the generator, so we enter the context manager manually here and exit
     # it in the generator's finally block.
-    lock_cm = acquire_project_lock(project_id)
+    lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
 
     # Emit usage event BEFORE starting the SSE stream
     from flake_analysis.api.services.usage import emit
 
-    await emit(session, user, "scan_run", {"step": "domain_stats", "project_id": project_id})
+    await emit(
+        session,
+        user,
+        "scan_run",
+        {"step": "domain_stats", "project_id": project_id, "scan_id": scan_id},
+    )
     await session.commit()
 
     bridge = ProgressBridge()
@@ -206,24 +228,31 @@ async def run_domain_stats(
 @router.post("/domain_proximity")
 async def run_domain_proximity(
     project_id: str,
+    scan_id: int,
     params: DomainProximityParams,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Run domain proximity step with SSE progress."""
-    # Acquire the project lock synchronously so a contended request gets an
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+
+    # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
     # that opens and immediately errors. The lock must be held for the lifetime
     # of the generator, so we enter the context manager manually here and exit
     # it in the generator's finally block.
-    lock_cm = acquire_project_lock(project_id)
+    lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
 
     # Emit usage event BEFORE starting the SSE stream
     from flake_analysis.api.services.usage import emit
 
-    await emit(session, user, "scan_run", {"step": "domain_proximity", "project_id": project_id})
+    await emit(
+        session,
+        user,
+        "scan_run",
+        {"step": "domain_proximity", "project_id": project_id, "scan_id": scan_id},
+    )
     await session.commit()
 
     bridge = ProgressBridge()

@@ -2,49 +2,82 @@
 import pytest
 import asyncio
 import json
-import os
 import threading
 from unittest.mock import patch
+from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
-from flake_analysis.api.main import create_app
+
+from flake_analysis.api.errors import AppError, app_error_handler
+from flake_analysis.api.logging_ctx import RequestIdMiddleware
+from flake_analysis.api.routes import run as run_route
 from flake_analysis.state.manifest import Manifest, save_manifest
+from flake_analysis.state.paths import analysis_folder
+
+# Test scan id used by tests that don't carry a real DB row.
+SID = 42
 
 
-def _setup_project(tmp_path):
-    """Create a manifest on disk and point SAA_ANALYSIS_FOLDER at it."""
-    analysis_folder = tmp_path / "proj"
-    analysis_folder.mkdir()
+def _make_app() -> FastAPI:
+    """Mini-app exposing only the run router (W10-C.4b)."""
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.add_exception_handler(AppError, app_error_handler)
+    app.include_router(run_route.router, prefix="/api/v1")
+    return app
+
+
+def _setup_project(tmp_path, monkeypatch, pid: str = "p_bg", sid: int = SID):
+    """Create a per-scan manifest on disk and point SAA_ANALYSIS_ROOT at tmp_path."""
+    folder = analysis_folder(tmp_path, pid, sid)
+    folder.mkdir(parents=True)
     raw_images_dir = tmp_path / "raw"
     raw_images_dir.mkdir()
 
     m = Manifest(
-        analysis_folder=str(analysis_folder),
+        analysis_folder=str(folder),
         raw_images_dir=str(raw_images_dir),
     )
-    save_manifest(m, analysis_folder)
-    os.environ["SAA_ANALYSIS_FOLDER"] = str(analysis_folder)
-    return analysis_folder
+    save_manifest(m, folder)
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+    return folder
 
 
 @pytest.fixture(autouse=True)
-def _clear_project_locks():
-    """Per-project locks are module-global; clear between tests to avoid leaks."""
+def _clear_scan_locks():
+    """Per-scan locks are module-global; clear between tests to avoid leaks."""
     from flake_analysis.api import mutex
-    mutex._project_locks.clear()
+    mutex._scan_locks.clear()
     yield
-    mutex._project_locks.clear()
+    mutex._scan_locks.clear()
 
 
 @pytest.fixture
-def _clean_env():
-    yield
-    os.environ.pop("SAA_ANALYSIS_FOLDER", None)
+def _client_app():
+    return _make_app()
+
+
+def _stub_session_dep(app):
+    """Override get_db_session with a no-op session for usage event emission."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    from flake_analysis.api.deps import get_db_session
+
+    mock_session = MagicMock()
+    mock_session.add = MagicMock()
+    mock_session.flush = AsyncMock()
+    mock_session.refresh = AsyncMock()
+    mock_session.commit = AsyncMock()
+
+    async def _yield():
+        yield mock_session
+
+    app.dependency_overrides[get_db_session] = _yield
 
 
 @pytest.mark.asyncio
-async def test_run_background_sse(tmp_path, _clean_env):
+async def test_run_background_sse(tmp_path, monkeypatch, _client_app):
     """POST /run/background streams progress and completes."""
-    analysis_folder = _setup_project(tmp_path)
+    folder = _setup_project(tmp_path, monkeypatch, pid="p_bg", sid=SID)
 
     def mock_run_background(**kwargs):
         cb = kwargs.get("progress_callback")
@@ -53,7 +86,7 @@ async def test_run_background_sse(tmp_path, _clean_env):
             cb(0.5, "halfway")
             cb(1.0, "done")
         return {
-            "output_path": str(analysis_folder / "01_background" / "background.npy"),
+            "output_path": str(folder / "01_background" / "background.npy"),
             "shape": (1024, 1024, 3),
             "params": {
                 "seed": 0,
@@ -63,12 +96,12 @@ async def test_run_background_sse(tmp_path, _clean_env):
             },
         }
 
+    _stub_session_dep(_client_app)
     with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
-        app = create_app()
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async with client.stream(
                 "POST",
-                "/api/v1/projects/p_bg/run/background",
+                f"/api/v1/projects/p_bg/scans/{SID}/run/background",
                 json={"seed": 0, "max_images": 100, "gaussian_sigma": 10.0, "method": "median"},
             ) as resp:
                 assert resp.status_code == 200
@@ -89,9 +122,9 @@ async def test_run_background_sse(tmp_path, _clean_env):
 
 
 @pytest.mark.asyncio
-async def test_run_background_sse_wire_format(tmp_path, _clean_env):
+async def test_run_background_sse_wire_format(tmp_path, monkeypatch, _client_app):
     """Raw response body contains 'event: progress' and 'event: done' framing."""
-    _setup_project(tmp_path)
+    _setup_project(tmp_path, monkeypatch, pid="p_bg_wire", sid=SID)
 
     def mock_run_background(**kwargs):
         cb = kwargs.get("progress_callback")
@@ -104,11 +137,11 @@ async def test_run_background_sse_wire_format(tmp_path, _clean_env):
             "params": {"seed": 0, "max_images": 1, "gaussian_sigma": 10.0, "method": "median"},
         }
 
+    _stub_session_dep(_client_app)
     with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
-        app = create_app()
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             resp = await client.post(
-                "/api/v1/projects/p_bg_wire/run/background",
+                f"/api/v1/projects/p_bg_wire/scans/{SID}/run/background",
                 json={"seed": 0, "max_images": 1},
             )
             assert resp.status_code == 200
@@ -121,16 +154,16 @@ async def test_run_background_sse_wire_format(tmp_path, _clean_env):
 
 
 @pytest.mark.asyncio
-async def test_run_background_mutex_contention_returns_locked(tmp_path, _clean_env):
-    """Concurrent requests to same project: second gets HTTP 423, NOT a stream error."""
-    _setup_project(tmp_path)
+async def test_run_background_mutex_contention_returns_locked(tmp_path, monkeypatch, _client_app):
+    """Concurrent requests to same scan: second gets HTTP 423, NOT a stream error."""
+    _setup_project(tmp_path, monkeypatch, pid="p_bg_busy", sid=SID)
 
     release = threading.Event()
     started = threading.Event()
 
     def mock_run_background(**kwargs):
         # Block the worker thread until the test releases it. This keeps the
-        # project lock held and lets a second request collide.
+        # scan lock held and lets a second request collide.
         started.set()
         release.wait(timeout=5.0)
         cb = kwargs.get("progress_callback")
@@ -142,32 +175,27 @@ async def test_run_background_mutex_contention_returns_locked(tmp_path, _clean_e
             "params": {"seed": 0, "max_images": 1, "gaussian_sigma": 10.0, "method": "median"},
         }
 
+    _stub_session_dep(_client_app)
     with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
-        app = create_app()
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async def first_request():
                 async with client.stream(
-                    "POST", "/api/v1/projects/p_bg_busy/run/background", json={"seed": 0}
+                    "POST", f"/api/v1/projects/p_bg_busy/scans/{SID}/run/background", json={"seed": 0}
                 ) as resp:
                     assert resp.status_code == 200
-                    # Wait until the worker is blocked before letting the
-                    # second request fire.
                     while not started.is_set():
                         await asyncio.sleep(0.01)
-                    # Hand off to the scheduler so the second request runs.
                     await asyncio.sleep(0.05)
                     release.set()
-                    # Drain the stream so the connection closes cleanly.
                     async for _ in resp.aiter_lines():
                         pass
                     return resp.status_code
 
             async def second_request():
-                # Wait until the first request has the lock.
                 while not started.is_set():
                     await asyncio.sleep(0.01)
                 resp = await client.post(
-                    "/api/v1/projects/p_bg_busy/run/background", json={"seed": 0}
+                    f"/api/v1/projects/p_bg_busy/scans/{SID}/run/background", json={"seed": 0}
                 )
                 return resp
 
@@ -185,18 +213,18 @@ async def test_run_background_mutex_contention_returns_locked(tmp_path, _clean_e
 
 
 @pytest.mark.asyncio
-async def test_run_background_pipeline_error_emits_sse_error_event(tmp_path, _clean_env):
+async def test_run_background_pipeline_error_emits_sse_error_event(tmp_path, monkeypatch, _client_app):
     """A pipeline exception is delivered as an SSE 'error' event with the REST envelope shape."""
-    _setup_project(tmp_path)
+    _setup_project(tmp_path, monkeypatch, pid="p_bg_err", sid=SID)
 
     def mock_run_background(**kwargs):
         raise RuntimeError("no raw images")
 
+    _stub_session_dep(_client_app)
     with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
-        app = create_app()
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async with client.stream(
-                "POST", "/api/v1/projects/p_bg_err/run/background", json={"seed": 0}
+                "POST", f"/api/v1/projects/p_bg_err/scans/{SID}/run/background", json={"seed": 0}
             ) as resp:
                 assert resp.status_code == 200
                 assert "text/event-stream" in resp.headers["content-type"]

@@ -1,27 +1,32 @@
 # tests/api/test_run_fake_sse.py
-import pytest
 import asyncio
 import json
-from httpx import AsyncClient, ASGITransport
-from flake_analysis.api.main import create_app
-from fastapi import APIRouter
+
+import pytest
+from fastapi import APIRouter, FastAPI
 from fastapi.responses import StreamingResponse
+from httpx import ASGITransport, AsyncClient
+
+from flake_analysis.api.errors import AppError, app_error_handler
+from flake_analysis.api.logging_ctx import RequestIdMiddleware
 from flake_analysis.api.sse import ProgressBridge, emit_sse_event
 
 
 @pytest.mark.asyncio
-async def test_fake_step_sse(tmp_path):
-    """Fake step emits progress events over SSE."""
-    import os
-    analysis_folder = tmp_path / "proj"
-    analysis_folder.mkdir()
+async def test_fake_step_sse(tmp_path, monkeypatch):
+    """Fake step emits progress events over SSE.
 
-    os.environ["SAA_ANALYSIS_FOLDER"] = str(analysis_folder)
+    Sanity test for the SSE plumbing (ProgressBridge / emit_sse_event /
+    StreamingResponse) — exercises the same wire format the production
+    /run/* endpoints rely on. Mounted on a mini-app at the per-scan URL
+    (W10-C.4b) so it parallels the real route grammar.
+    """
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
 
     fake_router = APIRouter()
 
-    @fake_router.post("/projects/{project_id}/run/fake")
-    async def run_fake(project_id: str):
+    @fake_router.post("/projects/{project_id}/scans/{scan_id}/run/fake")
+    async def run_fake(project_id: str, scan_id: int):
         """Fake step that emits 3 progress events."""
         bridge = ProgressBridge()
 
@@ -41,11 +46,15 @@ async def test_fake_step_sse(tmp_path):
 
         return StreamingResponse(generate(), media_type="text/event-stream")
 
-    app = create_app()
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+    app.add_exception_handler(AppError, app_error_handler)
     app.include_router(fake_router, prefix="/api/v1")
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        async with client.stream("POST", "/api/v1/projects/local/run/fake") as resp:
+        async with client.stream(
+            "POST", "/api/v1/projects/local/scans/42/run/fake"
+        ) as resp:
             assert resp.status_code == 200
             assert "text/event-stream" in resp.headers["content-type"]
 
@@ -59,5 +68,3 @@ async def test_fake_step_sse(tmp_path):
             assert events[0]["type"] == "progress"
             assert events[0]["pct"] == 0.0
             assert events[-1]["type"] == "done"
-
-    os.environ.pop("SAA_ANALYSIS_FOLDER", None)

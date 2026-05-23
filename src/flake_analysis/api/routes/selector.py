@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
 from flake_analysis.api.errors import PrerequisiteMissing, ArtifactMissing, SelectionNotFound
-from flake_analysis.api.mutex import acquire_project_lock
+from flake_analysis.api.mutex import acquire_scan_lock
 from flake_analysis.api.schemas.selector import (
     SelectorParams,
     SelectorCommitRequest,
@@ -25,23 +25,26 @@ from flake_analysis.api.schemas.selector import (
 )
 from flake_analysis.api.services.selector_service import apply_brush_intersection
 from flake_analysis.api.sse import ProgressBridge, sse_stream
-from flake_analysis.state.manifest import Manifest
 from flake_analysis.pipeline.selector import run_selector_step
 
-router = APIRouter(prefix="/projects/{project_id}", tags=["selector"])
+router = APIRouter(
+    prefix="/projects/{project_id}/scans/{scan_id}", tags=["selector"]
+)
 
 
 @router.post("/run/selector")
 async def run_selector(
     project_id: str,
+    scan_id: int,
     params: SelectorParams,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
     """Run selector pipeline step with SSE progress (writes selection.parquet)."""
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+
     # Lock+drain pattern: acquire synchronously so contention surfaces as
     # HTTP 423 ProjectBusy, then drain in the generator's finally.
-    lock_cm = acquire_project_lock(project_id)
+    lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
 
     bridge = ProgressBridge()
@@ -90,12 +93,13 @@ async def run_selector(
 @router.post("/selector/commit")
 async def commit_selection(
     project_id: str,
+    scan_id: int,
     body: SelectorCommitRequest,
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ) -> SelectorCommitSummary:
     """Run selector pipeline + apply brush intersection. Synchronous JSON."""
-    async with acquire_project_lock(project_id):
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    async with acquire_scan_lock(scan_id):
         loop = asyncio.get_running_loop()
 
         def _call():
@@ -151,8 +155,8 @@ async def commit_selection(
 @router.get("/selector/export")
 async def export_selection(
     project_id: str,
+    scan_id: int,
     mode: Literal["filtered", "selected"] = "selected",
-    manifest: Manifest = Depends(get_manifest),
     user: User = Depends(get_current_user),
 ):
     """Stream selection.parquet rows as CSV.
@@ -160,6 +164,7 @@ async def export_selection(
     mode=filtered → all rows (every domain with its selected boolean).
     mode=selected → only rows where ``selected`` is True.
     """
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
     p = Path(manifest.analysis_folder) / "03_selector" / "selection.parquet"
     if not p.exists():
         raise SelectionNotFound(path=str(p))
