@@ -2,16 +2,16 @@ import pytest
 from flake_analysis.api.schemas.projects import (
     CreateProjectRequest,
     ProjectHandle,
-    ValidatePathsRequest,
-    PathStatus,
 )
 from flake_analysis.api.schemas.data import ManifestModel, StepEntryModel
 
+
 def test_create_project_request_shape():
-    """CreateProjectRequest has analysis_folder + optional paths."""
-    req = CreateProjectRequest(analysis_folder="/mnt/analysis/proj1")
-    assert req.analysis_folder == "/mnt/analysis/proj1"
-    assert req.raw_images_dir is None
+    """W10-C: CreateProjectRequest takes name + optional description."""
+    req = CreateProjectRequest(name="proj1")
+    assert req.name == "proj1"
+    assert req.description is None
+
 
 def test_manifest_model_shape():
     """ManifestModel mirrors state/manifest.py::Manifest."""
