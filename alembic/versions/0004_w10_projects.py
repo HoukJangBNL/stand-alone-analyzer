@@ -41,17 +41,24 @@ def upgrade() -> None:
         sa.Column(
             "owner_id",
             postgresql.UUID(as_uuid=True),
-            sa.ForeignKey("users.id", ondelete="RESTRICT"),
             nullable=False,
         ),
         sa.Column("description", sa.Text(), nullable=True),
         sa.Column(
             "created_at",
-            sa.DateTime(timezone=True),
+            sa.TIMESTAMP(timezone=True),
+            server_default=sa.func.now(),
             nullable=False,
-            server_default=sa.text("NOW()"),
         ),
         sa.UniqueConstraint("owner_id", "name", name="projects_owner_name_uq"),
+    )
+    op.create_foreign_key(
+        "projects_owner_fk",
+        "projects",
+        "users",
+        ["owner_id"],
+        ["id"],
+        ondelete="RESTRICT",
     )
 
     # 2) scans.project_id — column does not exist in v7.1 schema; add as FK
@@ -62,9 +69,16 @@ def upgrade() -> None:
         sa.Column(
             "project_id",
             sa.Text(),
-            sa.ForeignKey("projects.id", ondelete="RESTRICT"),
             nullable=False,
         ),
+    )
+    op.create_foreign_key(
+        "scans_project_fk",
+        "scans",
+        "projects",
+        ["project_id"],
+        ["id"],
+        ondelete="RESTRICT",
     )
     op.create_index("scans_project_idx", "scans", ["project_id"])
 
@@ -76,9 +90,16 @@ def upgrade() -> None:
         sa.Column(
             "project_id",
             sa.Text(),
-            sa.ForeignKey("projects.id", ondelete="CASCADE"),
             nullable=False,
         ),
+    )
+    op.create_foreign_key(
+        "project_users_project_fk",
+        "project_users",
+        "projects",
+        ["project_id"],
+        ["id"],
+        ondelete="CASCADE",
     )
     op.create_primary_key(
         "project_users_pkey", "project_users", ["project_id", "user_id"]
@@ -91,7 +112,9 @@ def upgrade() -> None:
         BEGIN
             IF EXISTS (
                 SELECT 1 FROM information_schema.columns
-                WHERE table_name = 'images' AND column_name = 'project_id'
+                WHERE table_name = 'images'
+                  AND column_name = 'project_id'
+                  AND table_schema = 'public'
             ) THEN
                 ALTER TABLE images DROP COLUMN project_id;
             END IF;
@@ -106,6 +129,9 @@ def downgrade() -> None:
 
     # Revert project_users.project_id FK → loose TEXT
     op.drop_constraint("project_users_pkey", "project_users", type_="primary")
+    op.drop_constraint(
+        "project_users_project_fk", "project_users", type_="foreignkey"
+    )
     op.drop_column("project_users", "project_id")
     op.add_column(
         "project_users", sa.Column("project_id", sa.Text(), nullable=False)
@@ -117,6 +143,8 @@ def downgrade() -> None:
     # Revert scans.project_id FK — drop entirely (v7.1 had no project_id on
     # scans, so we drop rather than re-add as loose TEXT to round-trip cleanly).
     op.drop_index("scans_project_idx", table_name="scans")
+    op.drop_constraint("scans_project_fk", "scans", type_="foreignkey")
     op.drop_column("scans", "project_id")
 
+    # projects_owner_fk is auto-dropped with the table.
     op.drop_table("projects")
