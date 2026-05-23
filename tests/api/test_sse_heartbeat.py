@@ -88,15 +88,19 @@ async def test_run_thumbnails_emits_heartbeat_when_pipeline_is_slow(tmp_path, mo
     from flake_analysis.api.main import create_app
     from flake_analysis.state.manifest import Manifest, save_manifest
 
-    analysis_folder = tmp_path / "proj"
-    analysis_folder.mkdir()
+    # W10-B: per-scan paths under <root>/<pid>/<sid>/. Use SAA_ANALYSIS_ROOT.
+    project_id = "local"
+    scan_id = 1
+    root = tmp_path
+    analysis_folder = root / project_id / str(scan_id)
+    analysis_folder.mkdir(parents=True)
     raw_images_dir = tmp_path / "raw"
     raw_images_dir.mkdir()
     save_manifest(
         Manifest(analysis_folder=str(analysis_folder), raw_images_dir=str(raw_images_dir)),
         analysis_folder,
     )
-    monkeypatch.setenv("SAA_ANALYSIS_FOLDER", str(analysis_folder))
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(root))
 
     # Force the heartbeat to fire fast so the test stays under a second.
     monkeypatch.setattr("flake_analysis.api.sse.SSE_HEARTBEAT_SECONDS", 0.05)
@@ -120,7 +124,8 @@ async def test_run_thumbnails_emits_heartbeat_when_pipeline_is_slow(tmp_path, mo
         app = create_app()
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.post(
-                "/api/v1/projects/local/run/thumbnails", json={"quality": 80}
+                f"/api/v1/projects/{project_id}/scans/{scan_id}/run/thumbnails",
+                json={"quality": 80},
             )
             assert resp.status_code == 200
             body = resp.text
