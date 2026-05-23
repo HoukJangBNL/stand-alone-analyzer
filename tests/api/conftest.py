@@ -3,6 +3,7 @@ import os
 import time
 
 import pytest
+import pytest_asyncio
 from cryptography.hazmat.primitives.asymmetric import rsa
 from jose import jwt
 from jose.utils import long_to_base64
@@ -18,13 +19,33 @@ from tests.db.conftest import (  # noqa: F401
 )
 
 
-@pytest.fixture(autouse=True)
-def _reset_active_project():
-    """Reset deps._active_project around each test (one-shot cache leaks otherwise)."""
-    import flake_analysis.api.deps as deps
-    deps._active_project = None
-    yield
-    deps._active_project = None
+@pytest_asyncio.fixture()
+async def sample_scan_factory(pg_session, sample_user_factory):
+    """Insert a User + Project + Scan and return the Scan.
+
+    Mirrors the W6 `sample_user_factory` pattern; W10-A made `scans.project_id`
+    a FK->projects.id RESTRICT NOT NULL so we must construct a real Project first.
+    Used by W10-B test_deps.py and W10-C route tests.
+    """
+    from flake_analysis.db.models import Project, Scan
+
+    counter = {"n": 0}
+
+    async def _make() -> "Scan":
+        counter["n"] += 1
+        suffix = counter["n"]
+        u = await sample_user_factory()
+        p = Project(name=f"test-project-{suffix}", owner_id=u.id)
+        pg_session.add(p)
+        await pg_session.flush()
+        await pg_session.refresh(p)
+        s = Scan(name=f"test-scan-{suffix}", material="graphene", project_id=p.id)
+        pg_session.add(s)
+        await pg_session.flush()
+        await pg_session.refresh(s)
+        return s
+
+    return _make
 
 
 @pytest.fixture(autouse=True)
