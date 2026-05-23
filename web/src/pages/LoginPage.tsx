@@ -1,5 +1,6 @@
 // web/src/pages/LoginPage.tsx
 import { useState } from 'react'
+import { Navigate } from 'react-router-dom'
 import { useAuthStore } from '@/state/authSlice'
 
 export function LoginPage() {
@@ -8,6 +9,11 @@ export function LoginPage() {
   const login = useAuthStore((s) => s.login)
   const status = useAuthStore((s) => s.status)
   const error = useAuthStore((s) => s.error)
+  const currentUser = useAuthStore((s) => s.currentUser)
+
+  if (currentUser) {
+    return <Navigate to="/" replace />
+  }
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
