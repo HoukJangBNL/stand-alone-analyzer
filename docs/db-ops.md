@@ -147,6 +147,35 @@ alembic upgrade head --sql
 > `scripts/check_alembic_drift.py`. If a model change ships without a
 > migration, CI fails before merge.
 
+### 3.4 W10 pre-flight wipe (saa_test only)
+
+W10 introduces a real `projects` table + FK rewires on `scans.project_id` and
+`project_users.project_id`. Existing rows on `saa_test` (carried over from W5/W6
+test runs) lack `projects` parents, so alembic `0004_w10_projects` will fail to
+apply unless those rows are wiped first. RDS is empty for W10-relevant tables
+(W7 has not landed) so this procedure is local-only.
+
+**Run order:**
+
+1. Confirm target is `saa_test` (NEVER `qpress`).
+2. `bash scripts/db/wipe-saa-test.sh saa_test`
+3. The script prompts for confirmation, then `TRUNCATE`s in dependency order
+   and re-seeds the 5 W5-A material rows.
+4. `uv run alembic upgrade head` — applies `0004_w10_projects` cleanly.
+5. `uv run pytest -m pg tests/db/test_w10_projects.py` — confirms ORM<->DDL parity.
+
+**Safety guard:** the wrapper refuses to run unless `$1` starts with `saa_test`.
+The SQL file (`scripts/db/wipe-saa-test-pre-w10.sql`) is unconditional — DO NOT
+invoke it directly with `psql -d qpress`.
+
+**Rollback:** the wipe is destructive. To restore a saa_test instance:
+- `dropdb saa_test && createdb saa_test`
+- `uv run alembic upgrade head`
+- Re-seed via test fixtures.
+
+Owner ran this once on 2026-05-XX before applying alembic 0004 (commit hash to
+fill in upon merge).
+
 ---
 
 ## 4. 비용 / 자원 cleanup
