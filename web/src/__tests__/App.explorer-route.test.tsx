@@ -4,6 +4,7 @@ import { render, screen } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { App } from '@/App'
 import { useAuthStore } from '@/state/authSlice'
+import * as uploadApi from '@/api/upload'
 
 vi.mock('openseadragon', () => ({
   default: vi.fn(() => ({
@@ -34,7 +35,10 @@ describe('App route registration — Explorer', () => {
           })
       )
     )
-    window.history.pushState({}, '', '/projects/local/explorer')
+    window.history.pushState({}, '', '/projects/local/scans/11/explorer')
+    vi.spyOn(uploadApi, 'listScansForProject').mockResolvedValue([
+      { scan_id: 11, name: 's11', material: 'graphene', image_count: 1, created_at: 't' },
+    ])
     useAuthStore.setState({
       status: 'authenticated',
       currentUser: { id: 'u1', email: 'test@example.com', role: 'member', email_verified: true },
@@ -43,7 +47,7 @@ describe('App route registration — Explorer', () => {
     })
   })
 
-  it('renders ExplorerTab when navigating to /projects/local/explorer', async () => {
+  it('renders ExplorerTab when navigating to /projects/local/scans/11/explorer', async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
     render(
       <QueryClientProvider client={qc}>

@@ -1,3 +1,4 @@
+// web/src/App.tsx
 import { lazy, Suspense, useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, useParams, useNavigate } from 'react-router-dom'
 import { Toaster } from 'sonner'
@@ -10,6 +11,7 @@ import { RequireAuth } from '@/components/auth/RequireAuth'
 import { RequireRole } from '@/components/auth/RequireRole'
 import { useProjectStore } from '@/state/projectSlice'
 import { useCurrentUser } from '@/hooks/useCurrentUser'
+import { ScanPicker } from '@/components/scans/ScanPicker'
 
 const SelectorTab = lazy(() =>
   import('@/pages/SelectorTab').then((m) => ({ default: m.SelectorTab }))
@@ -21,56 +23,75 @@ const ExplorerTab = lazy(() =>
   import('@/pages/ExplorerTab').then((m) => ({ default: m.ExplorerTab }))
 )
 
+interface RouteParams {
+  projectId?: string
+  scanId?: string
+}
+
 function SelectorTabRoute() {
-  const { projectId } = useParams<{ projectId: string }>()
+  const { projectId, scanId } = useParams<RouteParams>()
   return (
     <Suspense fallback={<div style={{ padding: 16 }}>Loading Selector tab...</div>}>
-      <SelectorTab projectId={projectId || 'local'} />
+      <SelectorTab projectId={projectId || ''} scanId={scanId ? Number(scanId) : null} />
     </Suspense>
   )
 }
 
 function ClusteringTabRoute() {
-  const { projectId } = useParams<{ projectId: string }>()
+  const { projectId, scanId } = useParams<RouteParams>()
   return (
     <Suspense fallback={<div style={{ padding: 16 }}>Loading Clustering tab...</div>}>
-      <ClusteringTab projectId={projectId || 'local'} />
+      <ClusteringTab projectId={projectId || ''} scanId={scanId ? Number(scanId) : null} />
     </Suspense>
   )
 }
 
 function ExplorerTabRoute() {
-  const { projectId } = useParams<{ projectId: string }>()
+  const { projectId, scanId } = useParams<RouteParams>()
   return (
     <Suspense fallback={<div style={{ padding: 16 }}>Loading Explorer tab...</div>}>
-      <ExplorerTab projectId={projectId || 'local'} />
+      <ExplorerTab projectId={projectId || ''} scanId={scanId ? Number(scanId) : null} />
     </Suspense>
   )
 }
 
 /**
- * Sync the URL :projectId param into the project slice when the user lands on
- * a route directly (deep link). Also navigate to the slice's active id when
- * it diverges from the URL after a sidebar selection that originated outside a
- * specific tab.
+ * Sync URL params into the project slice. Exported so unit tests can mount it
+ * inside a tiny harness without booting the whole app.
  */
-function ProjectSync() {
-  const { projectId } = useParams<{ projectId: string }>()
-  const slice = useProjectStore((s) => s.activeProjectId)
-  const setActive = useProjectStore((s) => s.setActiveProjectId)
+export function ProjectScanSync() {
+  const { projectId, scanId } = useParams<RouteParams>()
+  const sliceProject = useProjectStore((s) => s.activeProjectId)
+  const sliceScan = useProjectStore((s) => s.activeScanId)
+  const setProject = useProjectStore((s) => s.setActiveProjectId)
+  const setScan = useProjectStore((s) => s.setActiveScanId)
+
   useEffect(() => {
-    if (projectId && projectId !== slice) setActive(projectId)
-  }, [projectId, slice, setActive])
+    if (projectId && projectId !== sliceProject) setProject(projectId)
+  }, [projectId, sliceProject, setProject])
+
+  useEffect(() => {
+    const next = scanId ? Number(scanId) : null
+    if (next !== sliceScan) setScan(next)
+  }, [scanId, sliceScan, setScan])
+
   return null
 }
 
+/**
+ * Home → most-recent project's most-recent scan if any, else first project's
+ * empty state, else stay at /projects (Sidebar will prompt to create one).
+ * Persistence is in-memory only — Sidebar's `useQuery` is the source of truth.
+ */
 function HomeRedirect() {
   const navigate = useNavigate()
   const slice = useProjectStore((s) => s.activeProjectId)
   useEffect(() => {
-    navigate(`/projects/${slice ?? 'local'}/compute`, { replace: true })
+    if (slice) {
+      navigate(`/projects/${slice}`, { replace: true })
+    }
   }, [slice, navigate])
-  return null
+  return <p style={{ padding: 16 }}>프로젝트를 선택하거나 만들어주세요.</p>
 }
 
 function AppContent() {
@@ -108,42 +129,76 @@ function AppContent() {
               </RequireAuth>
             }
           />
+
+          {/* Empty-state routes (project picked but no scan) */}
           <Route
-            path="/projects/:projectId/compute"
+            path="/projects/:projectId"
             element={
               <RequireAuth>
-                <ProjectSync />
+                <ProjectScanSync />
+                <ScanPicker />
+                <ComputeTab />
+              </RequireAuth>
+            }
+          />
+
+          {/* Per-scan tab routes */}
+          <Route
+            path="/projects/:projectId/scans/:scanId/compute"
+            element={
+              <RequireAuth>
+                <ProjectScanSync />
+                <ScanPicker />
                 <ComputeTab />
               </RequireAuth>
             }
           />
           <Route
-            path="/projects/:projectId/selector"
+            path="/projects/:projectId/scans/:scanId/selector"
             element={
               <RequireAuth>
-                <ProjectSync />
+                <ProjectScanSync />
+                <ScanPicker />
                 <SelectorTabRoute />
               </RequireAuth>
             }
           />
           <Route
-            path="/projects/:projectId/clustering"
+            path="/projects/:projectId/scans/:scanId/clustering"
             element={
               <RequireAuth>
-                <ProjectSync />
+                <ProjectScanSync />
+                <ScanPicker />
                 <ClusteringTabRoute />
               </RequireAuth>
             }
           />
           <Route
-            path="/projects/:projectId/explorer"
+            path="/projects/:projectId/scans/:scanId/explorer"
             element={
               <RequireAuth>
-                <ProjectSync />
+                <ProjectScanSync />
+                <ScanPicker />
                 <ExplorerTabRoute />
               </RequireAuth>
             }
           />
+
+          {/*
+           * Legacy routes kept ONLY to redirect; they clear `activeScanId` in
+           * the slice but force the user through the picker (D6).
+           */}
+          <Route
+            path="/projects/:projectId/:tab"
+            element={
+              <RequireAuth>
+                <ProjectScanSync />
+                <ScanPicker />
+                <ComputeTab />
+              </RequireAuth>
+            }
+          />
+
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </main>
