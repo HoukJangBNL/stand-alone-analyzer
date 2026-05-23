@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import mimetypes
 from pathlib import Path
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import FileResponse
@@ -15,9 +16,10 @@ from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_manifest
 from flake_analysis.api.errors import RawImageMissing, ThumbnailMissing
 from flake_analysis.api.services.path_safety import safe_join
-from flake_analysis.state.manifest import Manifest
 
-router = APIRouter(prefix="/projects/{project_id}", tags=["static"])
+router = APIRouter(
+    prefix="/projects/{project_id}/scans/{scan_id}", tags=["static"]
+)
 
 
 def _read_thumb_metadata(folder: Path) -> tuple[str, list[str]]:
@@ -55,10 +57,10 @@ def _read_thumbnail_cache_dir(folder: Path) -> Path | None:
 @router.get("/static/thumbnails/lod{lod}/{stem}.webp")
 async def get_thumbnail(
     project_id: str,
+    scan_id: int,
     lod: int,
     stem: str,
-    manifest: Manifest = Depends(get_manifest),
-    user: User = Depends(get_current_user),
+    user: Annotated[User, Depends(get_current_user)],
 ):
     """Serve a thumbnail tile.
 
@@ -70,6 +72,7 @@ async def get_thumbnail(
     index.json — v0.2.15 layout) keep the Plan 4 `FileResponse`
     fallback so existing analysis folders still load.
     """
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
     folder = Path(manifest.analysis_folder)
     headers = {
         "Cache-Control": "public, max-age=86400, immutable",
@@ -103,11 +106,12 @@ async def get_thumbnail(
 @router.get("/static/raw/{filename}")
 async def get_raw(
     project_id: str,
+    scan_id: int,
     filename: str,
-    manifest: Manifest = Depends(get_manifest),
-    user: User = Depends(get_current_user),
+    user: Annotated[User, Depends(get_current_user)],
 ):
     """Pinned decision #3: raw served as-is (no transforms, no Y-flip)."""
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
     folder = Path(manifest.analysis_folder)
     raw_root = Path(json.loads((folder / "manifest.json").read_text())["raw_images_dir"])
     safe_path = safe_join(raw_root, filename)
