@@ -123,3 +123,24 @@ export async function putToS3(
     throw new Error(`S3 PUT failed: ${resp.status} ${resp.statusText}`)
   }
 }
+
+export interface ScanSummary {
+  scan_id: number
+  name: string
+  material: string
+  image_count: number
+  created_at: string
+}
+
+interface ScanListEnvelope {
+  scans: ScanSummary[]
+}
+
+export async function listScansForProject(projectId: string): Promise<ScanSummary[]> {
+  const resp = await fetch(`/api/v1/projects/${projectId}/scans`, {
+    headers: { Accept: 'application/json', ...getAuthHeaders() },
+    credentials: 'include',
+  })
+  const env = await unwrap<ScanListEnvelope>(resp)
+  return env.scans
+}

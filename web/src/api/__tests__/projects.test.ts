@@ -1,104 +1,104 @@
-// web/src/api/__tests__/projects.test.ts
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
 import {
-  fetchProjects,
+  listProjects,
   createProject,
-  fetchActiveProject,
-  type ProjectHandle,
+  getProject,
+  patchProject,
+  deleteProject,
+  type Project,
 } from '@/api/projects'
+import { ApiError } from '@/api/selector'
 
-afterEach(() => {
-  vi.restoreAllMocks()
+const fetchMock = vi.fn()
+beforeEach(() => {
+  fetchMock.mockReset()
+  vi.stubGlobal('fetch', fetchMock)
 })
 
-describe('api/projects', () => {
-  it('fetchProjects returns the list when GET /projects succeeds', async () => {
-    const handles: ProjectHandle[] = [
-      { project_id: 'p1', analysis_folder: '/a' },
-      { project_id: 'p2', analysis_folder: '/b' },
+function jsonResp(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { 'content-type': 'application/json' },
+  })
+}
+
+describe('listProjects', () => {
+  it('returns the projects array on 200', async () => {
+    const sample: Project[] = [
+      { project_id: 'p1', name: 'demo', description: null, created_at: '2026-05-22T00:00:00Z', scan_count: 0 },
     ]
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ projects: handles }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
-      )
+    fetchMock.mockResolvedValue(jsonResp(200, { projects: sample }))
+    const out = await listProjects()
+    expect(out).toEqual(sample)
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/projects',
+      expect.objectContaining({ credentials: 'include' })
     )
-    expect(await fetchProjects()).toEqual(handles)
   })
 
-  it('fetchProjects falls back to GET /projects/active on 404', async () => {
-    const active: ProjectHandle = { project_id: 'local', analysis_folder: '/x' }
-    const fetchSpy = vi.fn()
-      .mockResolvedValueOnce(new Response('not found', { status: 404 }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify(active), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
-      )
-    vi.stubGlobal('fetch', fetchSpy)
-    expect(await fetchProjects()).toEqual([active])
-    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  it('throws ApiError on 500 with envelope', async () => {
+    fetchMock.mockResolvedValue(jsonResp(500, { error: { code: 'db_unavailable', message: 'down' } }))
+    await expect(listProjects()).rejects.toBeInstanceOf(ApiError)
+  })
+})
+
+describe('createProject', () => {
+  it('POSTs name + description and returns the new project', async () => {
+    const created: Project = { project_id: 'p9', name: 'new', description: 'd', created_at: '2026-05-22T00:00:00Z', scan_count: 0 }
+    fetchMock.mockResolvedValue(jsonResp(201, created))
+    const out = await createProject({ name: 'new', description: 'd' })
+    expect(out).toEqual(created)
+    const [, opts] = fetchMock.mock.calls[0]
+    expect(opts.method).toBe('POST')
+    expect(JSON.parse(opts.body)).toEqual({ name: 'new', description: 'd' })
   })
 
-  it('fetchProjects falls back to GET /projects/active on 405 (current backend)', async () => {
-    const active: ProjectHandle = { project_id: 'local', analysis_folder: '/x' }
-    const fetchSpy = vi.fn()
-      .mockResolvedValueOnce(new Response('method not allowed', { status: 405 }))
-      .mockResolvedValueOnce(
-        new Response(JSON.stringify(active), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
-      )
-    vi.stubGlobal('fetch', fetchSpy)
-    expect(await fetchProjects()).toEqual([active])
-    expect(fetchSpy).toHaveBeenCalledTimes(2)
+  it('omits description when undefined', async () => {
+    fetchMock.mockResolvedValue(jsonResp(201, { project_id: 'p9', name: 'x', description: null, created_at: 't', scan_count: 0 }))
+    await createProject({ name: 'x' })
+    const [, opts] = fetchMock.mock.calls[0]
+    expect(JSON.parse(opts.body)).toEqual({ name: 'x' })
   })
 
-  it('createProject POSTs the three paths and returns the handle', async () => {
-    const handle: ProjectHandle = {
-      project_id: 'p3',
-      analysis_folder: '/an',
-      raw_images_dir: '/raw',
-      annotations_path: '/an/annotations.json',
-    }
-    const fetchSpy = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(handle), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
-    )
-    vi.stubGlobal('fetch', fetchSpy)
-    const out = await createProject({
-      analysis_folder: '/an',
-      raw_images_dir: '/raw',
-      annotations_path: '/an/annotations.json',
-    })
-    expect(out).toEqual(handle)
-    const [url, init] = fetchSpy.mock.calls[0]
-    expect(url).toBe('/api/v1/projects')
-    expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body)).toEqual({
-      analysis_folder: '/an',
-      raw_images_dir: '/raw',
-      annotations_path: '/an/annotations.json',
+  it('surfaces 409 duplicate as ApiError', async () => {
+    fetchMock.mockResolvedValue(jsonResp(409, { error: { code: 'duplicate_project_name', message: 'taken' } }))
+    await expect(createProject({ name: 'dup' })).rejects.toMatchObject({
+      status: 409,
+      code: 'duplicate_project_name',
     })
   })
+})
 
-  it('fetchActiveProject hits /projects/active', async () => {
-    const handle: ProjectHandle = { project_id: 'local', analysis_folder: '/x' }
-    const fetchSpy = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify(handle), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      })
+describe('getProject / patchProject / deleteProject', () => {
+  it('getProject hits the per-id endpoint', async () => {
+    fetchMock.mockResolvedValue(jsonResp(200, { project_id: 'p1', name: 'a', description: null, created_at: 't', scan_count: 3 }))
+    const p = await getProject('p1')
+    expect(p.scan_count).toBe(3)
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/projects/p1', expect.objectContaining({ credentials: 'include' }))
+  })
+
+  it('patchProject sends only provided fields', async () => {
+    fetchMock.mockResolvedValue(jsonResp(200, { project_id: 'p1', name: 'a2', description: null, created_at: 't', scan_count: 0 }))
+    await patchProject('p1', { name: 'a2' })
+    const [, opts] = fetchMock.mock.calls[0]
+    expect(opts.method).toBe('PATCH')
+    expect(JSON.parse(opts.body)).toEqual({ name: 'a2' })
+  })
+
+  it('deleteProject returns void on 204', async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 204 }))
+    await deleteProject('p1')
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/projects/p1',
+      expect.objectContaining({ method: 'DELETE' })
     )
-    vi.stubGlobal('fetch', fetchSpy)
-    expect(await fetchActiveProject()).toEqual(handle)
-    expect(fetchSpy.mock.calls[0][0]).toBe('/api/v1/projects/active')
+  })
+
+  it('deleteProject surfaces 409 has_scans', async () => {
+    fetchMock.mockResolvedValue(jsonResp(409, { error: { code: 'project_has_scans', message: 'cannot delete', details: { scan_count: 2 } } }))
+    await expect(deleteProject('p1')).rejects.toMatchObject({
+      status: 409,
+      code: 'project_has_scans',
+    })
   })
 })
