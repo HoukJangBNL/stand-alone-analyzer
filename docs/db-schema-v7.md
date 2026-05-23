@@ -180,3 +180,39 @@ Seeded on migration: `graphene`, `MoS2`, `WSe2`, `hBN`, `WS2`.
 ### Pre-flight on non-empty databases
 
 This migration assumes every existing `scans` row has a non-null `material` and every existing `images` row has non-null `grid_ix`/`grid_iy`. Verified empty on `saa_test` 2026-05-22 (zero rows). Production DB state must be checked before running on prod (devops-engineer concern, W5-infra plan §pre-flight).
+
+---
+
+## v7.2 — W10-A delta (2026-05-22, alembic head `0004_w10_projects`)
+
+### New table: `projects`
+
+Top-level grouping for scans + ACL grants. `id` is a server-generated UUID v4 string; `TEXT` PK preserves wire-type parity with the W6.0 `project_users.project_id TEXT` and pre-W10 `scans.project_id TEXT` columns.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | TEXT | PK, DEFAULT `gen_random_uuid()::text` |
+| `name` | TEXT | NOT NULL |
+| `owner_id` | UUID | FK → `users.id` ON DELETE RESTRICT, NOT NULL |
+| `description` | TEXT | nullable |
+| `created_at` | TIMESTAMPTZ | DEFAULT `NOW()`, NOT NULL |
+
+UNIQUE `(owner_id, name)` — one owner cannot create two projects with the same name.
+
+### `scans` deltas
+
+- `project_id` — was `TEXT NULL` (alias only, no FK), now `TEXT NOT NULL` with `FK → projects(id) ON DELETE RESTRICT`.
+- New index `scans_project_idx` on `(project_id)` for project-scoped scan listings.
+
+### `project_users` deltas
+
+- `project_id` — was `TEXT NOT NULL` (alias only), now `TEXT NOT NULL` with `FK → projects(id) ON DELETE CASCADE`. PK `(project_id, user_id)` preserved.
+
+### `images` deltas
+
+- `project_id` — column **dropped**. `images.scan_id FK → scans.id ON DELETE CASCADE` already provides project deletion cascading; the denorm column was never read by route code post-W5-A.
+
+### Migration order
+- Down-rev: `0003_w5a_materials_uploads`
+- This rev: `0004_w10_projects`
+- Pre-flight: `scripts/db/wipe-saa-test-pre-w10.sql` (manual, saa_test only — prod is empty)
