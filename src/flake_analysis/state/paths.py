@@ -1,8 +1,21 @@
-"""Filesystem layout constants for analysis_folder/.
+"""Filesystem layout: per-scan analysis folders.
 
-Per plan v1 r7 §6: 6 numbered subdirs.
+Layout: <SAA_ANALYSIS_ROOT>/<project_id>/<scan_id>/
+                                                  ├── manifest.json
+                                                  ├── 00_thumbnails/
+                                                  ├── 01_background/
+                                                  ├── 02_domain_stats/
+                                                  ├── 03_selector/
+                                                  ├── 04_clustering/
+                                                  ├── 05_domain_proximity/
+                                                  └── 06_explorer/
+
+W10-B introduced the (project_id, scan_id) dimensions; pre-W10 callers
+resolved everything through a process-global `_active_project` in
+`api/deps.py` (now removed).
 """
 from __future__ import annotations
+
 from pathlib import Path
 
 PIPELINE_STEPS = (
@@ -15,11 +28,6 @@ PIPELINE_STEPS = (
     "explorer",
 )
 
-# Directory layout under analysis_folder/.
-# ``00_thumbnails`` is added in v0.2.15: pre-rendered LOD pyramid for
-# the Explorer substrate mosaic. Numbered 00 because it depends only
-# on raw_images_dir (no other step) so it can run early — alongside or
-# even before Background.
 SUBDIRS = {
     "background":       "01_background",
     "thumbnails":       "00_thumbnails",
@@ -30,13 +38,8 @@ SUBDIRS = {
     "explorer":         "06_explorer",
 }
 
-# Hardcoded artifact paths within each subdir (matches plan §6 + §7 r7)
 ARTIFACTS = {
     "background": ["background.npy"],
-    # Thumbnails: per-LOD subfolders (lod0/, lod1/, lod2/, lod3/) of
-    # WebP thumbnails named after the raw image stem. ``index.json``
-    # records the source raw_images_dir + file mtimes for cache hit
-    # detection.
     "thumbnails": ["index.json"],
     "domain_stats": ["stats.npz"],
     "selector": ["selection.parquet"],
@@ -46,12 +49,27 @@ ARTIFACTS = {
 }
 
 
-def step_dir(analysis_folder: str | Path, step: str) -> Path:
-    """Return the directory path for a given pipeline step."""
+def analysis_folder(root: str | Path, project_id: str, scan_id: int) -> Path:
+    """Return the per-scan analysis folder.
+
+    `<root>/<project_id>/<scan_id>/` — created lazily by callers that
+    write into it (manifest.save_manifest does the mkdir). Pure path
+    composition, no IO here.
+    """
+    if not project_id:
+        raise ValueError("project_id must be a non-empty string")
+    if not isinstance(scan_id, int) or scan_id <= 0:
+        raise ValueError(f"scan_id must be a positive int, got {scan_id!r}")
+    return Path(root) / project_id / str(scan_id)
+
+
+def manifest_path(root: str | Path, project_id: str, scan_id: int) -> Path:
+    """Return the manifest.json path for a (project_id, scan_id) pair (D5)."""
+    return analysis_folder(root, project_id, scan_id) / "manifest.json"
+
+
+def step_dir(analysis_folder_path: str | Path, step: str) -> Path:
+    """Return the directory path for a given pipeline step within an analysis_folder."""
     if step not in SUBDIRS:
         raise ValueError(f"unknown step: {step}")
-    return Path(analysis_folder) / SUBDIRS[step]
-
-
-def manifest_path(analysis_folder: str | Path) -> Path:
-    return Path(analysis_folder) / "manifest.json"
+    return Path(analysis_folder_path) / SUBDIRS[step]
