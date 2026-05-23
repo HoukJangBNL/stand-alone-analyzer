@@ -1,91 +1,119 @@
-"""Project lifecycle endpoints per backend design §1.1."""
+"""Projects CRUD (W10-C). Replaces the pre-W10 path-only stub."""
 from __future__ import annotations
-import os
-from pathlib import Path
-from typing import Optional
-from fastapi import APIRouter, Body, Depends
+
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Response, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from flake_analysis.api import errors as app_errors
 from flake_analysis.api.auth import User, get_current_user
+from flake_analysis.api.deps import get_db_session
 from flake_analysis.api.schemas.projects import (
     CreateProjectRequest,
+    PatchProjectRequest,
+    ProjectDetail,
     ProjectHandle,
-    ValidatePathsRequest,
-    ValidatePathsResponse,
-    PathStatus,
+    ProjectListResponse,
 )
-from flake_analysis.api.deps import (
-    DEFAULT_ANALYSIS_FOLDER,
-    DEFAULT_PROJECT_ID,
-    _resolve_project_id,
-)
+from flake_analysis.api.services import projects_service as svc
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
-@router.post("")
+
+def _to_handle(p) -> ProjectHandle:
+    return ProjectHandle(
+        project_id=p.id,
+        name=p.name,
+        owner_id=p.owner_id,
+        description=p.description,
+        created_at=p.created_at,
+    )
+
+
+@router.get("", response_model=ProjectListResponse)
+async def list_projects(
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ProjectListResponse:
+    rows = await svc.list_projects_for_user(session, user_id=user.id)
+    return ProjectListResponse(projects=[_to_handle(r) for r in rows])
+
+
+@router.post(
+    "",
+    response_model=ProjectHandle,
+    status_code=status.HTTP_201_CREATED,
+)
 async def create_project(
-    req: Optional[CreateProjectRequest] = Body(default=None),
-    user: User = Depends(get_current_user),
+    req: CreateProjectRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ProjectHandle:
-    """Create project (v1: sets active project path).
-
-    Empty body → default project rooted at SAA_ANALYSIS_FOLDER.
-    Body with analysis_folder → activates that path.
-    Other paths (raw_images_dir, annotations_path) are echoed back verbatim
-    for the frontend to persist alongside the manifest.
-    """
-    import os as _os
-    import flake_analysis.api.deps as deps_module
-
-    analysis_folder = (req.analysis_folder if req else None) or _os.environ.get(
-        "SAA_ANALYSIS_FOLDER", DEFAULT_ANALYSIS_FOLDER
-    )
-    deps_module._active_project = analysis_folder
-
-    return ProjectHandle(
-        project_id=DEFAULT_PROJECT_ID,
-        analysis_folder=analysis_folder,
-        raw_images_dir=(req.raw_images_dir if req else None),
-        annotations_path=(req.annotations_path if req else None),
-    )
-
-@router.get("/active")
-async def get_active_project(
-    user: User = Depends(get_current_user),
-) -> ProjectHandle:
-    """Get the active project (v1: single project)."""
-    analysis_folder = _resolve_project_id("local")
-    return ProjectHandle(
-        project_id="local",
-        analysis_folder=analysis_folder,
-    )
-
-@router.post("/validate-paths")
-async def validate_paths(
-    req: ValidatePathsRequest,
-    user: User = Depends(get_current_user),
-) -> ValidatePathsResponse:
-    """Validate paths for existence, type, and permissions."""
-    def check_path(path_str: str | None) -> PathStatus | None:
-        if path_str is None:
-            return None
-
-        p = Path(path_str).resolve()
-        exists = p.exists()
-        is_dir = p.is_dir() if exists else False
-        is_file = p.is_file() if exists else False
-        readable = os.access(p, os.R_OK) if exists else False
-        writable = os.access(p, os.W_OK) if exists else False
-
-        return PathStatus(
-            exists=exists,
-            is_dir=is_dir,
-            is_file=is_file,
-            readable=readable,
-            writable=writable,
-            canonical=str(p),
+    try:
+        p = await svc.create_project(
+            session,
+            owner_id=user.id,
+            name=req.name,
+            description=req.description,
         )
+    except svc.DuplicateProjectName as exc:
+        raise app_errors.DuplicateProjectName(name=str(exc)) from exc
+    await session.commit()
+    return _to_handle(p)
 
-    return ValidatePathsResponse(
-        analysis_folder=check_path(req.analysis_folder),
-        raw_images_dir=check_path(req.raw_images_dir),
-        annotations_path=check_path(req.annotations_path),
-    )
+
+@router.get("/{project_id}", response_model=ProjectDetail)
+async def get_project(
+    project_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ProjectDetail:
+    try:
+        p, n = await svc.get_project_with_scan_count(
+            session, project_id=project_id,
+        )
+    except svc.ProjectNotFound as exc:
+        raise app_errors.ProjectNotFound(project_id=project_id) from exc
+    handle = _to_handle(p)
+    return ProjectDetail(scan_count=n, **handle.model_dump())
+
+
+@router.patch("/{project_id}", response_model=ProjectHandle)
+async def patch_project(
+    project_id: str,
+    req: PatchProjectRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> ProjectHandle:
+    try:
+        p = await svc.patch_project(
+            session,
+            project_id=project_id,
+            name=req.name,
+            description=req.description,
+        )
+    except svc.ProjectNotFound as exc:
+        raise app_errors.ProjectNotFound(project_id=project_id) from exc
+    except svc.DuplicateProjectName as exc:
+        raise app_errors.DuplicateProjectName(name=str(exc)) from exc
+    await session.commit()
+    return _to_handle(p)
+
+
+@router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_project(
+    project_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> Response:
+    try:
+        await svc.delete_project_or_409(session, project_id=project_id)
+    except svc.ProjectNotFound as exc:
+        raise app_errors.ProjectNotFound(project_id=project_id) from exc
+    except svc.ProjectHasScans as exc:
+        raise app_errors.ProjectHasScans(
+            project_id=project_id, scan_count=exc.scan_count
+        ) from exc
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

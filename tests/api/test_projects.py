@@ -1,97 +1,118 @@
+"""W10-C: projects CRUD HTTP integration tests."""
+from __future__ import annotations
+
 import pytest
-import os
-from httpx import AsyncClient, ASGITransport
-from flake_analysis.api.main import create_app
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 
-@pytest.mark.asyncio
-async def test_create_project(tmp_path):
-    """POST /projects creates a project handle."""
-    analysis_folder = tmp_path / "proj1"
-    analysis_folder.mkdir()
+from flake_analysis.api.errors import AppError, app_error_handler
+from flake_analysis.api.routes import projects as projects_route
+from flake_analysis.db.models import Scan
 
-    app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post("/api/v1/projects", json={
-            "analysis_folder": str(analysis_folder),
-        })
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["project_id"] == "local"
-        assert body["analysis_folder"] == str(analysis_folder)
-
-@pytest.mark.asyncio
-async def test_get_active_project(tmp_path):
-    """GET /projects/active returns the active project."""
-    os.environ["SAA_ANALYSIS_FOLDER"] = str(tmp_path)
-
-    app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/v1/projects/active")
-        assert resp.status_code == 200
-        body = resp.json()
-        assert body["project_id"] == "local"
-
-    os.environ.pop("SAA_ANALYSIS_FOLDER", None)
+pytestmark = pytest.mark.pg
 
 
-@pytest.mark.asyncio
-async def test_post_empty_body_creates_default_project(tmp_path):
-    """POST /api/v1/projects with no body falls back to SAA_ANALYSIS_FOLDER."""
-    os.environ["SAA_ANALYSIS_FOLDER"] = str(tmp_path)
-    try:
-        app = create_app()
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            # No json= kwarg → httpx sends an empty request body.
-            resp = await client.post("/api/v1/projects")
-            assert resp.status_code == 200, resp.text
-            body = resp.json()
-            assert body["project_id"] == "local"
-            assert body["analysis_folder"] == str(tmp_path)
-            assert body["raw_images_dir"] is None
-            assert body["annotations_path"] is None
-    finally:
-        os.environ.pop("SAA_ANALYSIS_FOLDER", None)
+def _make_app() -> FastAPI:
+    """Build a minimal FastAPI app exposing only the projects router.
+
+    Sidesteps W10-C Task 4's not-yet-migrated analysis routers (data/run/
+    selector/clustering/explorer/static) which still use the pre-W10-B
+    `Depends(get_active_analysis)` shape and crash at route-collection
+    time. Once Task 4 lands these tests can switch to importing the
+    full `app` from `flake_analysis.api.main`.
+    """
+    app = FastAPI()
+    app.add_exception_handler(AppError, app_error_handler)
+    app.include_router(projects_route.router, prefix="/api/v1")
+    return app
+
+
+async def _client(pg_session, current_user):
+    """Wire the test app's get_db_session + get_current_user to test fixtures."""
+    from flake_analysis.api.auth import get_current_user
+    from flake_analysis.api.deps import get_db_session
+
+    app = _make_app()
+
+    async def _override_db():
+        yield pg_session
+
+    app.dependency_overrides[get_db_session] = _override_db
+    app.dependency_overrides[get_current_user] = lambda: current_user
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
 @pytest.mark.asyncio
-async def test_post_empty_json_object_creates_default_project(tmp_path):
-    """POST /api/v1/projects with body {} also falls back to SAA_ANALYSIS_FOLDER."""
-    os.environ["SAA_ANALYSIS_FOLDER"] = str(tmp_path)
-    try:
-        app = create_app()
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.post("/api/v1/projects", json={})
-            assert resp.status_code == 200, resp.text
-            body = resp.json()
-            assert body["project_id"] == "local"
-            assert body["analysis_folder"] == str(tmp_path)
-    finally:
-        os.environ.pop("SAA_ANALYSIS_FOLDER", None)
+async def test_create_then_list_then_get(pg_session, sample_user_factory):
+    user = await sample_user_factory()
+    async with await _client(pg_session, user) as client:
+        r = await client.post("/api/v1/projects", json={"name": "Alpha"})
+        assert r.status_code == 201, r.text
+        body = r.json()
+        pid = body["project_id"]
+        assert body["name"] == "Alpha"
+
+        r = await client.get("/api/v1/projects")
+        assert r.status_code == 200
+        names = [p["name"] for p in r.json()["projects"]]
+        assert "Alpha" in names
+
+        r = await client.get(f"/api/v1/projects/{pid}")
+        assert r.status_code == 200
+        assert r.json()["scan_count"] == 0
 
 
 @pytest.mark.asyncio
-async def test_post_with_full_body_still_works(tmp_path):
-    """POST /api/v1/projects with all 3 paths still returns those paths verbatim."""
-    analysis = tmp_path / "a"
-    raw = tmp_path / "raw"
-    ann = tmp_path / "ann.json"
-    analysis.mkdir()
-    raw.mkdir()
-    ann.write_text("{}")
+async def test_create_dup_name_returns_409(pg_session, sample_user_factory):
+    user = await sample_user_factory()
+    async with await _client(pg_session, user) as client:
+        await client.post("/api/v1/projects", json={"name": "dup"})
+        r = await client.post("/api/v1/projects", json={"name": "dup"})
+        assert r.status_code == 409
+        assert r.json()["error"]["code"] == "duplicate_project_name"
 
-    app = create_app()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/v1/projects",
-            json={
-                "analysis_folder": str(analysis),
-                "raw_images_dir": str(raw),
-                "annotations_path": str(ann),
-            },
+
+@pytest.mark.asyncio
+async def test_patch_renames_project(pg_session, sample_user_factory):
+    user = await sample_user_factory()
+    async with await _client(pg_session, user) as client:
+        r = await client.post("/api/v1/projects", json={"name": "Original"})
+        pid = r.json()["project_id"]
+
+        r = await client.patch(f"/api/v1/projects/{pid}", json={"name": "Renamed"})
+        assert r.status_code == 200
+        assert r.json()["name"] == "Renamed"
+
+
+@pytest.mark.asyncio
+async def test_delete_empty_project(pg_session, sample_user_factory):
+    user = await sample_user_factory()
+    async with await _client(pg_session, user) as client:
+        r = await client.post("/api/v1/projects", json={"name": "tmp"})
+        pid = r.json()["project_id"]
+
+        r = await client.delete(f"/api/v1/projects/{pid}")
+        assert r.status_code == 204
+
+        r = await client.get(f"/api/v1/projects/{pid}")
+        assert r.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_project_with_scans_returns_409(pg_session, sample_user_factory):
+    user = await sample_user_factory()
+    async with await _client(pg_session, user) as client:
+        r = await client.post("/api/v1/projects", json={"name": "with-scan"})
+        pid = r.json()["project_id"]
+
+        # Insert a scan directly via session
+        pg_session.add(
+            Scan(name="s1", material="graphene", project_id=pid, created_by_id=user.id)
         )
-        assert resp.status_code == 200, resp.text
-        body = resp.json()
-        assert body["project_id"] == "local"
-        assert body["analysis_folder"] == str(analysis)
-        assert body["raw_images_dir"] == str(raw)
-        assert body["annotations_path"] == str(ann)
+        await pg_session.commit()
+
+        r = await client.delete(f"/api/v1/projects/{pid}")
+        assert r.status_code == 409
+        body = r.json()
+        assert body["error"]["code"] == "project_has_scans"
+        assert body["error"]["details"]["scan_count"] == 1

@@ -131,6 +131,24 @@ class DbUnavailable(AppError):
     message = "Database temporarily unavailable"
 
 
+class DuplicateProjectName(AppError):
+    code = "duplicate_project_name"
+    status_code = status.HTTP_409_CONFLICT
+    message = "Project with this name already exists"
+
+
+class ProjectNotFound(AppError):
+    code = "project_not_found"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Project not found"
+
+
+class ProjectHasScans(AppError):
+    code = "project_has_scans"
+    status_code = status.HTTP_409_CONFLICT
+    message = "Project still has scans; delete or move them first"
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()
