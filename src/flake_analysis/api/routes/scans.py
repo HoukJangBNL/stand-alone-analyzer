@@ -568,15 +568,16 @@ async def finalize_scan(
     user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> FinalizeResponse:
-    scan = (await session.execute(
-        select(Scan).where(Scan.id == scan_id)
-    )).scalar_one_or_none()
-    if scan is None:
+    try:
+        scan = await scans_service.require_editor_for_scan(
+            session, scan_id=scan_id, user=user,
+        )
+    except app_errors.ScanNotFound:
         logger.info(
-            "finalize aborted: scan not found",
+            "finalize aborted: scan not found or no access",
             extra=_log_extra(event="finalize_scan_not_found", scan_id=scan_id),
         )
-        raise app_errors.ScanNotFound(scan_id=scan_id)
+        raise
 
     uploaded = (await session.execute(
         select(func.count(Image.id)).where(Image.scan_id == scan_id)
