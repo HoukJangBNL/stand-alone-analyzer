@@ -32,6 +32,7 @@ from flake_analysis.api.schemas.upload import (
 )
 from flake_analysis.api.services import (
     projects_service as projects_svc,
+    s3_cleanup,
     s3_presign,
     scans_service,
     upload_service,
@@ -668,10 +669,35 @@ async def delete_scan(
     """Delete a scan and all its data (DB cascade + S3 prefix wipe).
 
     Outsiders see 404 `scan_not_found` (no leak). In-project viewers see
-    403 `forbidden{action: scan_delete}`. Editors / owner / admin succeed.
+    403 `forbidden{action: scan_edit}`. Editors / owner / admin succeed.
     """
-    scan = await scans_service.require_editor_for_scan(  # noqa: F841 (used in Task 3)
+    scan = await scans_service.require_editor_for_scan(
         session, scan_id=scan_id, user=user,
     )
-    # S3 + DB cascade implemented in Task 3
-    raise NotImplementedError("delete body not yet implemented")  # noqa: PIE790
+
+    bucket = os.environ.get("SAA_S3_BUCKET")
+    if not bucket:
+        logger.error(
+            "delete aborted: SAA_S3_BUCKET not configured",
+            extra=_log_extra(scan_id=scan_id, user_id=str(user.id)),
+        )
+        raise app_errors.S3NotConfigured()
+
+    project_id = scan.project_id
+    prefix = f"dev/scans/{scan_id}/"
+
+    loop = asyncio.get_running_loop()
+    deleted = await loop.run_in_executor(
+        None, lambda: s3_cleanup.delete_prefix(bucket=bucket, prefix=prefix)
+    )
+
+    await session.delete(scan)
+    await session.commit()
+
+    logger.info(
+        "scan deleted",
+        extra=_log_extra(
+            scan_id=scan_id, project_id=project_id, user_id=str(user.id),
+            s3_deleted=deleted,
+        ),
+    )
