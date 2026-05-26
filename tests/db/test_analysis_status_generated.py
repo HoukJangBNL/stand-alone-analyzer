@@ -10,6 +10,8 @@ Each test creates one Scan + Model + Analysis row and rolls back.
 """
 from __future__ import annotations
 
+from uuid import uuid4
+
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,15 +19,32 @@ from flake_analysis.db.models import (
     Analysis,
     Model,
     PipelineStatus,
+    Project,
     Scan,
+    User,
 )
 
 pytestmark = [pytest.mark.pg, pytest.mark.asyncio]
 
 
 async def _seed_scan_and_model(session: AsyncSession) -> tuple[int, int]:
-    # `material` is now NOT NULL + FK→materials(name); use the seeded "graphene".
-    scan = Scan(name="t-scan", material="graphene", image_count=0)
+    # W10-A made scans.project_id NOT NULL FK→projects.id, so seed a User +
+    # Project per call. `material` is NOT NULL + FK→materials(name); use the
+    # seeded "graphene" row.
+    suffix = uuid4().hex[:8]
+    user = User(
+        cognito_sub=f"test-cognito-{suffix}",
+        email=f"test-{suffix}@example.com",
+    )
+    session.add(user)
+    await session.flush()
+    project = Project(name=f"test-project-{suffix}", owner_id=user.id)
+    session.add(project)
+    await session.flush()
+    scan = Scan(
+        name="t-scan", material="graphene", image_count=0,
+        project_id=project.id,
+    )
     model = Model(name="t-model", base_model="sam2", s3_uri="s3://x/y")
     session.add_all([scan, model])
     await session.flush()

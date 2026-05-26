@@ -5,7 +5,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
-from flake_analysis.db.models import Image, Material, Scan
+from flake_analysis.db.models import Image, Material, Project, Scan
 
 pytestmark = pytest.mark.pg
 
@@ -59,7 +59,13 @@ async def test_scan_rejects_unknown_material(pg_session, sample_user_factory):
 async def test_image_grid_uniqueness(pg_session, sample_user_factory):
     """Two images on the same scan with the same (grid_ix, grid_iy) violate UNIQUE."""
     user = await sample_user_factory()
-    scan = Scan(name="t3", material="graphene", created_by_id=user.id)
+    project = Project(name="t3-project", owner_id=user.id)
+    pg_session.add(project)
+    await pg_session.flush()
+    scan = Scan(
+        name="t3", material="graphene",
+        project_id=project.id, created_by_id=user.id,
+    )
     pg_session.add(scan)
     await pg_session.flush()
 
