@@ -165,6 +165,12 @@ class S3NotConfigured(AppError):
     message = "SAA_S3_BUCKET not configured"
 
 
+class ScanDeleteS3Failure(AppError):
+    code = "scan_delete_s3_failure"
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    message = "S3 cleanup failed during scan delete"
+
+
 class ScanNotFound(AppError):
     code = "scan_not_found"
     status_code = status.HTTP_404_NOT_FOUND

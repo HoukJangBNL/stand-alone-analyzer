@@ -49,6 +49,7 @@ async def test_delete_outsider_404(
     monkeypatch,
 ):
     monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+    monkeypatch.setenv("SAA_S3_PREFIX", "dev/")
     owner = await sample_user_factory(role=UserRole.MEMBER)
     outsider = await sample_user_factory(role=UserRole.MEMBER)
     project = await sample_project_factory(owner=owner)
@@ -76,6 +77,7 @@ async def test_delete_viewer_403(
     monkeypatch,
 ):
     monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+    monkeypatch.setenv("SAA_S3_PREFIX", "dev/")
     owner = await sample_user_factory(role=UserRole.MEMBER)
     viewer = await sample_user_factory(role=UserRole.MEMBER)
     project = await sample_project_factory(owner=owner)
@@ -109,6 +111,7 @@ async def test_delete_owner_succeeds_and_wipes_s3(
     monkeypatch,
 ):
     monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+    monkeypatch.setenv("SAA_S3_PREFIX", "dev/")
     owner = await sample_user_factory(role=UserRole.MEMBER)
     project = await sample_project_factory(owner=owner)
     scan = await sample_scan_factory(project=project)
@@ -160,6 +163,7 @@ async def test_delete_idempotent_second_call_404(
     monkeypatch,
 ):
     monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+    monkeypatch.setenv("SAA_S3_PREFIX", "dev/")
     owner = await sample_user_factory(role=UserRole.MEMBER)
     project = await sample_project_factory(owner=owner)
     scan = await sample_scan_factory(project=project)
@@ -176,6 +180,57 @@ async def test_delete_idempotent_second_call_404(
                 second = await client.delete(f"/api/v1/scans/{scan.id}")
                 assert second.status_code == 404
                 assert second.json()["error"]["code"] == "scan_not_found"
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+        app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.pg
+async def test_delete_respects_s3_prefix_env_var(
+    pg_session, sample_user_factory, sample_project_factory, sample_scan_factory,
+    monkeypatch,
+):
+    """If SAA_S3_PREFIX=prod/, only prod/scans/{id}/ is wiped; dev/ untouched."""
+    monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+    monkeypatch.setenv("SAA_S3_PREFIX", "prod/")
+    owner = await sample_user_factory(role=UserRole.MEMBER)
+    project = await sample_project_factory(owner=owner)
+    scan = await sample_scan_factory(project=project)
+
+    app.dependency_overrides[get_db_session] = _override_session(pg_session)
+    app.dependency_overrides[get_current_user] = _override_user(_to_domain(owner))
+    try:
+        with mock_aws():
+            _create_bucket()
+            s3 = boto3.client("s3", region_name="us-east-2")
+            # Put keys in BOTH prod/ (target) and dev/ (must survive)
+            s3.put_object(
+                Bucket="qpress-uploads",
+                Key=f"prod/scans/{scan.id}/images/a.png",
+                Body=b"prod-x",
+            )
+            s3.put_object(
+                Bucket="qpress-uploads",
+                Key=f"dev/scans/{scan.id}/images/a.png",
+                Body=b"dev-x",
+            )
+
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.delete(f"/api/v1/scans/{scan.id}")
+            assert resp.status_code == 204
+
+            # prod/ wiped
+            prod_left = s3.list_objects_v2(
+                Bucket="qpress-uploads", Prefix=f"prod/scans/{scan.id}/"
+            ).get("Contents")
+            assert prod_left is None or len(prod_left) == 0
+            # dev/ untouched
+            dev_left = s3.list_objects_v2(
+                Bucket="qpress-uploads", Prefix=f"dev/scans/{scan.id}/"
+            ).get("Contents")
+            assert dev_left is not None and len(dev_left) == 1
     finally:
         app.dependency_overrides.pop(get_db_session, None)
         app.dependency_overrides.pop(get_current_user, None)

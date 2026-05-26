@@ -679,17 +679,37 @@ async def delete_scan(
     if not bucket:
         logger.error(
             "delete aborted: SAA_S3_BUCKET not configured",
-            extra=_log_extra(scan_id=scan_id, user_id=str(user.id)),
+            extra=_log_extra(
+                event="delete_bucket_unconfigured",
+                scan_id=scan_id, user_id=str(user.id),
+            ),
         )
-        raise app_errors.S3NotConfigured()
+        raise app_errors.S3NotConfigured(scan_id=scan_id)
 
     project_id = scan.project_id
-    prefix = f"dev/scans/{scan_id}/"
+    s3_prefix = os.environ.get("SAA_S3_PREFIX", "")
+    prefix = f"{s3_prefix}scans/{scan_id}/"
 
+    # Order: S3 wipe FIRST, then DB delete. Rationale:
+    # - delete_prefix is idempotent (re-running on empty prefix returns 0).
+    # - If S3 fails, DB row stays → caller retries DELETE → prefix wipe + delete.
+    # - If S3 succeeds and DB commit fails, caller retries → prefix wipe is a
+    #   no-op, DB delete proceeds. Self-healing.
+    # The reverse order (DB-first) would orphan S3 keys with no recovery anchor.
     loop = asyncio.get_running_loop()
-    deleted = await loop.run_in_executor(
-        None, lambda: s3_cleanup.delete_prefix(bucket=bucket, prefix=prefix)
-    )
+    try:
+        deleted = await loop.run_in_executor(
+            None, lambda: s3_cleanup.delete_prefix(bucket=bucket, prefix=prefix)
+        )
+    except RuntimeError as exc:
+        logger.exception(
+            "scan delete: s3 cleanup partial failure",
+            extra=_log_extra(
+                event="delete_s3_partial_failure",
+                scan_id=scan_id, user_id=str(user.id),
+            ),
+        )
+        raise app_errors.ScanDeleteS3Failure(scan_id=scan_id) from exc
 
     await session.delete(scan)
     await session.commit()
@@ -697,6 +717,7 @@ async def delete_scan(
     logger.info(
         "scan deleted",
         extra=_log_extra(
+            event="scan_deleted",
             scan_id=scan_id, project_id=project_id, user_id=str(user.id),
             s3_deleted=deleted,
         ),
