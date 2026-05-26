@@ -75,17 +75,22 @@ def _seed_in_folder_layout(tmp_path: Path) -> Path:
 
 
 @pytest.mark.asyncio
-async def test_xaccel_redirect_emitted_when_cache_dir_present(tmp_path: Path):
+async def test_xaccel_redirect_emitted_when_cache_dir_present(tmp_path: Path, monkeypatch):
     folder = _seed_local_cache_layout(tmp_path, sha="deadbeef12345678")
     app = create_app()
     manifest = Manifest(analysis_folder=str(folder))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+
+    async def _fake_get_manifest(project_id, scan_id):
+        return manifest
+
+    monkeypatch.setattr(
+        "flake_analysis.api.routes.static.get_manifest", _fake_get_manifest
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get(
-            "/api/v1/projects/local/static/thumbnails/lod1/ix000_iy000.webp"
+            "/api/v1/projects/local/scans/1/static/thumbnails/lod1/ix000_iy000.webp"
         )
     assert resp.status_code == 200
     xa = resp.headers.get("x-accel-redirect", "")
@@ -103,17 +108,22 @@ async def test_xaccel_redirect_emitted_when_cache_dir_present(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_xaccel_redirect_uses_internal_prefix_only(tmp_path: Path):
+async def test_xaccel_redirect_uses_internal_prefix_only(tmp_path: Path, monkeypatch):
     folder = _seed_local_cache_layout(tmp_path, sha="cafe1234abcd5678")
     app = create_app()
     manifest = Manifest(analysis_folder=str(folder))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+
+    async def _fake_get_manifest(project_id, scan_id):
+        return manifest
+
+    monkeypatch.setattr(
+        "flake_analysis.api.routes.static.get_manifest", _fake_get_manifest
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get(
-            "/api/v1/projects/local/static/thumbnails/lod1/ix000_iy000.webp"
+            "/api/v1/projects/local/scans/1/static/thumbnails/lod1/ix000_iy000.webp"
         )
     assert resp.status_code == 200
     xa = resp.headers.get("x-accel-redirect", "")
@@ -124,17 +134,22 @@ async def test_xaccel_redirect_uses_internal_prefix_only(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_legacy_in_folder_layout_falls_back_to_file_response(tmp_path: Path):
+async def test_legacy_in_folder_layout_falls_back_to_file_response(tmp_path: Path, monkeypatch):
     folder = _seed_in_folder_layout(tmp_path)
     app = create_app()
     manifest = Manifest(analysis_folder=str(folder))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+
+    async def _fake_get_manifest(project_id, scan_id):
+        return manifest
+
+    monkeypatch.setattr(
+        "flake_analysis.api.routes.static.get_manifest", _fake_get_manifest
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get(
-            "/api/v1/projects/local/static/thumbnails/lod1/ix000_iy000.webp"
+            "/api/v1/projects/local/scans/1/static/thumbnails/lod1/ix000_iy000.webp"
         )
     assert resp.status_code == 200
     # No cache_dir → no X-Accel-Redirect; body holds the WebP bytes.
@@ -145,20 +160,25 @@ async def test_legacy_in_folder_layout_falls_back_to_file_response(tmp_path: Pat
 
 
 @pytest.mark.asyncio
-async def test_thumbnail_404_when_file_missing(tmp_path: Path):
+async def test_thumbnail_404_when_file_missing(tmp_path: Path, monkeypatch):
     folder = _seed_local_cache_layout(tmp_path, sha="deadbeef12345678")
     # Delete the WebP after seeding so the route's existence check fails.
     (Path(json.loads((folder / "00_thumbnails" / "index.json").read_text())["cache_dir"])
      / "lod1" / "ix000_iy000.webp").unlink()
     app = create_app()
     manifest = Manifest(analysis_folder=str(folder))
-    from flake_analysis.api import deps
-    app.dependency_overrides[deps.get_manifest] = lambda project_id="local": manifest
+
+    async def _fake_get_manifest(project_id, scan_id):
+        return manifest
+
+    monkeypatch.setattr(
+        "flake_analysis.api.routes.static.get_manifest", _fake_get_manifest
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get(
-            "/api/v1/projects/local/static/thumbnails/lod1/ix000_iy000.webp"
+            "/api/v1/projects/local/scans/1/static/thumbnails/lod1/ix000_iy000.webp"
         )
     assert resp.status_code == 404
     assert resp.json()["error"]["code"] == "thumbnail_missing"
