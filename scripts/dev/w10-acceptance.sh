@@ -19,6 +19,15 @@ REPO="$(pwd)"
 TS="$(date +%Y%m%dT%H%M%S)"
 LOG="${REPO}/.w10-acceptance.${TS}.log"
 
+# Load repo-local .env so SAA_S3_BUCKET / SAA_TEST_DATABASE_URL / SAA_S3_PREFIX
+# / AWS_PROFILE etc are visible to the test subshells. Mirrors start-backend.sh.
+if [[ -f .env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source .env
+  set +a
+fi
+
 echo "W10 acceptance gate — $(date -Iseconds)"
 echo "   repo: $REPO"
 echo "   log : $LOG"
