@@ -69,4 +69,32 @@ describe('MaterialCombobox', () => {
       expect(screen.getByTestId('material-combobox-empty-hint')).toBeTruthy(),
     )
   })
+
+  it('invalidates the materials list after create so the new option appears without reload', async () => {
+    // First fetch returns [graphene]; after create resolves, the next fetch
+    // returns [graphene, NbSe2]. The component must trigger that refetch by
+    // invalidating the materials query on mutation success — otherwise the
+    // dropdown stays stale.
+    const fetchSpy = vi.spyOn(materialsApi, 'fetchMaterials')
+    fetchSpy.mockResolvedValueOnce([{ name: 'graphene' }])
+    fetchSpy.mockResolvedValue([{ name: 'graphene' }, { name: 'NbSe2' }])
+    vi.spyOn(materialsApi, 'createMaterial').mockResolvedValue({
+      name: 'NbSe2',
+      created: true,
+    })
+    render(wrap(<MaterialCombobox value="" onChange={() => {}} />))
+    const input = await screen.findByTestId('material-combobox-input')
+    await userEvent.type(input, 'NbSe2')
+    await userEvent.click(screen.getByTestId('material-combobox-create-btn'))
+    // After create resolves, the materials query must be refetched and the
+    // new option must be present in the dropdown.
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2))
+    // Reopen the dropdown (create-success closes it) and clear the input so
+    // the freshly fetched option is visible in the matches list.
+    await userEvent.clear(input)
+    await userEvent.click(input)
+    await waitFor(() =>
+      expect(screen.getByTestId('material-combobox-option-NbSe2')).toBeTruthy(),
+    )
+  })
 })
