@@ -226,9 +226,25 @@ async def test_admin_grant_acl(pg_session, admin_user) -> None:
     """Admin can grant project ACL."""
     from flake_analysis.db.models.user import User as UserModel
     from flake_analysis.db.models.auth import ProjectUser
+    from flake_analysis.db.models.projects import Project
     from flake_analysis.api.auth import get_current_user
     from flake_analysis.api.deps import get_db_session
     from sqlalchemy import select
+
+    # W10-A: project_users.project_id is now FK→projects.id RESTRICT.
+    # Seed an owner User + Project row so the ACL insert resolves.
+    owner_id = uuid4()
+    owner = UserModel(
+        id=owner_id,
+        email="owner@example.com",
+        cognito_sub="owner:test",
+        role=UserRole.MEMBER,
+    )
+    pg_session.add(owner)
+    await pg_session.flush()
+    project = Project(id="test-proj", name="test-proj", owner_id=owner_id)
+    pg_session.add(project)
+    await pg_session.flush()
 
     # Create target user
     target_id = uuid4()
@@ -295,9 +311,25 @@ async def test_admin_revoke_acl(pg_session, admin_user) -> None:
     """Admin can revoke project ACL."""
     from flake_analysis.db.models.user import User as UserModel
     from flake_analysis.db.models.auth import ProjectUser
+    from flake_analysis.db.models.projects import Project
     from flake_analysis.api.auth import get_current_user
     from flake_analysis.api.deps import get_db_session
     from sqlalchemy import select
+
+    # W10-A: project_users.project_id is now FK→projects.id RESTRICT.
+    # Seed an owner User + Project row so the ACL FK resolves.
+    owner_id = uuid4()
+    owner = UserModel(
+        id=owner_id,
+        email="owner@example.com",
+        cognito_sub="owner:test",
+        role=UserRole.MEMBER,
+    )
+    pg_session.add(owner)
+    await pg_session.flush()
+    project = Project(id="test-proj", name="test-proj", owner_id=owner_id)
+    pg_session.add(project)
+    await pg_session.flush()
 
     # Create target user with ACL
     target_id = uuid4()

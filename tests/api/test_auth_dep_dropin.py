@@ -2,7 +2,9 @@
 
 Tests that the new Cognito-backed get_current_user works as a drop-in
 replacement for the old stub by exercising an existing protected route
-(/api/v1/projects/active) with a valid bearer token.
+(`GET /api/v1/projects` — W10-C list endpoint) with a valid bearer token.
+The legacy `/projects/active` route was retired in W10-C; the same auth
+dependency is now exercised through the list endpoint instead.
 """
 from __future__ import annotations
 
@@ -19,12 +21,13 @@ async def test_protected_route_accepts_valid_token(signed_token, pg_session):
     """Protected route accepts valid bearer token and upserts user."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get(
-            "/api/v1/projects/active",
+            "/api/v1/projects",
             headers={"Authorization": f"Bearer {signed_token}"},
         )
-        assert r.status_code == 200
+        assert r.status_code == 200, r.text
         body = r.json()
-        assert body["project_id"] == "local"
+        # Fresh user has no projects yet — list endpoint must return [] (D6).
+        assert body == {"projects": []}
 
 
 @pytest.mark.asyncio
@@ -32,7 +35,7 @@ async def test_protected_route_rejects_missing_token(monkeypatch, pg_session):
     """Protected route rejects request without bearer token."""
     monkeypatch.delenv("SAA_AUTH_DEV_BYPASS", raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-        r = await c.get("/api/v1/projects/active")
+        r = await c.get("/api/v1/projects")
         assert r.status_code == 401
 
 
@@ -42,7 +45,7 @@ async def test_protected_route_rejects_invalid_token(monkeypatch, pg_session):
     monkeypatch.delenv("SAA_AUTH_DEV_BYPASS", raising=False)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
         r = await c.get(
-            "/api/v1/projects/active",
+            "/api/v1/projects",
             headers={"Authorization": "Bearer invalid.token.here"},
         )
         assert r.status_code == 401

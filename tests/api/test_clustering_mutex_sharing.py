@@ -110,3 +110,37 @@ async def test_apply_thresholds_blocks_when_scan_lock_held(tmp_path: Path, monke
     )
     payload = resp.json()
     assert payload["error"]["code"] == "project_busy"
+
+
+@pytest.mark.asyncio
+async def test_apply_thresholds_independent_across_scans(tmp_path: Path, monkeypatch):
+    """W10-C.4c: per-scan lock means scans in the same project DO NOT contend.
+
+    Pre-acquire `acquire_scan_lock(SID)` then POST to apply_thresholds on a
+    DIFFERENT scan in the same (logical) project. The route must NOT raise
+    ProjectBusy from the mutex layer — any non-423 outcome (200/4xx/5xx for
+    other reasons) proves the locks are scoped per-scan, not per-project.
+    """
+    other_sid = SID + 1
+    folder = analysis_folder(tmp_path, "local", other_sid)
+    _seed_clustering(folder)
+    monkeypatch.setenv("SAA_ANALYSIS_ROOT", str(tmp_path))
+
+    app = _make_app()
+    body = {"cluster_thresholds": {0: 0.5, 1: 0.5}}
+
+    async with acquire_scan_lock(SID):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as ac:
+            resp = await asyncio.wait_for(
+                ac.post(
+                    f"/api/v1/projects/local/scans/{other_sid}/run/clustering/apply_thresholds",
+                    json=body,
+                ),
+                timeout=5.0,
+            )
+
+    # Critical assertion: must NOT be 423 from the mutex — locks are per-scan.
+    assert resp.status_code != 423, (
+        f"expected per-scan isolation (no mutex contention), got 423: {resp.text}"
+    )
