@@ -28,6 +28,17 @@ def create_app() -> FastAPI:
     """FastAPI app factory."""
     settings = Settings()
 
+    # B2 — fail fast if S3 upload target is unconfigured. The presign and
+    # complete routes need a bucket; without one every upload would 500
+    # mid-flow. Surface the misconfig at boot so deploys crash before
+    # accepting traffic.
+    if not settings.s3_bucket:
+        raise RuntimeError(
+            "SAA_S3_BUCKET is not configured. Set the SAA_S3_BUCKET environment "
+            "variable (or .env entry) to the S3 upload bucket name before starting "
+            "the API."
+        )
+
     app = FastAPI(
         title="Stand-Alone Analyzer API",
         version="v1",

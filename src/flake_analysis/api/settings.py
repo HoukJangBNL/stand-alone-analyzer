@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     analysis_roots: Annotated[list[str], NoDecode] = ["/mnt/analysis"]
     raw_roots: Annotated[list[str], NoDecode] = ["/mnt/raw_images"]
     cache_dir: str | None = None
+    # S3 upload target — must be set at boot. The presign/complete routes
+    # require a bucket name; we surface the misconfig at app startup (B2)
+    # rather than as a 500 on the first upload.
+    s3_bucket: str | None = None
 
     model_config = SettingsConfigDict(
         env_prefix="SAA_",
