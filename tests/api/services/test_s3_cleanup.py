@@ -69,3 +69,35 @@ def test_delete_prefix_handles_more_than_1000_objects(s3_bucket):
 
     assert deleted == 1050
     assert _list(s3_bucket, "dev/scans/42/") == []
+
+
+def test_delete_prefix_raises_when_s3_reports_errors(s3_bucket, monkeypatch):
+    """If delete_objects returns a non-empty Errors array, raise so the
+    caller doesn't silently mark the scan deleted with orphan S3 objects."""
+    _put(s3_bucket, "dev/scans/42/images/a.png")
+
+    real_client_factory = boto3.client
+
+    def fake_client_factory(service, *args, **kwargs):
+        client = real_client_factory(service, *args, **kwargs)
+        if service == "s3":
+            real_delete = client.delete_objects
+
+            def fake_delete(**kw):
+                resp = real_delete(**kw)
+                resp["Errors"] = [
+                    {
+                        "Key": "dev/scans/42/images/a.png",
+                        "Code": "AccessDenied",
+                        "Message": "simulated",
+                    }
+                ]
+                return resp
+
+            client.delete_objects = fake_delete  # type: ignore[method-assign]
+        return client
+
+    monkeypatch.setattr(boto3, "client", fake_client_factory)
+
+    with pytest.raises(RuntimeError, match="delete_objects returned"):
+        delete_prefix(bucket=s3_bucket, prefix="dev/scans/42/")

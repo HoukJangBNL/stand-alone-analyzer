@@ -43,10 +43,27 @@ def delete_prefix(*, bucket: str, prefix: str) -> int:
             continue
         for i in range(0, len(contents), _PAGE):
             batch = contents[i : i + _PAGE]
-            client.delete_objects(
+            resp = client.delete_objects(
                 Bucket=bucket,
-                Delete={"Objects": [{"Key": obj["Key"]} for obj in batch]},
+                Delete={
+                    "Objects": [{"Key": obj["Key"]} for obj in batch],
+                    "Quiet": True,
+                },
             )
+            errors = resp.get("Errors") or []
+            if errors:
+                logger.error(
+                    "s3_cleanup.delete_prefix partial failure",
+                    extra={
+                        "bucket": bucket,
+                        "prefix": prefix,
+                        "error_count": len(errors),
+                        "first_error": errors[0],
+                    },
+                )
+                raise RuntimeError(
+                    f"delete_objects returned {len(errors)} error(s) for prefix {prefix!r}"
+                )
             total += len(batch)
     logger.info("s3_cleanup.delete_prefix done", extra={"bucket": bucket, "prefix": prefix, "deleted": total})
     return total
