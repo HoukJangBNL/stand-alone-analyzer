@@ -26,7 +26,9 @@ from flake_analysis.api.schemas.upload import (
     PresignRequest,
     PresignResponse,
     ScanDetailResponse,
+    ScanListResponse,
     ScanResponse,
+    ScanSummary,
 )
 from flake_analysis.api.services import (
     projects_service as projects_svc,
@@ -94,32 +96,47 @@ async def create_scan(
     )
 
 
-@router.get("/projects/{project_id}/scans")
+@router.get(
+    "/projects/{project_id}/scans",
+    response_model=ScanListResponse,
+)
 async def list_scans_for_project(
     project_id: str,
     user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
-) -> dict:
-    """List scans belonging to a project, newest first."""
+) -> ScanListResponse:
+    """List scans belonging to a project, newest first.
+
+    `uploaded_count` is derived via JOIN-count against `images` (never
+    stored as a column). `status` is read from `scans.status`.
+    """
+    uploaded_subq = (
+        select(func.count(Image.id))
+        .where(Image.scan_id == Scan.id)
+        .correlate(Scan)
+        .scalar_subquery()
+    )
     rows = (
         await session.execute(
-            select(Scan)
+            select(Scan, uploaded_subq.label("uploaded_count"))
             .where(Scan.project_id == project_id)
             .order_by(Scan.created_at.desc())
         )
-    ).scalars().all()
-    return {
-        "scans": [
-            {
-                "scan_id": r.id,
-                "name": r.name,
-                "material": r.material,
-                "image_count": r.image_count,
-                "created_at": r.created_at.isoformat() if r.created_at else None,
-            }
-            for r in rows
+    ).all()
+    return ScanListResponse(
+        scans=[
+            ScanSummary(
+                scan_id=scan.id,
+                name=scan.name,
+                material=scan.material,
+                image_count=scan.image_count,
+                uploaded_count=int(uploaded_count),
+                status=scan.status,
+                created_at=scan.created_at,
+            )
+            for scan, uploaded_count in rows
         ]
-    }
+    )
 
 
 @router.post(
@@ -567,6 +584,7 @@ async def finalize_scan(
             expected=scan.image_count,
         )
 
+    scan.status = "ready"
     await emit_usage(session, user, "scan_uploaded", {"scan_id": scan_id})
     await session.commit()
     return FinalizeResponse(status="ready", missing=0)

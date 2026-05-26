@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -50,6 +50,30 @@ class ScanResponse(BaseModel):
     image_count: int
     extra_metadata: dict[str, Any]
     created_at: datetime
+
+
+# ---- scans (list) ----
+
+class ScanSummary(BaseModel):
+    """Row shape for GET /projects/{pid}/scans.
+
+    `image_count` is the intended (planned) cell count, set immutably at
+    scan creation. `uploaded_count` is the actual number of completed
+    Image rows, derived via JOIN-count at query time (no denormalized
+    column). `status` is the readiness flag; finalize flips draft -> ready.
+    """
+
+    scan_id: int
+    name: str
+    material: str
+    image_count: int
+    uploaded_count: int
+    status: Literal["draft", "ready"]
+    created_at: datetime | None
+
+
+class ScanListResponse(BaseModel):
+    scans: list[ScanSummary]
 
 
 # ---- scans (detail) ----

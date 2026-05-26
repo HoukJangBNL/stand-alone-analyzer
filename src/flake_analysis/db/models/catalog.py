@@ -75,6 +75,14 @@ class Scan(Base):
         nullable=False,
         server_default=text("0"),
     )
+    # D1: readiness flag, 'draft' until finalize flips to 'ready'.
+    # Stored as plain text (not enum) for cheap migration; values are
+    # constrained to {'draft', 'ready'} at the application layer.
+    status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'draft'"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
