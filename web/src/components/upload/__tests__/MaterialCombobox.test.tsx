@@ -86,9 +86,13 @@ describe('MaterialCombobox', () => {
     const input = await screen.findByTestId('material-combobox-input')
     await userEvent.type(input, 'NbSe2')
     await userEvent.click(screen.getByTestId('material-combobox-create-btn'))
-    // After create resolves, the materials query must be refetched and the
-    // new option must be present in the dropdown.
-    await waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(2))
+    // After create resolves, the materials query must be refetched at least
+    // once more (≥2 total). Asserting an exact count couples this test to
+    // refetchOnMount/refetchOnWindowFocus settings; the UI assertion below
+    // is the real signal that the cache was invalidated.
+    await waitFor(() =>
+      expect(fetchSpy.mock.calls.length).toBeGreaterThanOrEqual(2),
+    )
     // Reopen the dropdown (create-success closes it) and clear the input so
     // the freshly fetched option is visible in the matches list.
     await userEvent.clear(input)
