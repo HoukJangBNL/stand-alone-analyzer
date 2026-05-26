@@ -22,24 +22,22 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   const files = useUploadStore((s) => s.files)
   const order = useUploadStore((s) => s.order)
   const [running, setRunning] = useState(false)
-  const [expectedCount, setExpectedCount] = useState(1)
+  const [scanMeta, setScanMeta] = useState<ScanFormValues | null>(null)
 
   // hard-reset everything when modal opens fresh
   useEffect(() => {
     if (open) {
       resetUploadStore()
       resetOrchestrator()
+      setScanMeta(null)
     }
   }, [open])
 
   const createScanMut = useMutation({
-    mutationFn: (vals: ScanFormValues) => {
-      setExpectedCount(vals.image_count)
-      return createScan(projectId, vals)
-    },
+    mutationFn: (vals: ScanFormValues & { image_count: number }) => createScan(projectId, vals),
     onSuccess: (res) => {
       setScanId(res.scan_id)
-      toast.success(`Scan ${res.scan_id} created — drop files below`)
+      toast.success(`Scan ${res.scan_id} created`)
     },
     onError: (e: unknown) => {
       toast.error((e as { message?: string })?.message ?? 'createScan failed')
@@ -62,12 +60,18 @@ export function UploadModal({ projectId, open, onClose }: Props) {
     resetOrchestrator()
     resetUploadStore()
     setRunning(false)
+    setScanMeta(null)
     onClose()
   }
 
   const startUpload = async () => {
+    if (!scanMeta) return
     setRunning(true)
     try {
+      // Lazy scan creation: derive image_count from the actual dropped files.
+      if (!scanId) {
+        await createScanMut.mutateAsync({ ...scanMeta, image_count: order.length })
+      }
       await getOrchestrator().runAll()
     } finally {
       setRunning(false)
@@ -76,7 +80,6 @@ export function UploadModal({ projectId, open, onClose }: Props) {
 
   const allDone = order.length > 0 && order.every((uid) => files[uid]?.status === 'done')
   const droppedCount = order.length
-  const countMatches = scanId !== null && droppedCount === expectedCount
 
   if (!open) return null
 
@@ -117,20 +120,17 @@ export function UploadModal({ projectId, open, onClose }: Props) {
           </button>
         </div>
 
-        {!scanId ? (
-          <ScanForm
-            onSubmit={(v) => createScanMut.mutate(v)}
-            disabled={createScanMut.isPending}
-          />
+        {!scanMeta ? (
+          <ScanForm onSubmit={(v) => setScanMeta(v)} />
         ) : (
           <>
             <p style={{ fontSize: 12, color: '#6b7280' }}>
-              scan_id: <code>{scanId}</code> · expected files: {expectedCount}
-              {!countMatches && droppedCount > 0 && (
-                <span style={{ color: '#b91c1c' }}>
-                  {' '}
-                  (dropped {droppedCount}, must equal {expectedCount})
-                </span>
+              {scanId ? (
+                <>
+                  scan_id: <code>{scanId}</code> · files: {droppedCount}
+                </>
+              ) : (
+                <>files: {droppedCount}</>
               )}
             </p>
             <FileDropzone />
@@ -139,7 +139,7 @@ export function UploadModal({ projectId, open, onClose }: Props) {
             <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
               <button
                 data-testid="upload-modal-start"
-                disabled={running || allDone || !countMatches || droppedCount === 0}
+                disabled={running || allDone || droppedCount === 0 || createScanMut.isPending}
                 onClick={startUpload}
               >
                 {running ? 'Uploading...' : 'Start upload'}

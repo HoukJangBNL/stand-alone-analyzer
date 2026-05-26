@@ -20,7 +20,7 @@ beforeEach(() => {
 })
 
 describe('UploadModal', () => {
-  it('creates scan, accepts files, runs pipeline, finalizes', async () => {
+  it('stashes metadata, derives image_count from dropped files, then runs pipeline & finalizes', async () => {
     const createScanSpy = vi.spyOn(upload, 'createScan').mockResolvedValue({ scan_id: 'scan_123' })
     vi.spyOn(sha, 'sha256Hex').mockResolvedValue('a'.repeat(64))
     vi.spyOn(upload, 'presignImage').mockResolvedValue({
@@ -35,22 +35,36 @@ describe('UploadModal', () => {
     const onClose = vi.fn()
     render(wrap(<UploadModal projectId="p1" open onClose={onClose} />))
 
-    // Phase 1: metadata
+    // Phase 1: metadata only — no image_count field
     await userEvent.type(screen.getByTestId('scan-form-name'), 'scan-A')
     const matInput = await screen.findByTestId('material-combobox-input')
     await userEvent.click(matInput)
     await userEvent.click(await screen.findByTestId('material-combobox-option-graphene'))
-    await userEvent.clear(screen.getByTestId('scan-form-image-count'))
-    await userEvent.type(screen.getByTestId('scan-form-image-count'), '1')
+    expect(screen.queryByTestId('scan-form-image-count')).toBeNull()
     await userEvent.click(screen.getByTestId('scan-form-submit'))
-    await waitFor(() => expect(createScanSpy).toHaveBeenCalled())
 
-    // Phase 2: files
+    // ScanForm submit must NOT call createScan yet — it's deferred until Start upload.
+    expect(createScanSpy).not.toHaveBeenCalled()
+
+    // Phase 2: files — Start upload disabled until at least one file is dropped.
     const dz = await screen.findByTestId('file-dropzone')
-    const f = new File([new Uint8Array(8)], 'tile_0_0.tif')
-    fireEvent.drop(dz, { dataTransfer: { files: [f], items: [], types: ['Files'] } })
+    const startBtn = await screen.findByTestId('upload-modal-start')
+    expect((startBtn as HTMLButtonElement).disabled).toBe(true)
+
+    const f1 = new File([new Uint8Array(8)], 'tile_0_0.tif')
+    const f2 = new File([new Uint8Array(8)], 'tile_0_1.tif')
+    fireEvent.drop(dz, { dataTransfer: { files: [f1, f2], items: [], types: ['Files'] } })
+
     await userEvent.click(await screen.findByTestId('upload-modal-start'))
-    await waitFor(() => expect(screen.getByText(/done/i)).toBeTruthy())
+
+    // createScan must be called with image_count derived from the dropped files (2).
+    await waitFor(() => expect(createScanSpy).toHaveBeenCalled())
+    const [, body] = createScanSpy.mock.calls[0]
+    expect(body.image_count).toBe(2)
+    expect(body.name).toBe('scan-A')
+    expect(body.material).toBe('graphene')
+
+    await waitFor(() => expect(screen.getAllByText(/done/i).length).toBeGreaterThan(0))
 
     // Finalize
     await userEvent.click(await screen.findByTestId('upload-modal-finalize'))

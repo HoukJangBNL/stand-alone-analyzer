@@ -6,7 +6,6 @@ import { MaterialCombobox } from './MaterialCombobox'
 export interface ScanFormValues {
   name: string
   material: string
-  image_count: number
   extra_metadata: Record<string, string>
 }
 
@@ -16,29 +15,26 @@ interface KV {
 }
 
 interface Props {
-  defaultExpectedCount?: number
   onSubmit(values: ScanFormValues): void
   disabled?: boolean
 }
 
-export function ScanForm({ defaultExpectedCount, onSubmit, disabled }: Props) {
+export function ScanForm({ onSubmit, disabled }: Props) {
   const {
     register,
     handleSubmit,
     formState: { errors },
   } = useForm<{
     name: string
-    image_count: number
   }>({
     defaultValues: {
       name: '',
-      image_count: defaultExpectedCount ?? 1,
     },
   })
   const [material, setMaterial] = useState('')
   const [kvs, setKvs] = useState<KV[]>([])
 
-  const handle: SubmitHandler<{ name: string; image_count: number }> = (vals) => {
+  const handle: SubmitHandler<{ name: string }> = (vals) => {
     if (!material) return // MaterialCombobox shows its own UI; bail silently
     const meta: Record<string, string> = {}
     for (const kv of kvs) {
@@ -48,7 +44,6 @@ export function ScanForm({ defaultExpectedCount, onSubmit, disabled }: Props) {
     onSubmit({
       name: vals.name.trim(),
       material,
-      image_count: Number(vals.image_count),
       extra_metadata: meta,
     })
   }
@@ -80,18 +75,6 @@ export function ScanForm({ defaultExpectedCount, onSubmit, disabled }: Props) {
             material required
           </span>
         )}
-      </label>
-
-      <label style={{ fontSize: 12 }}>
-        Image count <span style={{ color: '#b91c1c' }}>*</span>
-        <input
-          data-testid="scan-form-image-count"
-          type="number"
-          min={1}
-          {...register('image_count', { required: true, valueAsNumber: true, min: 1 })}
-          disabled={disabled}
-          style={{ width: '100%' }}
-        />
       </label>
 
       <fieldset style={{ border: '1px solid #e5e7eb', padding: 8 }}>
