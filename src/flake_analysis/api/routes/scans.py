@@ -1,6 +1,7 @@
 """W5-B scans router — create scan (W5-B1) + presign/complete/finalize/get (W5-B2)."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Annotated
@@ -413,7 +414,13 @@ async def complete_image(
         raise HTTPException(status_code=409, detail="upload_item has invalid s3_uri")
     key = item.s3_uri[len(f"s3://{bucket}/"):]
     try:
-        s3_presign.head_object(bucket=bucket, key=key)
+        # B3: head_object is a synchronous boto3 call (~50-200ms with real S3).
+        # Dispatch it to the default threadpool so concurrent complete-calls
+        # don't serialize on the asyncio event loop.
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            None, lambda: s3_presign.head_object(bucket=bucket, key=key),
+        )
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code in ("404", "NoSuchKey", "NotFound"):

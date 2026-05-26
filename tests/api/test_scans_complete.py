@@ -1,12 +1,15 @@
 """W5-B2.3 — POST /scans/{sid}/images/{uid}/complete tests."""
 from __future__ import annotations
 
+import threading
+
 import boto3
 import pytest
 from httpx import ASGITransport, AsyncClient
 from moto import mock_aws
 from sqlalchemy import select
 
+from flake_analysis.api import services as api_services
 from flake_analysis.api.deps import get_db_session
 from flake_analysis.api.main import app
 from flake_analysis.db.models.upload import (
@@ -134,6 +137,47 @@ async def test_complete_404_when_upload_item_missing(
                     json={"width": 10, "height": 10},
                 )
                 assert r.status_code == 404
+        finally:
+            app.dependency_overrides.pop(get_db_session, None)
+
+
+@pytest.mark.asyncio
+async def test_complete_runs_head_object_off_event_loop(
+    pg_session, sample_user_factory, sample_project_factory, monkeypatch,
+):
+    """B3: head_object must be dispatched to the default executor, not block the loop.
+
+    We spy on `s3_presign.head_object` and capture the thread it runs on. If the
+    route awaits via `loop.run_in_executor`, the call lands on a worker thread
+    (name typically contains 'asyncio' or 'pool'), never on MainThread.
+    """
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
+    with mock_aws():
+        _create_bucket()
+        _override(pg_session)
+        captured: dict[str, str] = {}
+        real_head = api_services.s3_presign.head_object
+
+        def spy_head(*, bucket: str, key: str):
+            captured["thread_name"] = threading.current_thread().name
+            return real_head(bucket=bucket, key=key)
+
+        monkeypatch.setattr(api_services.s3_presign, "head_object", spy_head)
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                scan_id, presign = await _scan_and_presign(c, project.id)
+                key = presign["s3_uri"].split("/", 3)[-1]
+                _put_object(key)
+
+                r = await c.post(
+                    f"/api/v1/scans/{scan_id}/images/{presign['upload_item_id']}/complete",
+                    json={"width": 10, "height": 10},
+                )
+                assert r.status_code == 200, r.text
+                assert "thread_name" in captured, "head_object spy was not invoked"
+                # MainThread would mean the call ran on the event loop (blocking).
+                assert captured["thread_name"] != "MainThread"
         finally:
             app.dependency_overrides.pop(get_db_session, None)
 
