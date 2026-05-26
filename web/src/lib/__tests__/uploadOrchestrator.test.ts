@@ -3,6 +3,7 @@ import { useUploadStore, resetUploadStore } from '@/state/uploadSlice'
 import { Orchestrator } from '@/lib/uploadOrchestrator'
 import * as upload from '@/api/upload'
 import * as sha from '@/lib/sha256'
+import { ApiError } from '@/api/selector'
 
 beforeEach(() => {
   resetUploadStore()
@@ -61,6 +62,26 @@ describe('Orchestrator', () => {
     const f = useUploadStore.getState().files[uid]
     expect(f.status).toBe('failed')
     expect(f.error).toMatch(/presign 409 duplicate/)
+  })
+
+  it('captures request_id from ApiError into the failed file row', async () => {
+    vi.spyOn(sha, 'sha256Hex').mockResolvedValue('f'.repeat(64))
+    vi.spyOn(upload, 'presignImage').mockRejectedValue(
+      new ApiError(500, 'INTERNAL', 'boom', null, 'req-123'),
+    )
+
+    useUploadStore.getState().setScanId('scan_1')
+    useUploadStore.getState().addFiles([fakeFile('tile_3_4.tif')])
+    const uid = useUploadStore.getState().order[0]
+    useUploadStore.getState().setGrid(uid, 3, 4)
+
+    const orch = new Orchestrator({ concurrency: 4 })
+    await orch.runAll()
+
+    const f = useUploadStore.getState().files[uid]
+    expect(f.status).toBe('failed')
+    expect(f.error).toMatch(/boom/)
+    expect(f.request_id).toBe('req-123')
   })
 
   it('respects the concurrency limit (max 4 in flight)', async () => {

@@ -18,6 +18,7 @@ function mkFile(uid: string, status: UploadFile['status']): UploadFile {
     upload_item_id: null,
     image_id: null,
     error: null,
+    request_id: null,
   }
 }
 

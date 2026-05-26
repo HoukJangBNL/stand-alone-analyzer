@@ -97,6 +97,7 @@ describe('UploadModal', () => {
       upload_item_id: null,
       image_id: null,
       error: null,
+      request_id: null,
     })
     const entries: Array<[string, UploadFile['status']]> = [
       ['f1', 'done'],

@@ -92,7 +92,7 @@ export class Orchestrator {
     const store = useUploadStore.getState()
     const scanId = store.scanId
     if (!scanId) throw new Error('Orchestrator.retry: scanId not set')
-    store.patch(uid, { status: 'queued', error: null, progress: 0 })
+    store.patch(uid, { status: 'queued', error: null, progress: 0, request_id: null })
     await this.runOne(scanId, uid)
   }
 
@@ -103,7 +103,7 @@ export class Orchestrator {
     const f = store.files[uid]
     if (!f) return
     if (f.grid_ix === null || f.grid_iy === null) {
-      store.patch(uid, { status: 'failed', error: 'grid_ix/grid_iy required' })
+      store.patch(uid, { status: 'failed', error: 'grid_ix/grid_iy required', request_id: null })
       this.controllers.delete(uid)
       return
     }
@@ -147,9 +147,16 @@ export class Orchestrator {
     } catch (e: unknown) {
       const msg = (e as { message?: string })?.message ?? String(e)
       const aborted = (e as { name?: string })?.name === 'AbortError'
+      // ApiError exposes `requestId` (camelCase). Store under snake_case to
+      // match the rest of the upload-slice wire fields.
+      const requestId =
+        (e as { requestId?: string })?.requestId ??
+        (e as { request_id?: string })?.request_id ??
+        null
       store.patch(uid, {
         status: 'failed',
         error: aborted ? 'aborted' : msg,
+        request_id: requestId,
       })
     } finally {
       this.controllers.delete(uid)

@@ -23,6 +23,8 @@ export interface UploadFile {
   upload_item_id: string | null
   image_id: string | null
   error: string | null
+  /** ApiError request_id surfaced when the file fails. Null otherwise. */
+  request_id: string | null
 }
 
 export interface UploadState {
@@ -90,6 +92,7 @@ export const useUploadStore = create<UploadState>((set) => ({
           upload_item_id: null,
           image_id: null,
           error: null,
+          request_id: null,
         }
         nextOrder.push(uid)
       }

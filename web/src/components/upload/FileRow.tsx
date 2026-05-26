@@ -69,6 +69,14 @@ export function FileRow({ uid }: Props) {
       >
         {file.status}
         {file.error ? `: ${file.error}` : ''}
+        {file.error && file.request_id ? (
+          <>
+            {' '}
+            <small data-testid={`file-row-reqid-${uid}`} style={{ color: '#6b7280' }}>
+              req-id: {file.request_id}
+            </small>
+          </>
+        ) : null}
       </span>
       <div style={{ width: 80, height: 6, background: '#e5e7eb', borderRadius: 3 }}>
         <div
