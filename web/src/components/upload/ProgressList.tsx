@@ -1,4 +1,5 @@
 // web/src/components/upload/ProgressList.tsx
+import { useState } from 'react'
 import { useUploadStore } from '@/state/uploadSlice'
 import { FileRow } from './FileRow'
 
@@ -8,6 +9,9 @@ const MAX_VISIBLE_ROWS = 200
 
 export function ProgressList() {
   const order = useUploadStore((s) => s.order)
+  const files = useUploadStore((s) => s.files)
+  const [failedOnly, setFailedOnly] = useState(false)
+
   if (order.length === 0) {
     return (
       <p data-testid="progress-list-empty" style={{ color: '#6b7280' }}>
@@ -15,8 +19,12 @@ export function ProgressList() {
       </p>
     )
   }
-  const visible = order.slice(0, MAX_VISIBLE_ROWS)
-  const hidden = order.length - visible.length
+
+  const filtered = failedOnly
+    ? order.filter((uid) => files[uid]?.status === 'failed')
+    : order
+  const visible = filtered.slice(0, MAX_VISIBLE_ROWS)
+  const hidden = filtered.length - visible.length
   return (
     <div
       data-testid="progress-list"
@@ -31,6 +39,25 @@ export function ProgressList() {
     >
       <div
         style={{
+          display: 'flex',
+          justifyContent: 'flex-end',
+          padding: '4px 0',
+          position: 'sticky',
+          top: 0,
+          background: 'white',
+          zIndex: 2,
+        }}
+      >
+        <button
+          data-testid="progress-list-failed-only"
+          onClick={() => setFailedOnly((v) => !v)}
+          style={{ fontSize: 11 }}
+        >
+          {failedOnly ? 'Show all' : 'Show failed only'}
+        </button>
+      </div>
+      <div
+        style={{
           display: 'grid',
           gridTemplateColumns: '1fr 60px 60px 100px 80px 60px',
           gap: 8,
@@ -38,8 +65,9 @@ export function ProgressList() {
           color: '#6b7280',
           padding: '4px 0',
           position: 'sticky',
-          top: 0,
+          top: 28,
           background: 'white',
+          zIndex: 1,
         }}
       >
         <span>filename</span>
