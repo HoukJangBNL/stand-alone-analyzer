@@ -110,7 +110,7 @@ async def test_presign_rejects_duplicate_sha256(
                     json={**body, "grid_ix": 1},  # different grid, same sha
                 )
                 assert dup.status_code == 409
-                assert "sha256" in dup.json()["detail"].lower()
+                assert dup.json()["error"]["code"] == "presign_collision_sha256"
         finally:
             app.dependency_overrides.pop(get_db_session, None)
 
@@ -139,7 +139,7 @@ async def test_presign_rejects_duplicate_grid(
                           "grid_ix": 2, "grid_iy": 3, "size_bytes": 100},
                 )
                 assert dup.status_code == 409
-                assert "grid" in dup.json()["detail"].lower()
+                assert dup.json()["error"]["code"] == "presign_collision_grid"
         finally:
             app.dependency_overrides.pop(get_db_session, None)
 
@@ -295,7 +295,7 @@ async def test_presign_409_when_sha256_matches_but_grid_differs(
                 body2 = {**body1, "grid_ix": 1}
                 r2 = await c.post(f"/api/v1/scans/{scan_id}/images/presign", json=body2)
                 assert r2.status_code == 409
-                assert "sha256" in r2.json()["detail"].lower()
+                assert r2.json()["error"]["code"] == "presign_collision_sha256"
         finally:
             app.dependency_overrides.pop(get_db_session, None)
 

@@ -149,6 +149,88 @@ class ProjectHasScans(AppError):
     message = "Project still has scans; delete or move them first"
 
 
+# ── Upload-path errors (B6) ────────────────────────────────────────────────
+# Codes mirror the `event=` names emitted by A4 logging sites in routes/scans.py
+# so observability and frontend error display use the same vocabulary.
+
+class S3NotConfigured(AppError):
+    code = "s3_not_configured"
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    message = "SAA_S3_BUCKET not configured"
+
+
+class ScanNotFound(AppError):
+    code = "scan_not_found"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Scan not found"
+
+
+class PresignCollisionSha256(AppError):
+    code = "presign_collision_sha256"
+    status_code = status.HTTP_409_CONFLICT
+    message = "sha256 already uploaded for this scan"
+
+
+class PresignCollisionGrid(AppError):
+    code = "presign_collision_grid"
+    status_code = status.HTTP_409_CONFLICT
+    message = "grid coordinates already used for this scan"
+
+
+class PresignIdempotentBucketMismatch(AppError):
+    code = "presign_idempotent_bucket_mismatch"
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    message = "upload_item s3_uri references unexpected bucket"
+
+
+class PresignUploadItemConflict(AppError):
+    code = "presign_upload_item_conflict"
+    status_code = status.HTTP_409_CONFLICT
+    message = "upload_item insert conflict"
+
+
+class UploadItemNotFound(AppError):
+    code = "upload_item_not_found"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "upload_item not found"
+
+
+class UploadItemScanMismatch(AppError):
+    code = "upload_item_scan_mismatch"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "upload_item does not belong to the requested scan"
+
+
+class CompleteInvalidS3Uri(AppError):
+    code = "complete_invalid_s3_uri"
+    status_code = status.HTTP_409_CONFLICT
+    message = "upload_item has invalid s3_uri"
+
+
+class CompleteS3ObjectMissing(AppError):
+    code = "complete_s3_object_missing"
+    status_code = status.HTTP_409_CONFLICT
+    message = "S3 object not found - upload did not complete"
+
+
+class CompleteS3HeadError(AppError):
+    code = "complete_s3_head_error"
+    status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
+    message = "S3 head_object failed"
+
+
+class CompleteImageConflict(AppError):
+    code = "complete_image_conflict"
+    status_code = status.HTTP_409_CONFLICT
+    message = "image insert conflict"
+
+
+class FinalizeIncomplete(AppError):
+    code = "finalize_incomplete"
+    status_code = status.HTTP_409_CONFLICT
+    message = "Scan has missing uploads; finalize blocked"
+
+
 async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
     """FastAPI exception handler for AppError subclasses."""
     envelope = exc.to_response()

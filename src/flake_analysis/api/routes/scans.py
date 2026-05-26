@@ -7,7 +7,7 @@ import os
 from typing import Annotated
 
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -145,7 +145,7 @@ async def presign_image_put(
             "presign aborted: SAA_S3_BUCKET not configured",
             extra=_log_extra(event="presign_bucket_unconfigured", scan_id=scan_id),
         )
-        raise HTTPException(status_code=500, detail="SAA_S3_BUCKET not configured")
+        raise app_errors.S3NotConfigured(scan_id=scan_id)
 
     scan = (await session.execute(
         select(Scan).where(Scan.id == scan_id)
@@ -155,7 +155,7 @@ async def presign_image_put(
             "presign aborted: scan not found",
             extra=_log_extra(event="presign_scan_not_found", scan_id=scan_id),
         )
-        raise HTTPException(status_code=404, detail=f"scan {scan_id} not found")
+        raise app_errors.ScanNotFound(scan_id=scan_id)
 
     # 1) sha256 collision with finalized images
     img_dup = (await session.execute(
@@ -173,9 +173,11 @@ async def presign_image_put(
                 image_id=img_dup,
             ),
         )
-        raise HTTPException(
-            status_code=409,
-            detail=f"sha256 already uploaded as image {img_dup}",
+        raise app_errors.PresignCollisionSha256(
+            scan_id=scan_id,
+            sha256=req.sha256,
+            image_id=img_dup,
+            in_flight=False,
         )
     # 2) grid collision with finalized images
     grid_dup = (await session.execute(
@@ -195,9 +197,12 @@ async def presign_image_put(
                 image_id=grid_dup,
             ),
         )
-        raise HTTPException(
-            status_code=409,
-            detail=f"grid ({req.grid_ix},{req.grid_iy}) already uploaded as image {grid_dup}",
+        raise app_errors.PresignCollisionGrid(
+            scan_id=scan_id,
+            grid_ix=req.grid_ix,
+            grid_iy=req.grid_iy,
+            image_id=grid_dup,
+            in_flight=False,
         )
 
     upl = await upload_service.get_or_create_upload_session(
@@ -235,9 +240,9 @@ async def presign_image_put(
                         s3_uri=existing_uri,
                     ),
                 )
-                raise HTTPException(
-                    status_code=500,
-                    detail="upload_item s3_uri references unexpected bucket",
+                raise app_errors.PresignIdempotentBucketMismatch(
+                    scan_id=scan_id,
+                    upload_item_id=inflight_item.id,
                 )
             existing_key = existing_uri[len(bucket_prefix):]
             presigned = s3_presign.presign_put(
@@ -271,9 +276,11 @@ async def presign_image_put(
                 in_flight=True,
             ),
         )
-        raise HTTPException(
-            status_code=409,
-            detail=f"sha256 already in-flight as upload_item {inflight_item.id}",
+        raise app_errors.PresignCollisionSha256(
+            scan_id=scan_id,
+            sha256=req.sha256,
+            upload_item_id=inflight_item.id,
+            in_flight=True,
         )
     # 4) grid collision with in-flight upload_item (same session)
     inflight_grid = (await session.execute(
@@ -294,9 +301,12 @@ async def presign_image_put(
                 in_flight=True,
             ),
         )
-        raise HTTPException(
-            status_code=409,
-            detail=f"grid ({req.grid_ix},{req.grid_iy}) already in-flight as upload_item {inflight_grid}",
+        raise app_errors.PresignCollisionGrid(
+            scan_id=scan_id,
+            grid_ix=req.grid_ix,
+            grid_iy=req.grid_iy,
+            upload_item_id=inflight_grid,
+            in_flight=True,
         )
 
     key = s3_presign.build_s3_key(
@@ -327,7 +337,13 @@ async def presign_image_put(
                 grid_iy=req.grid_iy,
             ),
         )
-        raise HTTPException(status_code=409, detail=f"upload_item insert conflict: {exc.orig}") from exc
+        raise app_errors.PresignUploadItemConflict(
+            scan_id=scan_id,
+            sha256=req.sha256,
+            grid_ix=req.grid_ix,
+            grid_iy=req.grid_iy,
+            db_error=str(exc.orig),
+        ) from exc
 
     presigned = s3_presign.presign_put(
         bucket=bucket,
@@ -371,7 +387,10 @@ async def complete_image(
                 upload_item_id=upload_item_id,
             ),
         )
-        raise HTTPException(status_code=500, detail="SAA_S3_BUCKET not configured")
+        raise app_errors.S3NotConfigured(
+            scan_id=scan_id,
+            upload_item_id=upload_item_id,
+        )
 
     item = (await session.execute(
         select(UploadItem)
@@ -387,7 +406,10 @@ async def complete_image(
                 upload_item_id=upload_item_id,
             ),
         )
-        raise HTTPException(status_code=404, detail=f"upload_item {upload_item_id} not found")
+        raise app_errors.UploadItemNotFound(
+            scan_id=scan_id,
+            upload_item_id=upload_item_id,
+        )
     if item.session.scan_id != scan_id:
         logger.info(
             "complete aborted: upload_item belongs to different scan",
@@ -398,9 +420,10 @@ async def complete_image(
                 actual_scan_id=item.session.scan_id,
             ),
         )
-        raise HTTPException(
-            status_code=404,
-            detail=f"upload_item {upload_item_id} does not belong to scan {scan_id}",
+        raise app_errors.UploadItemScanMismatch(
+            scan_id=scan_id,
+            upload_item_id=upload_item_id,
+            actual_scan_id=item.session.scan_id,
         )
 
     # Idempotency short-circuit
@@ -417,7 +440,10 @@ async def complete_image(
                 upload_item_id=upload_item_id,
             ),
         )
-        raise HTTPException(status_code=409, detail="upload_item has invalid s3_uri")
+        raise app_errors.CompleteInvalidS3Uri(
+            scan_id=scan_id,
+            upload_item_id=upload_item_id,
+        )
     key = item.s3_uri[len(f"s3://{bucket}/"):]
     try:
         # B3: head_object is a synchronous boto3 call (~50-200ms with real S3).
@@ -439,9 +465,10 @@ async def complete_image(
                     s3_key=key,
                 ),
             )
-            raise HTTPException(
-                status_code=409,
-                detail=f"S3 object {key} not found - upload did not complete",
+            raise app_errors.CompleteS3ObjectMissing(
+                scan_id=scan_id,
+                upload_item_id=upload_item_id,
+                s3_key=key,
             ) from exc
         logger.exception(
             "complete failed: S3 head_object error",
@@ -453,7 +480,12 @@ async def complete_image(
                 s3_error_code=code,
             ),
         )
-        raise HTTPException(status_code=500, detail=f"S3 head_object failed: {code}") from exc
+        raise app_errors.CompleteS3HeadError(
+            scan_id=scan_id,
+            upload_item_id=upload_item_id,
+            s3_key=key,
+            s3_error_code=code,
+        ) from exc
 
     # Insert canonical Image row
     image = Image(
@@ -480,7 +512,12 @@ async def complete_image(
                 sha256=item.sha256,
             ),
         )
-        raise HTTPException(status_code=409, detail=f"image insert conflict: {exc.orig}") from exc
+        raise app_errors.CompleteImageConflict(
+            scan_id=scan_id,
+            upload_item_id=upload_item_id,
+            sha256=item.sha256,
+            db_error=str(exc.orig),
+        ) from exc
 
     item.status = UploadItemStatus.UPLOADED
     item.image_id = image.id
@@ -505,7 +542,7 @@ async def finalize_scan(
             "finalize aborted: scan not found",
             extra=_log_extra(event="finalize_scan_not_found", scan_id=scan_id),
         )
-        raise HTTPException(status_code=404, detail=f"scan {scan_id} not found")
+        raise app_errors.ScanNotFound(scan_id=scan_id)
 
     uploaded = (await session.execute(
         select(func.count(Image.id)).where(Image.scan_id == scan_id)
@@ -522,10 +559,12 @@ async def finalize_scan(
                 expected=scan.image_count,
             ),
         )
-        raise HTTPException(
-            status_code=409,
-            detail={"status": "incomplete", "missing": missing,
-                    "uploaded": int(uploaded), "expected": scan.image_count},
+        raise app_errors.FinalizeIncomplete(
+            scan_id=scan_id,
+            status="incomplete",
+            missing=missing,
+            uploaded=int(uploaded),
+            expected=scan.image_count,
         )
 
     await emit_usage(session, user, "scan_uploaded", {"scan_id": scan_id})
@@ -550,7 +589,7 @@ async def get_scan(
             "get_scan aborted: scan not found",
             extra=_log_extra(event="get_scan_not_found", scan_id=scan_id),
         )
-        raise HTTPException(status_code=404, detail=f"scan {scan_id} not found")
+        raise app_errors.ScanNotFound(scan_id=scan_id)
 
     images = (await session.execute(
         select(Image).where(Image.scan_id == scan_id).order_by(Image.id)

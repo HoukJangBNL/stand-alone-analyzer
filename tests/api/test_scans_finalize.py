@@ -94,8 +94,9 @@ async def test_finalize_409_when_incomplete(
                 r = await c.post(f"/api/v1/scans/{scan_id}/finalize")
                 assert r.status_code == 409
                 body = r.json()
-                assert body["detail"]["status"] == "incomplete"
-                assert body["detail"]["missing"] == 3
+                assert body["error"]["code"] == "finalize_incomplete"
+                assert body["error"]["details"]["status"] == "incomplete"
+                assert body["error"]["details"]["missing"] == 3
         finally:
             app.dependency_overrides.pop(get_db_session, None)
 

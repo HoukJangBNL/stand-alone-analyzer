@@ -111,7 +111,7 @@ async def test_complete_409_when_s3_object_missing(
                     json={"width": 10, "height": 10},
                 )
                 assert r.status_code == 409
-                assert "s3" in r.json()["detail"].lower()
+                assert r.json()["error"]["code"] == "complete_s3_object_missing"
         finally:
             app.dependency_overrides.pop(get_db_session, None)
 
