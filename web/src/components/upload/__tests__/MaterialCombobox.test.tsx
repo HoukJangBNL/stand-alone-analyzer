@@ -42,4 +42,27 @@ describe('MaterialCombobox', () => {
     await waitFor(() => expect(createSpy).toHaveBeenCalledWith('NbSe2'))
     expect(onChange).toHaveBeenCalledWith('NbSe2')
   })
+
+  it('renders the +Add row with emphasis container when input has no exact match', async () => {
+    vi.spyOn(materialsApi, 'fetchMaterials').mockResolvedValue([{ name: 'graphene' }])
+    render(wrap(<MaterialCombobox value="" onChange={() => {}} />))
+    const input = await screen.findByTestId('material-combobox-input')
+    await userEvent.type(input, 'graphite')
+    // The dedicated row container exists (not just an inline button) so we
+    // can style it visually distinct from regular options.
+    await waitFor(() =>
+      expect(screen.getByTestId('material-combobox-create-row')).toBeTruthy(),
+    )
+    expect(screen.getByTestId('material-combobox-create-btn').textContent).toMatch(/Add/)
+  })
+
+  it('shows an empty-list hint when user has not typed anything and list is empty', async () => {
+    vi.spyOn(materialsApi, 'fetchMaterials').mockResolvedValue([])
+    render(wrap(<MaterialCombobox value="" onChange={() => {}} />))
+    const input = await screen.findByTestId('material-combobox-input')
+    await userEvent.click(input)
+    await waitFor(() =>
+      expect(screen.getByTestId('material-combobox-empty-hint')).toBeTruthy(),
+    )
+  })
 })

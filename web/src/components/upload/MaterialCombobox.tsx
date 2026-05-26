@@ -1,6 +1,7 @@
 // web/src/components/upload/MaterialCombobox.tsx
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
 import { fetchMaterials, createMaterial, type Material } from '@/api/materials'
 
 interface Props {
@@ -26,6 +27,10 @@ export function MaterialCombobox({ value, onChange }: Props) {
       onChange(res.name)
       setInput(res.name)
       setOpen(false)
+      toast.success(res.created ? `Material "${res.name}" added` : `Material "${res.name}" exists`)
+    },
+    onError: (e: unknown) => {
+      toast.error((e as { message?: string })?.message ?? 'createMaterial failed')
     },
   })
 
@@ -45,7 +50,7 @@ export function MaterialCombobox({ value, onChange }: Props) {
           setOpen(true)
         }}
         onFocus={() => setOpen(true)}
-        placeholder="material (e.g. graphene)"
+        placeholder="Type to search or add new material"
         style={{ width: '100%' }}
       />
       {open && (
@@ -81,15 +86,44 @@ export function MaterialCombobox({ value, onChange }: Props) {
             </li>
           ))}
           {input && !exact && (
-            <li style={{ padding: 4, borderTop: '1px solid #eee' }}>
+            <li
+              data-testid="material-combobox-create-row"
+              style={{
+                padding: 4,
+                borderTop: '1px solid #eee',
+                background: '#eef2ff',
+              }}
+            >
               <button
                 data-testid="material-combobox-create-btn"
                 type="button"
                 disabled={create.isPending}
                 onClick={() => create.mutate(input)}
+                style={{
+                  width: '100%',
+                  padding: '6px 8px',
+                  background: '#eef2ff',
+                  border: '1px solid #c7d2fe',
+                  borderRadius: 4,
+                  fontWeight: 600,
+                  color: '#3730a3',
+                  cursor: create.isPending ? 'wait' : 'pointer',
+                  textAlign: 'left',
+                }}
               >
-                {create.isPending ? 'Creating...' : `+ Add "${input}"`}
+                <span aria-hidden="true" style={{ marginRight: 6 }}>
+                  ➕
+                </span>
+                {create.isPending ? 'Creating...' : `Add "${input}" as new material`}
               </button>
+            </li>
+          )}
+          {!input && matches.length === 0 && (
+            <li
+              data-testid="material-combobox-empty-hint"
+              style={{ padding: 6, color: '#6b7280', fontSize: 12 }}
+            >
+              Type a name to add a new material
             </li>
           )}
         </ul>
