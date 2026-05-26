@@ -140,7 +140,7 @@ async def presign_image_put(
     bucket = os.environ.get("SAA_S3_BUCKET")
     prefix = os.environ.get("SAA_S3_PREFIX", "")
     if not bucket:
-        logger.info(
+        logger.error(
             "presign aborted: SAA_S3_BUCKET not configured",
             extra=_log_extra(event="presign_bucket_unconfigured", scan_id=scan_id),
         )
@@ -309,7 +309,7 @@ async def complete_image(
     """
     bucket = os.environ.get("SAA_S3_BUCKET")
     if not bucket:
-        logger.info(
+        logger.error(
             "complete aborted: SAA_S3_BUCKET not configured",
             extra=_log_extra(
                 event="complete_bucket_unconfigured",
@@ -383,7 +383,7 @@ async def complete_image(
                 status_code=409,
                 detail=f"S3 object {key} not found - upload did not complete",
             ) from exc
-        logger.info(
+        logger.exception(
             "complete failed: S3 head_object error",
             extra=_log_extra(
                 event="complete_s3_head_error",
