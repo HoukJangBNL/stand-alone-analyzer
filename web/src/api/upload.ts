@@ -141,6 +141,8 @@ export interface ScanSummary {
   name: string
   material: string
   image_count: number
+  uploaded_count: number
+  status: 'draft' | 'ready'
   created_at: string
 }
 

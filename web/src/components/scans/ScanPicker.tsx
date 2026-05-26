@@ -78,7 +78,7 @@ export function ScanPicker() {
             value={String(s.scan_id)}
             data-testid={`scan-picker-option-${s.scan_id}`}
           >
-            {s.name} ({s.image_count} imgs)
+            {s.name} ({s.uploaded_count}/{s.image_count} · {s.status})
           </option>
         ))}
       </select>

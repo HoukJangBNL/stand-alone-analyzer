@@ -37,7 +37,7 @@ describe('App route registration — Explorer', () => {
     )
     window.history.pushState({}, '', '/projects/local/scans/11/explorer')
     vi.spyOn(uploadApi, 'listScansForProject').mockResolvedValue([
-      { scan_id: 11, name: 's11', material: 'graphene', image_count: 1, created_at: 't' },
+      { scan_id: 11, name: 's11', material: 'graphene', image_count: 1, uploaded_count: 1, status: 'ready', created_at: 't' },
     ])
     useAuthStore.setState({
       status: 'authenticated',
