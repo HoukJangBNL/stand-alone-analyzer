@@ -65,9 +65,9 @@ interface PageCase {
 
 const PAGES: PageCase[] = [
   { name: 'ComputeTab', ui: <ComputeTab /> },
-  { name: 'SelectorTab', ui: <SelectorTab projectId="local" /> },
-  { name: 'ClusteringTab', ui: <ClusteringTab projectId="local" /> },
-  { name: 'ExplorerTab', ui: <ExplorerTab projectId="local" /> },
+  { name: 'SelectorTab', ui: <SelectorTab projectId="local" scanId={11} /> },
+  { name: 'ClusteringTab', ui: <ClusteringTab projectId="local" scanId={11} /> },
+  { name: 'ExplorerTab', ui: <ExplorerTab projectId="local" scanId={11} /> },
   { name: 'Sidebar', ui: <Sidebar /> },
 ]
 

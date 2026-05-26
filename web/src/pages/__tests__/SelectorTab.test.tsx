@@ -37,7 +37,7 @@ describe('SelectorTab integration', () => {
       )
     )
 
-    wrap(<SelectorTab projectId="local" />)
+    wrap(<SelectorTab projectId="local" scanId={11} />)
     await waitFor(() => expect(screen.getByText(/Filter/)).not.toBeNull())
     expect(screen.getByTestId('plotly-mock')).not.toBeNull()
     expect(screen.getAllByText(/Commit selection/).length).toBeGreaterThan(0)
@@ -54,7 +54,7 @@ describe('SelectorTab integration', () => {
       )
     )
 
-    wrap(<SelectorTab projectId="local" />)
+    wrap(<SelectorTab projectId="local" scanId={11} />)
     await waitFor(() => expect(screen.getByRole('alert')).not.toBeNull())
     expect(screen.getByRole('alert').textContent).toMatch(/Run Compute/)
   })
@@ -75,7 +75,7 @@ describe('SelectorTab integration', () => {
       )
     )
 
-    wrap(<SelectorTab projectId="local" />)
+    wrap(<SelectorTab projectId="local" scanId={11} />)
     await waitFor(() => expect(screen.getByText(/Flake list/)).not.toBeNull())
     // Open the accordion
     fireEvent.click(screen.getByText(/Flake list/))

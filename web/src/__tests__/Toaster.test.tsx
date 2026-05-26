@@ -28,7 +28,7 @@ describe('<App> mounts Sonner <Toaster>', () => {
       'fetch',
       vi.fn(() => new Promise(() => {})) // never resolves
     )
-    window.history.pushState({}, '', '/projects/local/compute')
+    window.history.pushState({}, '', '/projects/local/scans/11/compute')
 
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
     render(
