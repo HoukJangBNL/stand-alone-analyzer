@@ -1,8 +1,9 @@
 // web/src/components/scans/ScanTable.tsx
 import { useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { listScansForProject, type ScanSummary } from '@/api/upload'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { toast } from 'sonner'
+import { listScansForProject, deleteScan, type ScanSummary } from '@/api/upload'
 import { useProjectStore } from '@/state/projectSlice'
 import { UploadModal } from '@/components/upload/UploadModal'
 
@@ -38,12 +39,27 @@ export function ScanTable() {
   const [showUpload, setShowUpload] = useState(false)
   const [sortKey, setSortKey] = useState<SortKey | null>(null)
   const [sortDir, setSortDir] = useState<SortDir>('asc')
+  const [confirmId, setConfirmId] = useState<number | null>(null)
 
+  const qc = useQueryClient()
   const scans = useQuery<ScanSummary[]>({
     queryKey: ['scans', 'list', projectId],
     queryFn: () => listScansForProject(projectId!),
     enabled: !!projectId,
     staleTime: 5_000,
+  })
+
+  const del = useMutation({
+    mutationFn: (sid: number) => deleteScan(sid),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['scans', 'list', projectId] })
+      toast.success('Scan deleted')
+      setConfirmId(null)
+    },
+    onError: (e: Error) => {
+      toast.error(e.message ?? 'Delete failed')
+      setConfirmId(null)
+    },
   })
 
   if (!projectId) return null
@@ -154,7 +170,53 @@ export function ScanTable() {
                   {new Date(s.created_at).toLocaleString()}
                 </td>
                 <td data-testid={`scan-table-cell-${s.scan_id}-actions`} style={TD}>
-                  {/* delete button added in Task 8 */}
+                  <button
+                    data-testid={`scan-table-delete-${s.scan_id}`}
+                    type="button"
+                    onClick={(ev) => {
+                      ev.stopPropagation()
+                      setConfirmId(s.scan_id)
+                    }}
+                    style={{ fontSize: 11, color: '#b91c1c' }}
+                  >
+                    Delete
+                  </button>
+                  {confirmId === s.scan_id && (
+                    <div
+                      data-testid={`scan-table-confirm-${s.scan_id}`}
+                      onClick={(ev) => ev.stopPropagation()}
+                      style={{
+                        position: 'absolute',
+                        marginTop: 4,
+                        padding: 8,
+                        background: '#fff',
+                        border: '1px solid #b91c1c',
+                        borderRadius: 4,
+                        zIndex: 10,
+                        fontSize: 12,
+                      }}
+                    >
+                      Delete scan "{s.name}"? This wipes its DB row and all S3 objects.
+                      <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
+                        <button
+                          data-testid={`scan-table-confirm-yes-${s.scan_id}`}
+                          type="button"
+                          disabled={del.isPending}
+                          onClick={() => del.mutate(s.scan_id)}
+                          style={{ color: '#b91c1c' }}
+                        >
+                          {del.isPending ? 'Deleting…' : 'Yes, delete'}
+                        </button>
+                        <button
+                          data-testid={`scan-table-confirm-no-${s.scan_id}`}
+                          type="button"
+                          onClick={() => setConfirmId(null)}
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </td>
               </tr>
             )

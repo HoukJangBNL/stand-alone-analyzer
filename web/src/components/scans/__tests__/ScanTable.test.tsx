@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { ScanTable } from '@/components/scans/ScanTable'
@@ -9,6 +9,13 @@ vi.mock('@/api/upload', async () => {
   const actual = await vi.importActual<typeof uploadApi>('@/api/upload')
   return { ...actual, listScansForProject: vi.fn(), deleteScan: vi.fn() }
 })
+
+vi.mock('sonner', () => ({
+  toast: {
+    success: vi.fn(),
+    error: vi.fn(),
+  },
+}))
 
 function wrap(node: React.ReactNode, { pid = 'pid-1', sid = '' } = {}) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -124,5 +131,67 @@ describe('ScanTable sort', () => {
       'scan-table-row-11', // 100
       'scan-table-row-10', // 200
     ])
+  })
+})
+
+describe('ScanTable delete', () => {
+  beforeEach(() => {
+    vi.mocked(uploadApi.deleteScan).mockReset()
+    vi.mocked(uploadApi.listScansForProject).mockResolvedValue([
+      {
+        scan_id: 1, name: 'alpha', material: 'graphene',
+        image_count: 100, uploaded_count: 100, status: 'ready',
+        created_at: '2026-05-01T10:00:00Z',
+      },
+    ])
+    vi.mocked(uploadApi.deleteScan).mockResolvedValue(undefined)
+  })
+
+  it('shows delete button per row, opens confirm, calls deleteScan', async () => {
+    wrap(<ScanTable />)
+    await screen.findByTestId('scan-table')
+
+    const delBtn = screen.getByTestId('scan-table-delete-1')
+    expect(delBtn).toBeTruthy()
+
+    fireEvent.click(delBtn)
+
+    const confirm = await screen.findByTestId('scan-table-confirm-1')
+    expect(confirm.textContent).toContain('alpha')
+
+    fireEvent.click(screen.getByTestId('scan-table-confirm-yes-1'))
+
+    await waitFor(() => {
+      expect(uploadApi.deleteScan).toHaveBeenCalledWith(1)
+    })
+  })
+
+  it('cancel keeps scan and closes dialog', async () => {
+    wrap(<ScanTable />)
+    await screen.findByTestId('scan-table')
+    fireEvent.click(screen.getByTestId('scan-table-delete-1'))
+    await screen.findByTestId('scan-table-confirm-1')
+    fireEvent.click(screen.getByTestId('scan-table-confirm-no-1'))
+
+    await waitFor(() => {
+      expect(screen.queryByTestId('scan-table-confirm-1')).toBeNull()
+    })
+    expect(uploadApi.deleteScan).not.toHaveBeenCalled()
+  })
+
+  it('keeps row on delete failure', async () => {
+    vi.mocked(uploadApi.deleteScan).mockRejectedValue(
+      new Error('deleteScan failed: forbidden (scan_edit)')
+    )
+    wrap(<ScanTable />)
+    await screen.findByTestId('scan-table')
+    fireEvent.click(screen.getByTestId('scan-table-delete-1'))
+    await screen.findByTestId('scan-table-confirm-1')
+    fireEvent.click(screen.getByTestId('scan-table-confirm-yes-1'))
+
+    await waitFor(() => {
+      expect(uploadApi.deleteScan).toHaveBeenCalledWith(1)
+    })
+    expect(screen.getByTestId('scan-table-row-1')).toBeTruthy()
   })
 })
