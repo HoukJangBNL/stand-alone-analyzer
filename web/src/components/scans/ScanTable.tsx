@@ -6,6 +6,9 @@ import { listScansForProject, type ScanSummary } from '@/api/upload'
 import { useProjectStore } from '@/state/projectSlice'
 import { UploadModal } from '@/components/upload/UploadModal'
 
+type SortKey = 'name' | 'material' | 'images' | 'status' | 'created'
+type SortDir = 'asc' | 'desc'
+
 const TH: React.CSSProperties = {
   textAlign: 'left',
   fontSize: 12,
@@ -33,6 +36,8 @@ export function ScanTable() {
   const setActiveScan = useProjectStore((s) => s.setActiveScanId)
   const projectId = urlPid ?? sliceProject ?? null
   const [showUpload, setShowUpload] = useState(false)
+  const [sortKey, setSortKey] = useState<SortKey | null>(null)
+  const [sortDir, setSortDir] = useState<SortDir>('asc')
 
   const scans = useQuery<ScanSummary[]>({
     queryKey: ['scans', 'list', projectId],
@@ -73,6 +78,30 @@ export function ScanTable() {
     navigate(`/projects/${projectId}/scans/${sid}/${tabSlug}`)
   }
 
+  const onSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+    } else {
+      setSortKey(key)
+      setSortDir('asc')
+    }
+  }
+
+  const sorted = (() => {
+    if (!sortKey) return rows
+    const cmp = (a: ScanSummary, b: ScanSummary): number => {
+      switch (sortKey) {
+        case 'name': return a.name.localeCompare(b.name)
+        case 'material': return a.material.localeCompare(b.material)
+        case 'images': return a.uploaded_count - b.uploaded_count
+        case 'status': return a.status.localeCompare(b.status)
+        case 'created': return Date.parse(a.created_at) - Date.parse(b.created_at)
+      }
+    }
+    const out = [...rows].sort(cmp)
+    return sortDir === 'asc' ? out : out.reverse()
+  })()
+
   return (
     <div data-testid="scan-table" style={{ padding: '6px 0' }}>
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 4 }}>
@@ -87,16 +116,26 @@ export function ScanTable() {
       <table style={{ width: '100%', borderCollapse: 'collapse' }}>
         <thead>
           <tr>
-            <th data-testid="scan-table-col-name" style={TH}>Name</th>
-            <th data-testid="scan-table-col-material" style={TH}>Material</th>
-            <th data-testid="scan-table-col-images" style={TH}>Images</th>
-            <th data-testid="scan-table-col-status" style={TH}>Status</th>
-            <th data-testid="scan-table-col-created" style={TH}>Created</th>
-            <th data-testid="scan-table-col-actions" style={TH}>Actions</th>
+            <th data-testid="scan-table-col-name" style={TH} onClick={() => onSort('name')}>
+              Name{sortKey === 'name' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+            </th>
+            <th data-testid="scan-table-col-material" style={TH} onClick={() => onSort('material')}>
+              Material{sortKey === 'material' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+            </th>
+            <th data-testid="scan-table-col-images" style={TH} onClick={() => onSort('images')}>
+              Images{sortKey === 'images' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+            </th>
+            <th data-testid="scan-table-col-status" style={TH} onClick={() => onSort('status')}>
+              Status{sortKey === 'status' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+            </th>
+            <th data-testid="scan-table-col-created" style={TH} onClick={() => onSort('created')}>
+              Created{sortKey === 'created' ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}
+            </th>
+            <th data-testid="scan-table-col-actions" style={{ ...TH, cursor: 'default' }}>Actions</th>
           </tr>
         </thead>
         <tbody>
-          {rows.map((s) => {
+          {sorted.map((s) => {
             const isActive = s.scan_id === activeSid
             return (
               <tr

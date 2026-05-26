@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen } from '@testing-library/react'
+import { render, screen, fireEvent } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { ScanTable } from '@/components/scans/ScanTable'
@@ -66,5 +66,63 @@ describe('ScanTable', () => {
     vi.mocked(uploadApi.listScansForProject).mockResolvedValue([])
     wrap(<ScanTable />)
     expect(await screen.findByTestId('scan-table-empty')).toBeTruthy()
+  })
+})
+
+describe('ScanTable sort', () => {
+  beforeEach(() => {
+    vi.mocked(uploadApi.listScansForProject).mockResolvedValue([
+      {
+        scan_id: 10, name: 'charlie', material: 'WSe2',
+        image_count: 200, uploaded_count: 200, status: 'ready',
+        created_at: '2026-05-03T10:00:00Z',
+      },
+      {
+        scan_id: 11, name: 'alpha', material: 'graphene',
+        image_count: 100, uploaded_count: 100, status: 'ready',
+        created_at: '2026-05-01T10:00:00Z',
+      },
+      {
+        scan_id: 12, name: 'beta', material: 'MoS2',
+        image_count: 50, uploaded_count: 30, status: 'draft',
+        created_at: '2026-05-02T10:00:00Z',
+      },
+    ])
+  })
+
+  it('sorts by name ascending then descending on header click', async () => {
+    wrap(<ScanTable />)
+    await screen.findByTestId('scan-table')
+
+    let rows = screen.getAllByTestId(/^scan-table-row-/)
+    expect(rows[0].getAttribute('data-testid')).toBe('scan-table-row-10')
+
+    fireEvent.click(screen.getByTestId('scan-table-col-name'))
+    rows = screen.getAllByTestId(/^scan-table-row-/)
+    expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual([
+      'scan-table-row-11',
+      'scan-table-row-12',
+      'scan-table-row-10',
+    ])
+
+    fireEvent.click(screen.getByTestId('scan-table-col-name'))
+    rows = screen.getAllByTestId(/^scan-table-row-/)
+    expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual([
+      'scan-table-row-10',
+      'scan-table-row-12',
+      'scan-table-row-11',
+    ])
+  })
+
+  it('sorts by images uploaded count', async () => {
+    wrap(<ScanTable />)
+    await screen.findByTestId('scan-table')
+    fireEvent.click(screen.getByTestId('scan-table-col-images'))
+    const rows = screen.getAllByTestId(/^scan-table-row-/)
+    expect(rows.map((r) => r.getAttribute('data-testid'))).toEqual([
+      'scan-table-row-12', // 30
+      'scan-table-row-11', // 100
+      'scan-table-row-10', // 200
+    ])
   })
 })
