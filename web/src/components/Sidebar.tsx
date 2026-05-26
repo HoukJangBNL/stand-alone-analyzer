@@ -90,8 +90,7 @@ export function Sidebar() {
                 }}
                 title={p.description ?? undefined}
               >
-                {p.name}{' '}
-                <span style={{ color: '#9ca3af', fontSize: 11 }}>({p.scan_count})</span>
+                {p.name}
               </button>
             </li>
           ))}
