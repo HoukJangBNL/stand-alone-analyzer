@@ -1,78 +1,62 @@
-// web/src/components/__tests__/Sidebar.test.tsx
-import React from 'react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import React from 'react'
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { Sidebar } from '@/components/Sidebar'
+import * as projectsApi from '@/api/projects'
 import { resetProjectStore, useProjectStore } from '@/state/projectSlice'
 
-function wrap(ui: React.ReactNode) {
-  const qc = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } })
+function wrap(ui: React.ReactNode, initial = '/') {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return (
     <QueryClientProvider client={qc}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <MemoryRouter initialEntries={[initial]}>{ui}</MemoryRouter>
     </QueryClientProvider>
   )
 }
 
-describe('<Sidebar>', () => {
-  beforeEach(() => {
-    resetProjectStore()
-    vi.unstubAllGlobals()
+beforeEach(() => {
+  resetProjectStore()
+  vi.restoreAllMocks()
+})
+
+describe('Sidebar (W10-D)', () => {
+  it('renders the project list', async () => {
+    vi.spyOn(projectsApi, 'listProjects').mockResolvedValue([
+      { project_id: 'p1', name: 'demo', description: null, created_at: 't', scan_count: 2 },
+      { project_id: 'p2', name: 'other', description: null, created_at: 't', scan_count: 0 },
+    ])
+    render(wrap(<Sidebar />))
+    await waitFor(() => expect(screen.getByTestId('sidebar-project-row-p1')).toBeTruthy())
+    expect(screen.getByTestId('sidebar-project-row-p2')).toBeTruthy()
   })
 
-  it('renders project list from /api/v1/projects', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            projects: [
-              { project_id: 'p1', analysis_folder: '/a' },
-              { project_id: 'p2', analysis_folder: '/b' },
-            ],
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        )
-      )
-    )
+  it('shows the empty-state with only "+ new project" enabled when 0 projects exist', async () => {
+    vi.spyOn(projectsApi, 'listProjects').mockResolvedValue([])
     render(wrap(<Sidebar />))
-    expect(await screen.findByTestId('sidebar-project-list')).not.toBeNull()
-    expect(await screen.findByTestId('sidebar-project-row-p1')).not.toBeNull()
-    expect(await screen.findByTestId('sidebar-project-row-p2')).not.toBeNull()
+    await waitFor(() => expect(screen.getByTestId('sidebar-empty-state')).toBeTruthy())
+    expect(screen.getByTestId('sidebar-new-project-btn')).toBeTruthy()
   })
 
-  it('clicking a project sets activeProjectId in the slice', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(
-          JSON.stringify({ projects: [{ project_id: 'p1', analysis_folder: '/a' }] }),
-          { status: 200, headers: { 'content-type': 'application/json' } }
-        )
-      )
-    )
+  it('opens the CreateProjectModal when clicking the + button', async () => {
+    vi.spyOn(projectsApi, 'listProjects').mockResolvedValue([])
     render(wrap(<Sidebar />))
-    const row = await screen.findByTestId('sidebar-project-select-p1')
-    fireEvent.click(row)
-    await waitFor(() =>
-      expect(useProjectStore.getState().activeProjectId).toBe('p1')
-    )
+    await userEvent.click(await screen.findByTestId('sidebar-new-project-btn'))
+    expect(screen.getByTestId('create-project-modal')).toBeTruthy()
   })
 
-  it('shows the create form when create button is clicked', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ projects: [] }), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        })
-      )
-    )
+  it('after creating a project, syncs slice to the new project_id', async () => {
+    vi.spyOn(projectsApi, 'listProjects').mockResolvedValue([])
+    vi.spyOn(projectsApi, 'createProject').mockResolvedValue({
+      project_id: 'p_new', name: 'fresh', description: null,
+      created_at: 't', scan_count: 0,
+    })
     render(wrap(<Sidebar />))
-    fireEvent.click(await screen.findByTestId('sidebar-create-toggle'))
-    expect(await screen.findByTestId('sidebar-create-form')).not.toBeNull()
+    await userEvent.click(await screen.findByTestId('sidebar-new-project-btn'))
+    await userEvent.type(screen.getByTestId('create-project-modal-name'), 'fresh')
+    await userEvent.click(screen.getByTestId('create-project-modal-submit'))
+    await waitFor(() => expect(useProjectStore.getState().activeProjectId).toBe('p_new'))
   })
 })
