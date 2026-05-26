@@ -38,3 +38,6 @@ env/
 # Local Claude analysis notes / browser-tool artifacts (not for sharing)
 claudedocs/
 .playwright-mcp/
+
+# Acceptance gate run logs (scripts/dev/w10-acceptance.sh)
+.w10-acceptance.*.log
