@@ -241,7 +241,10 @@ async def presign_image_put(
                 )
             existing_key = existing_uri[len(bucket_prefix):]
             presigned = s3_presign.presign_put(
-                bucket=bucket, key=existing_key, sha256_hex=req.sha256, expires_in=300,
+                bucket=bucket,
+                key=existing_key,
+                sha256_hex=req.sha256,
+                expires_in=s3_presign.PRESIGN_TTL_SECONDS,
             )
             logger.info(
                 "presign idempotent replay",
@@ -327,7 +330,10 @@ async def presign_image_put(
         raise HTTPException(status_code=409, detail=f"upload_item insert conflict: {exc.orig}") from exc
 
     presigned = s3_presign.presign_put(
-        bucket=bucket, key=key, sha256_hex=req.sha256, expires_in=300,
+        bucket=bucket,
+        key=key,
+        sha256_hex=req.sha256,
+        expires_in=s3_presign.PRESIGN_TTL_SECONDS,
     )
     await session.commit()
 

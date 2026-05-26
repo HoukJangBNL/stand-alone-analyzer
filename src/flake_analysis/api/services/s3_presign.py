@@ -14,6 +14,12 @@ from typing import TypedDict
 import boto3
 from botocore.config import Config
 
+#: Single source of truth for presigned-PUT URL TTL (seconds). All callers in
+#: the upload flow should reference this constant rather than re-hardcoding
+#: the literal so retuning happens in one place. See plan
+#: `docs/superpowers/plans/2026-05-26-upload-robustness.md` (B5).
+PRESIGN_TTL_SECONDS = 300
+
 
 class PresignResult(TypedDict):
     put_url: str
@@ -58,7 +64,7 @@ def presign_put(
     bucket: str,
     key: str,
     sha256_hex: str,
-    expires_in: int = 300,
+    expires_in: int = PRESIGN_TTL_SECONDS,
 ) -> PresignResult:
     """Issue a presigned PUT URL with x-amz-checksum-sha256 enforced."""
     sha_b64 = hex_to_b64(sha256_hex)
