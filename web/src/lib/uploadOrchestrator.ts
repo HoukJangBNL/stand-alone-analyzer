@@ -2,6 +2,7 @@
 import { useUploadStore, type UploadFile } from '@/state/uploadSlice'
 import { sha256Hex } from '@/lib/sha256'
 import { presignImage, putToS3, completeImage, type PresignBody } from '@/api/upload'
+import { isTiffFilename, readTiffDimensions } from '@/lib/tiffDimensions'
 
 export interface OrchestratorOptions {
   concurrency?: number
@@ -16,6 +17,8 @@ async function readImageDimensions(file: File): Promise<{ width: number; height:
   const stub = (globalThis as { __readImageDimensionsForTest?: (f: File) => Promise<{ width: number; height: number }> })
     .__readImageDimensionsForTest
   if (stub) return stub(file)
+  // Browsers cannot decode TIFF — parse the header instead.
+  if (isTiffFilename(file.name)) return readTiffDimensions(file)
   if (typeof createImageBitmap === 'function') {
     const bmp = await createImageBitmap(file)
     try {
