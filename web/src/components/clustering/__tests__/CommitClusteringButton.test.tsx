@@ -28,7 +28,7 @@ describe('CommitClusteringButton', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    wrap(<CommitClusteringButton projectId="local" />)
+    wrap(<CommitClusteringButton projectId="local" scanId={1} />)
     fireEvent.click(screen.getByRole('button', { name: /Commit clustering/ }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
     const url = fetchMock.mock.calls[0][0] as string

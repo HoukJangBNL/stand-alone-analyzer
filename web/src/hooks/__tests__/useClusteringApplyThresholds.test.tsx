@@ -34,7 +34,7 @@ describe('useClusteringApplyThresholds', () => {
       )
     )
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const { result } = renderHook(() => useClusteringApplyThresholds('local'), { wrapper: wrap(qc) })
+    const { result } = renderHook(() => useClusteringApplyThresholds('local', 1), { wrapper: wrap(qc) })
     await act(async () => {
       await result.current.run({ cluster_thresholds: { 0: 0.5 } })
     })

@@ -3,12 +3,13 @@ import { useClusteringApplyThresholds } from '@/hooks/useClusteringApplyThreshol
 
 interface Props {
   projectId: string
+  scanId: number
 }
 
-export function CommitClusteringButton({ projectId }: Props) {
+export function CommitClusteringButton({ projectId, scanId }: Props) {
   const thresholds = useClusteringStore((s) => s.perClusterThresholds)
   const liveMax = useClusteringStore((s) => s.liveMaxMahalanobis)
-  const apply = useClusteringApplyThresholds(projectId)
+  const apply = useClusteringApplyThresholds(projectId, scanId)
   const busy = apply.status === 'running'
 
   function handleClick() {

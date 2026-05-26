@@ -5,16 +5,17 @@ import { useClusteringRefit } from '@/hooks/useClusteringRefit'
 
 interface Props {
   projectId: string
+  scanId: number
 }
 
 type RefitStatus = 'idle' | 'running' | 'done' | 'error'
 
-export function AutoTuneButton({ projectId }: Props) {
+export function AutoTuneButton({ projectId, scanId }: Props) {
   const seedGroups = useClusteringStore((s) => s.seedGroups)
   const fitScope = useClusteringStore((s) => s.fitScope)
   const initialMaxMahalanobis = useClusteringStore((s) => s.initialMaxMahalanobis)
   const setRegCovar = useClusteringStore((s) => s.setRegCovar)
-  const refit = useClusteringRefit(projectId)
+  const refit = useClusteringRefit(projectId, scanId)
   const lastSeenStatus = useRef<RefitStatus>('idle')
 
   useEffect(() => {

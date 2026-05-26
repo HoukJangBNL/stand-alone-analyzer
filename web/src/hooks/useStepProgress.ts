@@ -13,6 +13,7 @@ type StepStatus = 'idle' | 'running' | 'done' | 'error'
 
 export function useStepProgress<P = unknown, R = unknown>(
   projectId: string,
+  scanId: string | number,
   step: string
 ) {
   const [status, setStatus] = useState<StepStatus>('idle')
@@ -32,6 +33,7 @@ export function useStepProgress<P = unknown, R = unknown>(
       try {
         const response = await postSseRun(
           projectId,
+          scanId,
           step,
           params,
           abortControllerRef.current.signal
@@ -68,7 +70,7 @@ export function useStepProgress<P = unknown, R = unknown>(
         }
       }
     },
-    [projectId, step]
+    [projectId, scanId, step]
   )
 
   const cancel = useCallback(() => {

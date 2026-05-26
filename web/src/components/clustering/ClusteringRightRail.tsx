@@ -14,11 +14,12 @@ import { CommitClusteringButton } from './CommitClusteringButton'
 
 interface Props {
   projectId: string
+  scanId: number
   labels: LabelsJson | null
   assignments: AssignmentsRows | null
 }
 
-export function ClusteringRightRail({ projectId, labels, assignments }: Props) {
+export function ClusteringRightRail({ projectId, scanId, labels, assignments }: Props) {
   const fitDone = labels !== null && assignments !== null
   return (
     <aside style={{ width: 320, borderLeft: '1px solid #eee', padding: 12, overflow: 'auto', display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -27,8 +28,8 @@ export function ClusteringRightRail({ projectId, labels, assignments }: Props) {
       <InitialMahalanobisSlider />
       <RegCovarSlider />
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        <FitGMMButton projectId={projectId} />
-        <AutoTuneButton projectId={projectId} />
+        <FitGMMButton projectId={projectId} scanId={scanId} />
+        <AutoTuneButton projectId={projectId} scanId={scanId} />
       </div>
       {fitDone && (
         <>
@@ -39,7 +40,7 @@ export function ClusteringRightRail({ projectId, labels, assignments }: Props) {
       <ClusteringBrushingControls />
       <ClusteringAxisPicker pane="X" />
       <ClusteringAxisPicker pane="Y" />
-      {fitDone && <CommitClusteringButton projectId={projectId} />}
+      {fitDone && <CommitClusteringButton projectId={projectId} scanId={scanId} />}
     </aside>
   )
 }

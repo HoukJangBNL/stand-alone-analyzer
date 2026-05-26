@@ -14,7 +14,10 @@ interface ApplySummary {
 
 type ApplyStatus = 'idle' | 'running' | 'done' | 'error'
 
-export function useClusteringApplyThresholds(projectId: string) {
+export function useClusteringApplyThresholds(
+  projectId: string,
+  scanId: string | number
+) {
   const qc = useQueryClient()
   const [status, setStatus] = useState<ApplyStatus>('idle')
   const [pct, setPct] = useState(0)
@@ -32,6 +35,7 @@ export function useClusteringApplyThresholds(projectId: string) {
       try {
         const response = await postSseRun(
           projectId,
+          scanId,
           'clustering/apply_thresholds',
           body,
           abortRef.current.signal
@@ -67,7 +71,7 @@ export function useClusteringApplyThresholds(projectId: string) {
         }
       }
     },
-    [projectId, qc]
+    [projectId, scanId, qc]
   )
 
   const cancel = useCallback(() => abortRef.current?.abort(), [])

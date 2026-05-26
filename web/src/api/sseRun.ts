@@ -11,17 +11,21 @@ import { getAuthHeaders } from '@/api/authHeaders'
 
 export async function postSseRun(
   projectId: string,
+  scanId: string | number,
   step: string,
   body: unknown,
   signal: AbortSignal
 ): Promise<Response> {
-  const response = await fetch(`/api/v1/projects/${projectId}/run/${step}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...getAuthHeaders() },
-    credentials: 'include',
-    body: JSON.stringify(body),
-    signal,
-  })
+  const response = await fetch(
+    `/api/v1/projects/${projectId}/scans/${scanId}/run/${step}`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream', ...getAuthHeaders() },
+      credentials: 'include',
+      body: JSON.stringify(body),
+      signal,
+    }
+  )
   if (!response.ok) {
     let envelope: {
       error?: {

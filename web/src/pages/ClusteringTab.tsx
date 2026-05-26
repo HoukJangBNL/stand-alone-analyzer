@@ -19,7 +19,7 @@ export function ClusteringTab({ projectId, scanId = null }: Props) {
   return <ClusteringTabBody projectId={projectId} scanId={scanId} />
 }
 
-function ClusteringTabBody({ projectId }: { projectId: string; scanId: number }) {
+function ClusteringTabBody({ projectId, scanId }: { projectId: string; scanId: number }) {
   const stats = useDomainStats(projectId)
   const labels = useClusteringLabels(projectId)
   const assignments = useClusteringAssignments(projectId)
@@ -61,7 +61,7 @@ function ClusteringTabBody({ projectId }: { projectId: string; scanId: number })
     <div style={{ display: 'flex', flexDirection: 'column', minHeight: 0, height: '100%' }}>
       <div style={{ display: 'flex', flex: 1, minHeight: 0 }}>
         <ClusteringMain stats={stats.data} labels={labelsData} assignments={assignmentsData} />
-        <ClusteringRightRail projectId={projectId} labels={labelsData} assignments={assignmentsData} />
+        <ClusteringRightRail projectId={projectId} scanId={scanId} labels={labelsData} assignments={assignmentsData} />
       </div>
     </div>
   )

@@ -30,14 +30,14 @@ const assignments: AssignmentsRows = {
 
 describe('ClusteringRightRail', () => {
   it('renders authoring controls when labels=null (pre-fit)', () => {
-    wrap(<ClusteringRightRail projectId="local" labels={null} assignments={null} />)
+    wrap(<ClusteringRightRail projectId="local" scanId={1} labels={null} assignments={null} />)
     expect(screen.getByText(/Seed groups/)).not.toBeNull()
     expect(screen.getByRole('button', { name: /Fit GMM/ })).not.toBeNull()
     expect(screen.queryByText(/Per-cluster thresholds/)).toBeNull()
   })
 
   it('renders threshold + commit blocks when labels and assignments are present', () => {
-    wrap(<ClusteringRightRail projectId="local" labels={labels} assignments={assignments} />)
+    wrap(<ClusteringRightRail projectId="local" scanId={1} labels={labels} assignments={assignments} />)
     expect(screen.getByText(/Per-cluster thresholds/)).not.toBeNull()
     expect(screen.getByRole('button', { name: /Commit clustering/ })).not.toBeNull()
   })

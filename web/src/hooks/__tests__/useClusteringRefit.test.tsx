@@ -38,7 +38,7 @@ describe('useClusteringRefit', () => {
       )
     )
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const { result } = renderHook(() => useClusteringRefit('local'), { wrapper: wrap(qc) })
+    const { result } = renderHook(() => useClusteringRefit('local', 1), { wrapper: wrap(qc) })
     await act(async () => {
       await result.current.run({
         seed_groups: [
@@ -63,7 +63,7 @@ describe('useClusteringRefit', () => {
       )
     )
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
-    const { result } = renderHook(() => useClusteringRefit('local'), { wrapper: wrap(qc) })
+    const { result } = renderHook(() => useClusteringRefit('local', 1), { wrapper: wrap(qc) })
     await act(async () => {
       await result.current.run({
         seed_groups: [{ name: 'a', domain_ids: [1] }, { name: 'b', domain_ids: [2] }],

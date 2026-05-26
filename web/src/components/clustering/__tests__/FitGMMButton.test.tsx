@@ -17,11 +17,11 @@ function wrap(node: ReactNode) {
 
 describe('FitGMMButton', () => {
   it('is disabled when seedGroups.length < 2', () => {
-    wrap(<FitGMMButton projectId="local" />)
+    wrap(<FitGMMButton projectId="local" scanId={1} />)
     const btn = screen.getByRole('button', { name: /Fit GMM/ })
     expect((btn as HTMLButtonElement).disabled).toBe(true)
     useClusteringStore.getState().addSeedGroup('a', [1])
-    wrap(<FitGMMButton projectId="local" />)
+    wrap(<FitGMMButton projectId="local" scanId={1} />)
     const stillDisabled = screen.getAllByRole('button', { name: /Fit GMM/ }).at(-1) as HTMLButtonElement
     expect(stillDisabled.disabled).toBe(true)
   })
@@ -37,7 +37,7 @@ describe('FitGMMButton', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    wrap(<FitGMMButton projectId="local" />)
+    wrap(<FitGMMButton projectId="local" scanId={1} />)
     const btn = screen.getByRole('button', { name: /Fit GMM/ }) as HTMLButtonElement
     expect(btn.disabled).toBe(false)
     fireEvent.click(btn)
@@ -61,7 +61,7 @@ describe('FitGMMButton', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    wrap(<FitGMMButton projectId="local" />)
+    wrap(<FitGMMButton projectId="local" scanId={1} />)
     const btn = screen.getByRole('button', { name: /Fit GMM/ }) as HTMLButtonElement
     fireEvent.click(btn)
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())

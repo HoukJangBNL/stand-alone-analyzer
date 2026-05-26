@@ -16,7 +16,10 @@ interface RefitResult {
 
 type RefitStatus = 'idle' | 'running' | 'done' | 'error'
 
-export function useClusteringRefit(projectId: string) {
+export function useClusteringRefit(
+  projectId: string,
+  scanId: string | number
+) {
   const qc = useQueryClient()
   const [status, setStatus] = useState<RefitStatus>('idle')
   const [pct, setPct] = useState(0)
@@ -34,6 +37,7 @@ export function useClusteringRefit(projectId: string) {
       try {
         const response = await postSseRun(
           projectId,
+          scanId,
           'clustering/refit',
           body,
           abortRef.current.signal
@@ -70,7 +74,7 @@ export function useClusteringRefit(projectId: string) {
         }
       }
     },
-    [projectId, qc]
+    [projectId, scanId, qc]
   )
 
   const cancel = useCallback(() => abortRef.current?.abort(), [])

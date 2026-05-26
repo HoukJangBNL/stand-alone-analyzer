@@ -15,7 +15,7 @@ describe('useStepProgress', () => {
 
   it('starts with idle status', () => {
     const { result } = renderHook(() =>
-      useStepProgress('local', 'thumbnails')
+      useStepProgress('local', 1, 'thumbnails')
     )
 
     expect(result.current.status).toBe('idle')
@@ -50,7 +50,7 @@ describe('useStepProgress', () => {
     )
 
     const { result } = renderHook(() =>
-      useStepProgress('local', 'thumbnails')
+      useStepProgress('local', 1, 'thumbnails')
     )
 
     act(() => {
@@ -92,7 +92,7 @@ describe('useStepProgress', () => {
     )
 
     const { result } = renderHook(() =>
-      useStepProgress('local', 'thumbnails')
+      useStepProgress('local', 1, 'thumbnails')
     )
 
     act(() => {
@@ -128,7 +128,7 @@ describe('useStepProgress.result', () => {
       )
     )
 
-    const { result } = renderHook(() => useStepProgress('local', 'selector'))
+    const { result } = renderHook(() => useStepProgress('local', 1, 'selector'))
     await act(async () => {
       await result.current.start({})
     })
@@ -138,8 +138,40 @@ describe('useStepProgress.result', () => {
   })
 
   it('result is null until done event arrives', () => {
-    const { result } = renderHook(() => useStepProgress('local', 'selector'))
+    const { result } = renderHook(() => useStepProgress('local', 1, 'selector'))
     expect(result.current.result).toBeNull()
+  })
+})
+
+describe('useStepProgress.scanId routing', () => {
+  // Task C1 (upload-robustness): hook must forward scanId so the request hits
+  // the scan-scoped backend route /projects/{pid}/scans/{sid}/run/{step}.
+  it('builds the scan-scoped URL from (projectId, scanId, step)', async () => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(
+          new TextEncoder().encode('event: done\ndata: {"result":{}}\n\n')
+        )
+        controller.close()
+      },
+    })
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(stream, {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const { result } = renderHook(() =>
+      useStepProgress('p1', 's42', 'thumbnails')
+    )
+    await act(async () => {
+      await result.current.start({})
+    })
+
+    const url = fetchMock.mock.calls[0][0] as string
+    expect(url).toContain('/projects/p1/scans/s42/run/thumbnails')
   })
 })
 
@@ -166,7 +198,7 @@ describe('useStepProgress.toast on SSE error', () => {
       )
     )
 
-    const { result } = renderHook(() => useStepProgress('local', 'background'))
+    const { result } = renderHook(() => useStepProgress('local', 1, 'background'))
 
     await act(async () => { await result.current.start({}) })
     await waitFor(() => expect(result.current.status).toBe('error'))

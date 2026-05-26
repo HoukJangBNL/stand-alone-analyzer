@@ -3,14 +3,15 @@ import { useClusteringRefit } from '@/hooks/useClusteringRefit'
 
 interface Props {
   projectId: string
+  scanId: number
 }
 
-export function FitGMMButton({ projectId }: Props) {
+export function FitGMMButton({ projectId, scanId }: Props) {
   const seedGroups = useClusteringStore((s) => s.seedGroups)
   const fitScope = useClusteringStore((s) => s.fitScope)
   const initialMaxMahalanobis = useClusteringStore((s) => s.initialMaxMahalanobis)
   const regCovar = useClusteringStore((s) => s.regCovar)
-  const refit = useClusteringRefit(projectId)
+  const refit = useClusteringRefit(projectId, scanId)
 
   const enoughGroups = seedGroups.length >= 2
   const busy = refit.status === 'running'

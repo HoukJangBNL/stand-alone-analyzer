@@ -3,14 +3,14 @@ import { useStepProgress } from '@/hooks/useStepProgress'
 
 interface StepCardProps {
   projectId: string
-  scanId?: number | null
+  scanId: number
   step: string
   stepName: string
 }
 
-export function StepCard({ projectId, step, stepName }: StepCardProps) {
+export function StepCard({ projectId, scanId, step, stepName }: StepCardProps) {
   const [params] = useState({})
-  const { status, pct, message, start, cancel } = useStepProgress(projectId, step)
+  const { status, pct, message, start, cancel } = useStepProgress(projectId, scanId, step)
 
   const handleRun = () => start(params)
   // Server step names use snake_case (domain_stats); testids must be kebab-case.

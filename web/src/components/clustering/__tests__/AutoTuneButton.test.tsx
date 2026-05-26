@@ -36,7 +36,7 @@ describe('<AutoTuneButton>', () => {
     )
     vi.stubGlobal('fetch', fetchMock)
 
-    wrap(<AutoTuneButton projectId="local" />)
+    wrap(<AutoTuneButton projectId="local" scanId={1} />)
     const btn = screen.getByTestId('clustering-auto-tune') as HTMLButtonElement
     fireEvent.click(btn)
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
@@ -48,7 +48,7 @@ describe('<AutoTuneButton>', () => {
   })
 
   it('is disabled when seedGroups.length < 2', () => {
-    wrap(<AutoTuneButton projectId="local" />)
+    wrap(<AutoTuneButton projectId="local" scanId={1} />)
     const btn = screen.getByTestId('clustering-auto-tune') as HTMLButtonElement
     expect(btn.disabled).toBe(true)
   })
