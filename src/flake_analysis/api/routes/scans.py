@@ -1,6 +1,7 @@
 """W5-B scans router — create scan (W5-B1) + presign/complete/finalize/get (W5-B2)."""
 from __future__ import annotations
 
+import logging
 import os
 from typing import Annotated
 
@@ -14,6 +15,7 @@ from sqlalchemy.orm import selectinload
 from flake_analysis.api import errors as app_errors
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_db_session
+from flake_analysis.api.logging_ctx import get_request_id
 from flake_analysis.api.schemas.upload import (
     CompleteRequest,
     CompleteResponse,
@@ -34,6 +36,20 @@ from flake_analysis.api.services.usage import emit as emit_usage
 from flake_analysis.db.models import Scan
 from flake_analysis.db.models.upload import Image, UploadItem, UploadItemStatus
 
+logger = logging.getLogger(__name__)
+
+
+def _log_extra(**fields: object) -> dict[str, object]:
+    """Build a structured log `extra` dict, dropping fields whose value is None.
+
+    request_id is auto-included when available from the request context.
+    """
+    rid = get_request_id()
+    if rid is not None:
+        fields.setdefault("request_id", rid)
+    return {k: v for k, v in fields.items() if v is not None}
+
+
 router = APIRouter(tags=["scans"])
 
 
@@ -52,6 +68,10 @@ async def create_scan(
     try:
         await projects_svc.get_project(session, project_id=project_id)
     except projects_svc.ProjectNotFound as exc:
+        logger.info(
+            "create_scan aborted: project not found",
+            extra=_log_extra(event="create_scan_project_not_found", project_id=project_id),
+        )
         raise app_errors.ProjectNotFound(project_id=project_id) from exc
     scan = await upload_service.create_scan(
         session,
@@ -120,12 +140,20 @@ async def presign_image_put(
     bucket = os.environ.get("SAA_S3_BUCKET")
     prefix = os.environ.get("SAA_S3_PREFIX", "")
     if not bucket:
+        logger.info(
+            "presign aborted: SAA_S3_BUCKET not configured",
+            extra=_log_extra(event="presign_bucket_unconfigured", scan_id=scan_id),
+        )
         raise HTTPException(status_code=500, detail="SAA_S3_BUCKET not configured")
 
     scan = (await session.execute(
         select(Scan).where(Scan.id == scan_id)
     )).scalar_one_or_none()
     if scan is None:
+        logger.info(
+            "presign aborted: scan not found",
+            extra=_log_extra(event="presign_scan_not_found", scan_id=scan_id),
+        )
         raise HTTPException(status_code=404, detail=f"scan {scan_id} not found")
 
     # 1) sha256 collision with finalized images
@@ -135,6 +163,15 @@ async def presign_image_put(
         .where(Image.sha256 == req.sha256)
     )).scalar_one_or_none()
     if img_dup is not None:
+        logger.info(
+            "presign collision (sha256 match)",
+            extra=_log_extra(
+                event="presign_collision_sha256",
+                scan_id=scan_id,
+                sha256=req.sha256,
+                image_id=img_dup,
+            ),
+        )
         raise HTTPException(
             status_code=409,
             detail=f"sha256 already uploaded as image {img_dup}",
@@ -147,6 +184,16 @@ async def presign_image_put(
         .where(Image.grid_iy == req.grid_iy)
     )).scalar_one_or_none()
     if grid_dup is not None:
+        logger.info(
+            "presign collision (grid match)",
+            extra=_log_extra(
+                event="presign_collision_grid",
+                scan_id=scan_id,
+                grid_ix=req.grid_ix,
+                grid_iy=req.grid_iy,
+                image_id=grid_dup,
+            ),
+        )
         raise HTTPException(
             status_code=409,
             detail=f"grid ({req.grid_ix},{req.grid_iy}) already uploaded as image {grid_dup}",
@@ -163,6 +210,16 @@ async def presign_image_put(
         .where(UploadItem.sha256 == req.sha256)
     )).scalar_one_or_none()
     if inflight_sha is not None:
+        logger.info(
+            "presign collision (sha256 match)",
+            extra=_log_extra(
+                event="presign_collision_sha256",
+                scan_id=scan_id,
+                sha256=req.sha256,
+                upload_item_id=inflight_sha,
+                in_flight=True,
+            ),
+        )
         raise HTTPException(
             status_code=409,
             detail=f"sha256 already in-flight as upload_item {inflight_sha}",
@@ -175,6 +232,17 @@ async def presign_image_put(
         .where(UploadItem.grid_iy == req.grid_iy)
     )).scalar_one_or_none()
     if inflight_grid is not None:
+        logger.info(
+            "presign collision (grid match)",
+            extra=_log_extra(
+                event="presign_collision_grid",
+                scan_id=scan_id,
+                grid_ix=req.grid_ix,
+                grid_iy=req.grid_iy,
+                upload_item_id=inflight_grid,
+                in_flight=True,
+            ),
+        )
         raise HTTPException(
             status_code=409,
             detail=f"grid ({req.grid_ix},{req.grid_iy}) already in-flight as upload_item {inflight_grid}",
@@ -198,6 +266,16 @@ async def presign_image_put(
         )
     except IntegrityError as exc:
         await session.rollback()
+        logger.info(
+            "presign upload_item insert conflict",
+            extra=_log_extra(
+                event="presign_upload_item_conflict",
+                scan_id=scan_id,
+                sha256=req.sha256,
+                grid_ix=req.grid_ix,
+                grid_iy=req.grid_iy,
+            ),
+        )
         raise HTTPException(status_code=409, detail=f"upload_item insert conflict: {exc.orig}") from exc
 
     presigned = s3_presign.presign_put(
@@ -231,6 +309,14 @@ async def complete_image(
     """
     bucket = os.environ.get("SAA_S3_BUCKET")
     if not bucket:
+        logger.info(
+            "complete aborted: SAA_S3_BUCKET not configured",
+            extra=_log_extra(
+                event="complete_bucket_unconfigured",
+                scan_id=scan_id,
+                upload_item_id=upload_item_id,
+            ),
+        )
         raise HTTPException(status_code=500, detail="SAA_S3_BUCKET not configured")
 
     item = (await session.execute(
@@ -239,8 +325,25 @@ async def complete_image(
         .where(UploadItem.id == upload_item_id)
     )).scalar_one_or_none()
     if item is None:
+        logger.info(
+            "complete aborted: upload_item not found",
+            extra=_log_extra(
+                event="complete_upload_item_not_found",
+                scan_id=scan_id,
+                upload_item_id=upload_item_id,
+            ),
+        )
         raise HTTPException(status_code=404, detail=f"upload_item {upload_item_id} not found")
     if item.session.scan_id != scan_id:
+        logger.info(
+            "complete aborted: upload_item belongs to different scan",
+            extra=_log_extra(
+                event="complete_upload_item_scan_mismatch",
+                scan_id=scan_id,
+                upload_item_id=upload_item_id,
+                actual_scan_id=item.session.scan_id,
+            ),
+        )
         raise HTTPException(
             status_code=404,
             detail=f"upload_item {upload_item_id} does not belong to scan {scan_id}",
@@ -252,6 +355,14 @@ async def complete_image(
 
     # Verify the S3 object exists
     if item.s3_uri is None or not item.s3_uri.startswith(f"s3://{bucket}/"):
+        logger.info(
+            "complete aborted: invalid s3_uri",
+            extra=_log_extra(
+                event="complete_invalid_s3_uri",
+                scan_id=scan_id,
+                upload_item_id=upload_item_id,
+            ),
+        )
         raise HTTPException(status_code=409, detail="upload_item has invalid s3_uri")
     key = item.s3_uri[len(f"s3://{bucket}/"):]
     try:
@@ -259,10 +370,29 @@ async def complete_image(
     except ClientError as exc:
         code = exc.response.get("Error", {}).get("Code", "")
         if code in ("404", "NoSuchKey", "NotFound"):
+            logger.info(
+                "complete aborted: S3 object missing",
+                extra=_log_extra(
+                    event="complete_s3_object_missing",
+                    scan_id=scan_id,
+                    upload_item_id=upload_item_id,
+                    s3_key=key,
+                ),
+            )
             raise HTTPException(
                 status_code=409,
                 detail=f"S3 object {key} not found - upload did not complete",
             ) from exc
+        logger.info(
+            "complete failed: S3 head_object error",
+            extra=_log_extra(
+                event="complete_s3_head_error",
+                scan_id=scan_id,
+                upload_item_id=upload_item_id,
+                s3_key=key,
+                s3_error_code=code,
+            ),
+        )
         raise HTTPException(status_code=500, detail=f"S3 head_object failed: {code}") from exc
 
     # Insert canonical Image row
@@ -281,6 +411,15 @@ async def complete_image(
         await session.flush()
     except IntegrityError as exc:
         await session.rollback()
+        logger.info(
+            "complete failed: image insert conflict",
+            extra=_log_extra(
+                event="complete_image_conflict",
+                scan_id=scan_id,
+                upload_item_id=upload_item_id,
+                sha256=item.sha256,
+            ),
+        )
         raise HTTPException(status_code=409, detail=f"image insert conflict: {exc.orig}") from exc
 
     item.status = UploadItemStatus.UPLOADED
@@ -302,6 +441,10 @@ async def finalize_scan(
         select(Scan).where(Scan.id == scan_id)
     )).scalar_one_or_none()
     if scan is None:
+        logger.info(
+            "finalize aborted: scan not found",
+            extra=_log_extra(event="finalize_scan_not_found", scan_id=scan_id),
+        )
         raise HTTPException(status_code=404, detail=f"scan {scan_id} not found")
 
     uploaded = (await session.execute(
@@ -309,6 +452,16 @@ async def finalize_scan(
     )).scalar_one()
     missing = max(scan.image_count - int(uploaded), 0)
     if missing > 0:
+        logger.info(
+            "finalize aborted: incomplete upload",
+            extra=_log_extra(
+                event="finalize_incomplete",
+                scan_id=scan_id,
+                missing=missing,
+                uploaded=int(uploaded),
+                expected=scan.image_count,
+            ),
+        )
         raise HTTPException(
             status_code=409,
             detail={"status": "incomplete", "missing": missing,
@@ -333,6 +486,10 @@ async def get_scan(
         select(Scan).where(Scan.id == scan_id)
     )).scalar_one_or_none()
     if scan is None:
+        logger.info(
+            "get_scan aborted: scan not found",
+            extra=_log_extra(event="get_scan_not_found", scan_id=scan_id),
+        )
         raise HTTPException(status_code=404, detail=f"scan {scan_id} not found")
 
     images = (await session.execute(

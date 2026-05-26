@@ -6,10 +6,12 @@ to this same file.
 """
 from __future__ import annotations
 
+import logging
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from flake_analysis.db.models import Material, Scan
@@ -19,6 +21,8 @@ from flake_analysis.db.models.upload import (
     UploadSession,
     UploadSessionStatus,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def normalize_material_name(raw: str) -> str:
@@ -40,6 +44,10 @@ async def upsert_material(
     """
     canonical = normalize_material_name(name)
     if not canonical:
+        logger.info(
+            "upsert_material rejected empty material name",
+            extra={"event": "upsert_material_empty_name"},
+        )
         raise ValueError("material name is empty after normalization")
 
     stmt = (
@@ -142,6 +150,20 @@ async def create_upload_item(
         status=UploadItemStatus.PENDING,
     )
     session.add(item)
-    await session.flush()
+    try:
+        await session.flush()
+    except IntegrityError:
+        logger.info(
+            "create_upload_item integrity error",
+            extra={
+                "event": "create_upload_item_conflict",
+                "upload_session_id": upload_session.id,
+                "scan_id": upload_session.scan_id,
+                "sha256": sha256,
+                "grid_ix": grid_ix,
+                "grid_iy": grid_iy,
+            },
+        )
+        raise
     await session.refresh(item)
     return item

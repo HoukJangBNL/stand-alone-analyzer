@@ -1,6 +1,8 @@
 """W5-B2.2 — POST /scans/{scan_id}/images/presign tests."""
 from __future__ import annotations
 
+import logging
+
 import boto3
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -138,6 +140,49 @@ async def test_presign_rejects_duplicate_grid(
                 )
                 assert dup.status_code == 409
                 assert "grid" in dup.json()["detail"].lower()
+        finally:
+            app.dependency_overrides.pop(get_db_session, None)
+
+
+@pytest.mark.asyncio
+async def test_presign_409_sha256_collision_logs_event(
+    caplog, pg_session, sample_user_factory, sample_project_factory,
+):
+    """A4: 409 sha256 collision in presign emits structured INFO log."""
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
+    with mock_aws():
+        _create_bucket()
+        _override(pg_session)
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+                scan_id = await _create_scan(c, project.id)
+                body = {
+                    "filename": "a.tif", "sha256": "f" * 64,
+                    "grid_ix": 0, "grid_iy": 0, "size_bytes": 100,
+                }
+                ok = await c.post(f"/api/v1/scans/{scan_id}/images/presign", json=body)
+                assert ok.status_code == 200
+
+                caplog.clear()
+                with caplog.at_level(logging.INFO, logger="flake_analysis.api.routes.scans"):
+                    dup = await c.post(
+                        f"/api/v1/scans/{scan_id}/images/presign",
+                        json={**body, "grid_ix": 1},  # different grid, same sha
+                    )
+                assert dup.status_code == 409
+
+                matches = [
+                    r for r in caplog.records
+                    if getattr(r, "event", None) == "presign_collision_sha256"
+                ]
+                assert matches, (
+                    f"expected a record with extra={{'event': 'presign_collision_sha256'}}, "
+                    f"got events={[getattr(r, 'event', None) for r in caplog.records]}"
+                )
+                rec = matches[0]
+                assert rec.levelno == logging.INFO
+                assert getattr(rec, "scan_id", None) == scan_id
         finally:
             app.dependency_overrides.pop(get_db_session, None)
 
