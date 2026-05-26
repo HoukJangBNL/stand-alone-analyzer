@@ -65,6 +65,12 @@ class ProjectBusy(AppError):
     message = "Project is currently locked by another operation"
 
 
+class Forbidden(AppError):
+    code = "forbidden"
+    status_code = status.HTTP_403_FORBIDDEN
+    message = "Forbidden"
+
+
 class DomainStatsNotFound(AppError):
     code = "domain_stats_not_found"
     status_code = status.HTTP_404_NOT_FOUND

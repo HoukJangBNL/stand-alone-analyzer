@@ -69,3 +69,15 @@ def test_flake_not_found_envelope():
     assert env["error"]["code"] == "flake_not_found"
     assert env["error"]["details"] == {"flake_id": 99999}
     assert e.status_code == 404
+
+
+def test_forbidden_error_envelope_shape():
+    from flake_analysis.api.errors import Forbidden
+
+    err = Forbidden(action="finalize", scan_id=42)
+    payload = err.to_response()
+    assert err.status_code == 403
+    assert err.code == "forbidden"
+    assert payload["error"]["code"] == "forbidden"
+    assert payload["error"]["details"] == {"action": "finalize", "scan_id": 42}
+    assert "request_id" in payload["error"]
