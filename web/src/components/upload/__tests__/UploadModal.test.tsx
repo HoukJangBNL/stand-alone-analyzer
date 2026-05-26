@@ -17,6 +17,10 @@ beforeEach(() => {
   resetUploadStore()
   vi.restoreAllMocks()
   vi.spyOn(materials, 'fetchMaterials').mockResolvedValue([{ name: 'graphene' }])
+  // jsdom has no createImageBitmap or URL.createObjectURL — stub the
+  // orchestrator's image-dimension reader so the upload pipeline can complete.
+  ;(globalThis as { __readImageDimensionsForTest?: (f: File) => Promise<{ width: number; height: number }> })
+    .__readImageDimensionsForTest = async () => ({ width: 100, height: 100 })
 })
 
 describe('UploadModal', () => {

@@ -8,6 +8,39 @@ export interface OrchestratorOptions {
 }
 
 /**
+ * Decode just enough of the file to read width/height. Uses the cheap
+ * createImageBitmap path when available and falls back to <img>. Tests
+ * provide a stub via globalThis.__readImageDimensionsForTest.
+ */
+async function readImageDimensions(file: File): Promise<{ width: number; height: number }> {
+  const stub = (globalThis as { __readImageDimensionsForTest?: (f: File) => Promise<{ width: number; height: number }> })
+    .__readImageDimensionsForTest
+  if (stub) return stub(file)
+  if (typeof createImageBitmap === 'function') {
+    const bmp = await createImageBitmap(file)
+    try {
+      return { width: bmp.width, height: bmp.height }
+    } finally {
+      bmp.close?.()
+    }
+  }
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file)
+    const img = new Image()
+    img.onload = () => {
+      const out = { width: img.naturalWidth, height: img.naturalHeight }
+      URL.revokeObjectURL(url)
+      resolve(out)
+    }
+    img.onerror = (err) => {
+      URL.revokeObjectURL(url)
+      reject(err instanceof Error ? err : new Error('image decode failed'))
+    }
+    img.src = url
+  })
+}
+
+/**
  * Per-file pipeline driver. Owns one AbortController per file and the
  * concurrency semaphore. Reads/mutates `useUploadStore` directly — no other
  * code in the app should write to file.status.
@@ -85,7 +118,7 @@ export class Orchestrator {
       store.patch(uid, { status: 'presigning' })
       const body: PresignBody = {
         filename: f.filename,
-        sha256_hex: hex,
+        sha256: hex,
         size_bytes: f.size,
         grid_ix: f.grid_ix,
         grid_iy: f.grid_iy,
@@ -98,9 +131,15 @@ export class Orchestrator {
       await putToS3(pre.put_url, f.file, pre.headers, ctrl.signal)
       store.patch(uid, { progress: 1 })
 
-      // 4) complete
+      // 4) complete — server requires pixel dimensions, so decode locally.
       store.patch(uid, { status: 'completing' })
-      const cmp = await completeImage(scanId, pre.upload_item_id, ctrl.signal)
+      const dims = await readImageDimensions(f.file)
+      const cmp = await completeImage(
+        scanId,
+        pre.upload_item_id,
+        { width: dims.width, height: dims.height },
+        ctrl.signal,
+      )
       store.patch(uid, { status: 'done', image_id: cmp.image_id })
     } catch (e: unknown) {
       const msg = (e as { message?: string })?.message ?? String(e)

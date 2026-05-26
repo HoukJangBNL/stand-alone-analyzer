@@ -14,7 +14,8 @@ export interface CreateScanResult {
 
 export interface PresignBody {
   filename: string
-  sha256_hex: string
+  /** Wire field name matches server PresignRequest schema (`sha256`). */
+  sha256: string
   size_bytes: number
   grid_ix: number
   grid_iy: number
@@ -83,15 +84,26 @@ export async function presignImage(
   return unwrap<PresignResult>(resp)
 }
 
+export interface CompleteBody {
+  width: number
+  height: number
+}
+
 export async function completeImage(
   scanId: string,
   uploadItemId: string,
+  body: CompleteBody,
   signal?: AbortSignal,
 ): Promise<CompleteResult> {
   const resp = await fetch(`/api/v1/scans/${scanId}/images/${uploadItemId}/complete`, {
     method: 'POST',
-    headers: { Accept: 'application/json', ...getAuthHeaders() },
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...getAuthHeaders(),
+    },
     credentials: 'include',
+    body: JSON.stringify(body),
     signal,
   })
   return unwrap<CompleteResult>(resp)

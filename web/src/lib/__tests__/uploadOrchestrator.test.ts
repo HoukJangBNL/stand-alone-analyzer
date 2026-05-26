@@ -7,9 +7,13 @@ import * as sha from '@/lib/sha256'
 beforeEach(() => {
   resetUploadStore()
   vi.restoreAllMocks()
+  // jsdom lacks createImageBitmap; stub the orchestrator's dimension reader.
+  ;(globalThis as { __readImageDimensionsForTest?: (f: File) => Promise<{ width: number; height: number }> })
+    .__readImageDimensionsForTest = async () => ({ width: 100, height: 100 })
 })
 afterEach(() => {
   vi.restoreAllMocks()
+  delete (globalThis as { __readImageDimensionsForTest?: unknown }).__readImageDimensionsForTest
 })
 
 function fakeFile(name: string, bytes = 4): File {
