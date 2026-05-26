@@ -162,7 +162,7 @@ export async function listScansForProject(projectId: string): Promise<ScanSummar
 export async function deleteScan(scanId: number): Promise<void> {
   const resp = await fetch(`/api/v1/scans/${scanId}`, {
     method: 'DELETE',
-    headers: { ...getAuthHeaders() },
+    headers: { Accept: 'application/json', ...getAuthHeaders() },
     credentials: 'include',
   })
   if (resp.status === 204) return
