@@ -2,6 +2,10 @@
 import { useUploadStore } from '@/state/uploadSlice'
 import { FileRow } from './FileRow'
 
+// Showing every dropped file as a row blocks the main thread when users
+// drop a 5k-image folder. Cap the visible list and surface a summary tail.
+const MAX_VISIBLE_ROWS = 200
+
 export function ProgressList() {
   const order = useUploadStore((s) => s.order)
   if (order.length === 0) {
@@ -11,6 +15,8 @@ export function ProgressList() {
       </p>
     )
   }
+  const visible = order.slice(0, MAX_VISIBLE_ROWS)
+  const hidden = order.length - visible.length
   return (
     <div data-testid="progress-list" style={{ marginTop: 8 }}>
       <div
@@ -30,9 +36,18 @@ export function ProgressList() {
         <span>progress</span>
         <span></span>
       </div>
-      {order.map((uid) => (
+      {visible.map((uid) => (
         <FileRow key={uid} uid={uid} />
       ))}
+      {hidden > 0 && (
+        <p
+          data-testid="progress-list-truncated"
+          style={{ color: '#6b7280', fontSize: 12, padding: '4px 0' }}
+        >
+          …and {hidden} more file{hidden === 1 ? '' : 's'} (queued; uploads run in
+          parallel regardless of this list).
+        </p>
+      )}
     </div>
   )
 }

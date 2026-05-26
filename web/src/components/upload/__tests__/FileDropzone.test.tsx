@@ -107,7 +107,7 @@ describe('FileDropzone', () => {
     expect(names).toEqual(['n1.png', 'n2.bmp', 't1.png', 't2.jpg', 't3.tif'].sort())
   })
 
-  it('picker change event filters by extension (case-insensitive)', () => {
+  it('picker change event filters by extension (case-insensitive)', async () => {
     render(<FileDropzone />)
     const input = screen.getByTestId('file-dropzone-input') as HTMLInputElement
     const a = new File([new Uint8Array(1)], 'a.png')
@@ -115,8 +115,25 @@ describe('FileDropzone', () => {
     const b = new File([new Uint8Array(1)], 'b.JPG')
     Object.defineProperty(input, 'files', { value: [a, txt, b], configurable: true })
     fireEvent.change(input)
+    // The picker handler now yields to the browser between batches so the
+    // "Scanning…" indicator can paint; flush the microtask queue.
+    await flush()
+    await flush()
     const state = useUploadStore.getState()
     const names = state.order.map((uid) => state.files[uid].filename).sort()
     expect(names).toEqual(['a.png', 'b.JPG'].sort())
+  })
+
+  it('shows a Scanning… indicator while picker batches files', async () => {
+    render(<FileDropzone />)
+    const input = screen.getByTestId('file-dropzone-input') as HTMLInputElement
+    const f = new File([new Uint8Array(1)], 'a.png')
+    Object.defineProperty(input, 'files', { value: [f], configurable: true })
+    fireEvent.change(input)
+    // The indicator appears synchronously before the microtask flush.
+    expect(screen.getByTestId('file-dropzone-scanning')).toBeTruthy()
+    await flush()
+    await flush()
+    expect(screen.queryByTestId('file-dropzone-scanning')).toBeNull()
   })
 })
