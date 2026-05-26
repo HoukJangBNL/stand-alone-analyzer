@@ -24,6 +24,10 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   const files = useUploadStore((s) => s.files)
   const order = useUploadStore((s) => s.order)
   const [running, setRunning] = useState(false)
+  // When the user clicks Close while an upload is running, we want a soft
+  // confirmation step instead of nuking client + server state. The inline
+  // confirm panel is rendered when this flag is true.
+  const [confirmingClose, setConfirmingClose] = useState(false)
   // Lifted-up form state — UploadModal is the source of truth for scan
   // metadata while the user is filling it in. Start upload reads this
   // directly, so there's no separate "Save" gate.
@@ -35,6 +39,7 @@ export function UploadModal({ projectId, open, onClose }: Props) {
       resetUploadStore()
       resetOrchestrator()
       setScanMeta(EMPTY_META)
+      setConfirmingClose(false)
     }
   }, [open])
 
@@ -62,11 +67,35 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   })
 
   const handleClose = () => {
+    // Mid-upload close goes through a confirm step so we don't lose the
+    // server-side scan and the user's in-flight work without warning. The
+    // confirm panel decides which reset path runs.
+    if (running) {
+      setConfirmingClose(true)
+      return
+    }
     resetOrchestrator()
     resetUploadStore()
     setRunning(false)
     setScanMeta(EMPTY_META)
     onClose()
+  }
+
+  // User confirmed they want to abandon the in-flight upload. Abort fetches
+  // and drop only the throwaway client-side rows (queued / uploading /
+  // failed). `scanId` and `done` rows survive so the server-side scan stays
+  // intact — a future task can wire up a resume UX.
+  const handleConfirmStopAndClose = () => {
+    getOrchestrator().cancelAll()
+    useUploadStore.getState().clearTransientFiles()
+    setRunning(false)
+    setConfirmingClose(false)
+    setScanMeta(EMPTY_META)
+    onClose()
+  }
+
+  const handleCancelClose = () => {
+    setConfirmingClose(false)
   }
 
   const metaValid = scanMeta.name.trim().length > 0 && scanMeta.material.trim().length > 0
@@ -145,6 +174,7 @@ export function UploadModal({ projectId, open, onClose }: Props) {
           maxWidth: '90vw',
           maxHeight: '90vh',
           overflowY: 'auto',
+          position: 'relative',
         }}
       >
         <div
@@ -220,6 +250,53 @@ export function UploadModal({ projectId, open, onClose }: Props) {
             )}
           </div>
         </div>
+
+        {confirmingClose && (
+          <div
+            data-testid="upload-modal-close-confirm"
+            // Inline modal-within-modal. We deliberately don't use
+            // window.confirm — jsdom can't drive the native dialog and the
+            // app needs custom button labels anyway.
+            style={{
+              position: 'absolute',
+              inset: 0,
+              background: 'rgba(0,0,0,0.35)',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+            }}
+          >
+            <div
+              style={{
+                background: 'white',
+                borderRadius: 6,
+                padding: 16,
+                width: 360,
+                maxWidth: '80%',
+                boxShadow: '0 10px 30px rgba(0,0,0,0.2)',
+              }}
+            >
+              <p style={{ margin: '0 0 12px', fontSize: 14 }}>
+                Upload is still running. Close anyway? Already-uploaded files
+                are kept on the server.
+              </p>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button
+                  data-testid="upload-modal-close-confirm-cancel"
+                  onClick={handleCancelClose}
+                >
+                  Cancel
+                </button>
+                <button
+                  data-testid="upload-modal-close-confirm-stop"
+                  onClick={handleConfirmStopAndClose}
+                >
+                  Stop &amp; Close
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

@@ -130,4 +130,84 @@ describe('UploadModal', () => {
     await userEvent.click(screen.getByTestId('upload-modal-close'))
     expect(onClose).toHaveBeenCalled()
   })
+
+  // ---- Close-during-upload confirmation flow (Task D3) ----
+  describe('close confirmation while running', () => {
+    // Helper: render the modal and force `running=true` by holding a never-
+    // resolving createScan promise. This is the only public path to set the
+    // running flag, since it's local React state in UploadModal.
+    async function renderRunning(onClose = vi.fn()) {
+      // Block createScan so startUpload sits in `running=true` indefinitely.
+      // We give the test full control over its resolution if needed.
+      let release: () => void = () => {}
+      const blocked = new Promise<{ scan_id: string }>((resolve) => {
+        release = () => resolve({ scan_id: 's42' })
+      })
+      vi.spyOn(upload, 'createScan').mockReturnValue(blocked)
+
+      render(wrap(<UploadModal projectId="p1" open onClose={onClose} />))
+
+      // Fill in scan meta + drop a file so Start enables.
+      await userEvent.type(screen.getByTestId('scan-form-name'), 'scan-A')
+      const matInput = await screen.findByTestId('material-combobox-input')
+      await userEvent.click(matInput)
+      await userEvent.click(await screen.findByTestId('material-combobox-option-graphene'))
+      const dz = screen.getByTestId('file-dropzone')
+      const f1 = new File([new Uint8Array(8)], 'tile_0_0.tif')
+      fireEvent.drop(dz, { dataTransfer: { files: [f1], items: [], types: ['Files'] } })
+      await waitFor(() =>
+        expect((screen.getByTestId('upload-modal-start') as HTMLButtonElement).disabled).toBe(false),
+      )
+      await userEvent.click(screen.getByTestId('upload-modal-start'))
+      // Now createScan is pending → running=true. Seed scanId directly so the
+      // test can assert it survives close, since we never let createScan
+      // resolve (which is what would normally call setScanId).
+      useUploadStore.getState().setScanId('s42')
+      // Mark the file as 'uploading' so a cancelAll has something to abort.
+      const uid = useUploadStore.getState().order[0]
+      useUploadStore.getState().patch(uid, { status: 'uploading', progress: 0.3 })
+      return { onClose, release }
+    }
+
+    it('Test A: clicking Close mid-run shows confirmation, does NOT call onClose yet', async () => {
+      const { onClose } = await renderRunning()
+      await userEvent.click(screen.getByTestId('upload-modal-close'))
+      expect(await screen.findByTestId('upload-modal-close-confirm')).toBeTruthy()
+      expect(onClose).not.toHaveBeenCalled()
+      // scanId still intact.
+      expect(useUploadStore.getState().scanId).toBe('s42')
+    })
+
+    it('Test B: confirming Stop & Close preserves scanId and calls onClose', async () => {
+      const { onClose } = await renderRunning()
+      await userEvent.click(screen.getByTestId('upload-modal-close'))
+      await screen.findByTestId('upload-modal-close-confirm')
+      await userEvent.click(screen.getByTestId('upload-modal-close-confirm-stop'))
+      expect(useUploadStore.getState().scanId).toBe('s42')
+      expect(onClose).toHaveBeenCalled()
+    })
+
+    it('Test C: clicking Cancel keeps modal open and scanId intact', async () => {
+      const { onClose } = await renderRunning()
+      await userEvent.click(screen.getByTestId('upload-modal-close'))
+      await screen.findByTestId('upload-modal-close-confirm')
+      await userEvent.click(screen.getByTestId('upload-modal-close-confirm-cancel'))
+      // Confirm UI dismissed.
+      await waitFor(() =>
+        expect(screen.queryByTestId('upload-modal-close-confirm')).toBeNull(),
+      )
+      expect(onClose).not.toHaveBeenCalled()
+      expect(useUploadStore.getState().scanId).toBe('s42')
+    })
+
+    it('Test D: non-running close still does full reset (scanId cleared)', async () => {
+      // Modal not running: pre-seed scanId, then close. Should clear it.
+      const onClose = vi.fn()
+      render(wrap(<UploadModal projectId="p1" open onClose={onClose} />))
+      useUploadStore.getState().setScanId('s_legacy')
+      await userEvent.click(screen.getByTestId('upload-modal-close'))
+      expect(onClose).toHaveBeenCalled()
+      expect(useUploadStore.getState().scanId).toBeNull()
+    })
+  })
 })

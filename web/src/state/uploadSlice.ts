@@ -38,6 +38,14 @@ export interface UploadState {
   removeFile(uid: string): void
   patch(uid: string, patch: Partial<UploadFile>): void
   reset(): void
+  /**
+   * Drop every file row that is NOT in `done` status, preserving `scanId`
+   * and the already-uploaded `done` rows. Used by UploadModal when the user
+   * confirms "Stop & Close" mid-upload — the in-flight/queued/failed rows are
+   * client-side throwaways, while server-side scan + done rows must survive
+   * so the user could potentially re-open and resume later.
+   */
+  clearTransientFiles(): void
 }
 
 function genUid(): string {
@@ -121,6 +129,20 @@ export const useUploadStore = create<UploadState>((set) => ({
   },
   reset() {
     set({ scanId: null, files: {}, order: [] })
+  },
+  clearTransientFiles() {
+    set((s) => {
+      const nextFiles: Record<string, UploadFile> = {}
+      const nextOrder: string[] = []
+      for (const uid of s.order) {
+        const f = s.files[uid]
+        if (f && f.status === 'done') {
+          nextFiles[uid] = f
+          nextOrder.push(uid)
+        }
+      }
+      return { files: nextFiles, order: nextOrder }
+    })
   },
 }))
 
