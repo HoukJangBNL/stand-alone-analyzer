@@ -33,6 +33,7 @@ from flake_analysis.api.schemas.upload import (
 from flake_analysis.api.services import (
     projects_service as projects_svc,
     s3_presign,
+    scans_service,
     upload_service,
 )
 from flake_analysis.api.services.usage import emit as emit_usage
@@ -164,15 +165,16 @@ async def presign_image_put(
         )
         raise app_errors.S3NotConfigured(scan_id=scan_id)
 
-    scan = (await session.execute(
-        select(Scan).where(Scan.id == scan_id)
-    )).scalar_one_or_none()
-    if scan is None:
+    try:
+        scan = await scans_service.require_editor_for_scan(
+            session, scan_id=scan_id, user=user,
+        )
+    except app_errors.ScanNotFound:
         logger.info(
-            "presign aborted: scan not found",
+            "presign aborted: scan not found or no access",
             extra=_log_extra(event="presign_scan_not_found", scan_id=scan_id),
         )
-        raise app_errors.ScanNotFound(scan_id=scan_id)
+        raise
 
     # 1) sha256 collision with finalized images
     img_dup = (await session.execute(
