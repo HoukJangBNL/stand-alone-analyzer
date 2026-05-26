@@ -411,6 +411,21 @@ async def complete_image(
             upload_item_id=upload_item_id,
         )
 
+    try:
+        await scans_service.require_editor_for_scan(
+            session, scan_id=scan_id, user=user,
+        )
+    except app_errors.ScanNotFound:
+        logger.info(
+            "complete aborted: scan not found or no access",
+            extra=_log_extra(
+                event="complete_scan_not_found",
+                scan_id=scan_id,
+                upload_item_id=upload_item_id,
+            ),
+        )
+        raise
+
     item = (await session.execute(
         select(UploadItem)
         .options(selectinload(UploadItem.session))

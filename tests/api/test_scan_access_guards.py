@@ -77,3 +77,62 @@ async def test_presign_outsider_404(
         finally:
             app.dependency_overrides.pop(get_db_session, None)
             app.dependency_overrides.pop(get_current_user, None)
+
+
+@pytest.mark.asyncio
+async def test_complete_outsider_404(
+    pg_session,
+    sample_user_factory,
+    sample_project_factory,
+    sample_scan_factory,
+):
+    from flake_analysis.db.models.upload import (
+        UploadItem,
+        UploadItemStatus,
+        UploadSession,
+        UploadSessionStatus,
+    )
+
+    owner_orm = await sample_user_factory(role=UserRole.MEMBER)
+    outsider_orm = await sample_user_factory(role=UserRole.MEMBER)
+    project = await sample_project_factory(owner=owner_orm)
+    scan = await sample_scan_factory(project=project)
+    upl = UploadSession(
+        scan_id=scan.id,
+        status=UploadSessionStatus.ACTIVE,
+        total_files=1,
+        created_by_id=owner_orm.id,
+    )
+    pg_session.add(upl)
+    await pg_session.flush()
+    item = UploadItem(
+        session_id=upl.id,
+        filename="tile_0_0.tif",
+        sha256="a" * 64,
+        grid_ix=0,
+        grid_iy=0,
+        size_bytes=1024,
+        s3_uri=f"s3://qpress-uploads/dev/scans/{scan.id}/tile_0_0.tif",
+        status=UploadItemStatus.PENDING,
+    )
+    pg_session.add(item)
+    await pg_session.flush()
+    await pg_session.refresh(item)
+
+    with mock_aws():
+        _create_bucket()
+        _override_session(pg_session)
+        _override_user(_to_domain(outsider_orm))
+        try:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://t",
+            ) as c:
+                r = await c.post(
+                    f"/api/v1/scans/{scan.id}/images/{item.id}/complete",
+                    json={"width": 1024, "height": 768},
+                )
+                assert r.status_code == 404, r.text
+                assert r.json()["error"]["code"] == "scan_not_found"
+        finally:
+            app.dependency_overrides.pop(get_db_session, None)
+            app.dependency_overrides.pop(get_current_user, None)
