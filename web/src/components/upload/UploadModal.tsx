@@ -15,6 +15,8 @@ interface Props {
   onClose(): void
 }
 
+const EMPTY_META: ScanFormValues = { name: '', material: '', extra_metadata: {} }
+
 export function UploadModal({ projectId, open, onClose }: Props) {
   const qc = useQueryClient()
   const scanId = useUploadStore((s) => s.scanId)
@@ -22,14 +24,17 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   const files = useUploadStore((s) => s.files)
   const order = useUploadStore((s) => s.order)
   const [running, setRunning] = useState(false)
-  const [scanMeta, setScanMeta] = useState<ScanFormValues | null>(null)
+  // Lifted-up form state — UploadModal is the source of truth for scan
+  // metadata while the user is filling it in. Start upload reads this
+  // directly, so there's no separate "Save" gate.
+  const [scanMeta, setScanMeta] = useState<ScanFormValues>(EMPTY_META)
 
   // hard-reset everything when modal opens fresh
   useEffect(() => {
     if (open) {
       resetUploadStore()
       resetOrchestrator()
-      setScanMeta(null)
+      setScanMeta(EMPTY_META)
     }
   }, [open])
 
@@ -60,17 +65,23 @@ export function UploadModal({ projectId, open, onClose }: Props) {
     resetOrchestrator()
     resetUploadStore()
     setRunning(false)
-    setScanMeta(null)
+    setScanMeta(EMPTY_META)
     onClose()
   }
 
+  const metaValid = scanMeta.name.trim().length > 0 && scanMeta.material.trim().length > 0
+
   const startUpload = async () => {
-    if (!scanMeta) return
+    if (!metaValid) return
     setRunning(true)
     try {
       // Lazy scan creation: derive image_count from the actual dropped files.
       if (!scanId) {
-        await createScanMut.mutateAsync({ ...scanMeta, image_count: order.length })
+        await createScanMut.mutateAsync({
+          ...scanMeta,
+          name: scanMeta.name.trim(),
+          image_count: order.length,
+        })
       }
       await getOrchestrator().runAll()
     } finally {
@@ -114,46 +125,48 @@ export function UploadModal({ projectId, open, onClose }: Props) {
         <div
           style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}
         >
-          <h3 style={{ margin: 0 }}>새 스캔 업로드</h3>
+          <h3 style={{ margin: 0 }}>Upload new scan</h3>
           <button data-testid="upload-modal-close" onClick={handleClose}>
-            닫기
+            Close
           </button>
         </div>
 
-        {!scanMeta ? (
-          <ScanForm onSubmit={(v) => setScanMeta(v)} />
-        ) : (
-          <>
-            <p style={{ fontSize: 12, color: '#6b7280' }}>
-              {scanId ? (
-                <>
-                  scan_id: <code>{scanId}</code> · files: {droppedCount}
-                </>
-              ) : (
-                <>files: {droppedCount}</>
-              )}
-            </p>
-            <FileDropzone />
-            <ProgressList />
+        <ScanForm value={scanMeta} onChange={setScanMeta} disabled={running} />
 
-            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-              <button
-                data-testid="upload-modal-start"
-                disabled={running || allDone || droppedCount === 0 || createScanMut.isPending}
-                onClick={startUpload}
-              >
-                {running ? 'Uploading...' : 'Start upload'}
-              </button>
-              <button
-                data-testid="upload-modal-finalize"
-                disabled={!allDone || finalizeMut.isPending}
-                onClick={() => finalizeMut.mutate()}
-              >
-                {finalizeMut.isPending ? 'Finalizing...' : 'Finalize scan'}
-              </button>
-            </div>
-          </>
-        )}
+        <p style={{ fontSize: 12, color: '#6b7280' }}>
+          {scanId ? (
+            <>
+              scan_id: <code>{scanId}</code> · files: {droppedCount}
+            </>
+          ) : (
+            <>files: {droppedCount}</>
+          )}
+        </p>
+        <FileDropzone />
+        <ProgressList />
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+          <button
+            data-testid="upload-modal-start"
+            disabled={
+              running ||
+              allDone ||
+              droppedCount === 0 ||
+              !metaValid ||
+              createScanMut.isPending
+            }
+            onClick={startUpload}
+          >
+            {running ? 'Uploading...' : 'Start upload'}
+          </button>
+          <button
+            data-testid="upload-modal-finalize"
+            disabled={!allDone || finalizeMut.isPending}
+            onClick={() => finalizeMut.mutate()}
+          >
+            {finalizeMut.isPending ? 'Finalizing...' : 'Finalize scan'}
+          </button>
+        </div>
       </div>
     </div>
   )
