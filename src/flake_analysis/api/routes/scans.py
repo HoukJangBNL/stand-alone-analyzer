@@ -203,26 +203,73 @@ async def presign_image_put(
         session, scan=scan, created_by_id=user.id,
     )
 
-    # 3) sha256 collision with in-flight upload_item (same session)
-    inflight_sha = (await session.execute(
-        select(UploadItem.id)
+    # 3) sha256 collision with in-flight upload_item (same session).
+    # If the existing row's (filename, grid_ix, grid_iy, size_bytes) all match
+    # the incoming request, treat as an idempotent replay: regenerate the
+    # presigned URL for the same object key and return 200 with the same
+    # upload_item_id. Only 409 when fields actually disagree.
+    inflight_item = (await session.execute(
+        select(UploadItem)
         .where(UploadItem.session_id == upl.id)
         .where(UploadItem.sha256 == req.sha256)
     )).scalar_one_or_none()
-    if inflight_sha is not None:
+    if inflight_item is not None:
+        fields_match = (
+            inflight_item.filename == req.filename
+            and inflight_item.grid_ix == req.grid_ix
+            and inflight_item.grid_iy == req.grid_iy
+            and inflight_item.size_bytes == req.size_bytes
+        )
+        if fields_match:
+            existing_uri = inflight_item.s3_uri or ""
+            bucket_prefix = f"s3://{bucket}/"
+            if not existing_uri.startswith(bucket_prefix):
+                logger.error(
+                    "presign idempotent replay: stored s3_uri bucket mismatch",
+                    extra=_log_extra(
+                        event="presign_idempotent_bucket_mismatch",
+                        scan_id=scan_id,
+                        sha256=req.sha256,
+                        upload_item_id=inflight_item.id,
+                        s3_uri=existing_uri,
+                    ),
+                )
+                raise HTTPException(
+                    status_code=500,
+                    detail="upload_item s3_uri references unexpected bucket",
+                )
+            existing_key = existing_uri[len(bucket_prefix):]
+            presigned = s3_presign.presign_put(
+                bucket=bucket, key=existing_key, sha256_hex=req.sha256, expires_in=300,
+            )
+            logger.info(
+                "presign idempotent replay",
+                extra=_log_extra(
+                    event="presign_idempotent_replay",
+                    scan_id=scan_id,
+                    sha256=req.sha256,
+                    upload_item_id=inflight_item.id,
+                ),
+            )
+            return PresignResponse(
+                put_url=presigned["put_url"],
+                headers=presigned["headers"],
+                upload_item_id=inflight_item.id,
+                s3_uri=existing_uri,
+            )
         logger.info(
             "presign collision (sha256 match)",
             extra=_log_extra(
                 event="presign_collision_sha256",
                 scan_id=scan_id,
                 sha256=req.sha256,
-                upload_item_id=inflight_sha,
+                upload_item_id=inflight_item.id,
                 in_flight=True,
             ),
         )
         raise HTTPException(
             status_code=409,
-            detail=f"sha256 already in-flight as upload_item {inflight_sha}",
+            detail=f"sha256 already in-flight as upload_item {inflight_item.id}",
         )
     # 4) grid collision with in-flight upload_item (same session)
     inflight_grid = (await session.execute(
