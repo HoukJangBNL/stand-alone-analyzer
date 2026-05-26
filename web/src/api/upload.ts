@@ -158,3 +158,16 @@ export async function listScansForProject(projectId: string): Promise<ScanSummar
   const env = await unwrap<ScanListEnvelope>(resp)
   return env.scans
 }
+
+export async function deleteScan(scanId: number): Promise<void> {
+  const resp = await fetch(`/api/v1/scans/${scanId}`, {
+    method: 'DELETE',
+    headers: { ...getAuthHeaders() },
+    credentials: 'include',
+  })
+  if (resp.status === 204) return
+  const body = await resp.json().catch(() => null)
+  const code = body?.error?.code ?? `http_${resp.status}`
+  const action = body?.error?.details?.action
+  throw new Error(`deleteScan failed: ${code}${action ? ` (${action})` : ''}`)
+}
