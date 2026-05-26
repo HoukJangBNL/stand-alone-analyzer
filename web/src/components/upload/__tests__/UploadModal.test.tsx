@@ -3,7 +3,7 @@ import { render, screen, waitFor, fireEvent } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { UploadModal } from '../UploadModal'
-import { resetUploadStore } from '@/state/uploadSlice'
+import { resetUploadStore, useUploadStore, type UploadFile } from '@/state/uploadSlice'
 import * as upload from '@/api/upload'
 import * as materials from '@/api/materials'
 import * as sha from '@/lib/sha256'
@@ -80,6 +80,46 @@ describe('UploadModal', () => {
     // Finalize
     await userEvent.click(await screen.findByTestId('upload-modal-finalize'))
     await waitFor(() => expect(finalSpy).toHaveBeenCalledWith('scan_123', undefined))
+  })
+
+  it('renders aggregate counter (done · uploading · failed · queued of total)', async () => {
+    // Directly populate the store with 5 files in known statuses.
+    const mkFile = (uid: string, status: UploadFile['status']): UploadFile => ({
+      uid,
+      file: new File([new Uint8Array(1)], `${uid}.tif`),
+      filename: `${uid}.tif`,
+      size: 1,
+      grid_ix: null,
+      grid_iy: null,
+      status,
+      progress: 0,
+      sha256_hex: null,
+      upload_item_id: null,
+      image_id: null,
+      error: null,
+    })
+    const entries: Array<[string, UploadFile['status']]> = [
+      ['f1', 'done'],
+      ['f2', 'done'],
+      ['f3', 'uploading'],
+      ['f4', 'failed'],
+      ['f5', 'queued'],
+    ]
+    const files: Record<string, UploadFile> = {}
+    const order: string[] = []
+    for (const [uid, st] of entries) {
+      files[uid] = mkFile(uid, st)
+      order.push(uid)
+    }
+    // Set state AFTER UploadModal's open-effect would run, by rendering with
+    // open=false first, but simpler: set state then render — UploadModal's
+    // open-effect resets the store, so we need to populate AFTER mount.
+    render(wrap(<UploadModal projectId="p1" open onClose={() => {}} />))
+    // The modal's open-effect resets the store on mount; populate now.
+    useUploadStore.setState({ files, order, scanId: null })
+
+    const counts = await screen.findByTestId('upload-modal-counts')
+    expect(counts.textContent).toMatch(/2 done.*1 uploading.*1 failed.*1 queued.*of 5/)
   })
 
   it('aborts in-flight work and resets store on close', async () => {

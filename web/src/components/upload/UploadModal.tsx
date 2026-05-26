@@ -1,5 +1,5 @@
 // web/src/components/upload/UploadModal.tsx
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { ScanForm, type ScanFormValues } from './ScanForm'
@@ -92,6 +92,24 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   const allDone = order.length > 0 && order.every((uid) => files[uid]?.status === 'done')
   const droppedCount = order.length
 
+  // Aggregate counts for the modal-level progress summary. With 3000+ files
+  // the per-row list is virtualized/truncated, so users need a single
+  // headline number to know how the batch is going.
+  const counts = useMemo(() => {
+    let done = 0
+    let uploading = 0
+    let failed = 0
+    let queued = 0
+    for (const uid of order) {
+      const st = files[uid]?.status
+      if (st === 'done') done++
+      else if (st === 'uploading') uploading++
+      else if (st === 'failed') failed++
+      else queued++
+    }
+    return { done, uploading, failed, queued }
+  }, [order, files])
+
   // Surface why Start is disabled — for 4000-file folders the ScanForm
   // scrolls out of view and users can't tell what's missing.
   const startBlockReasons: string[] = []
@@ -162,6 +180,15 @@ export function UploadModal({ projectId, open, onClose }: Props) {
             borderTop: '1px solid #e5e7eb',
           }}
         >
+          {order.length > 0 && (
+            <p
+              data-testid="upload-modal-counts"
+              style={{ margin: '0 0 8px', fontSize: 13, color: '#374151' }}
+            >
+              {counts.done} done · {counts.uploading} uploading · {counts.failed} failed ·{' '}
+              {counts.queued} queued of {order.length}
+            </p>
+          )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <button
               data-testid="upload-modal-start"
