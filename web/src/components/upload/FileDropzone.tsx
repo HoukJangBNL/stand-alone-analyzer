@@ -149,18 +149,26 @@ export function FileDropzone() {
   }
 
   const onPickerChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const raw = Array.from(e.target.files ?? [])
-    e.target.value = ''
-    if (raw.length === 0) return
+    // Read length only — do NOT call Array.from() yet. For folders with tens
+    // of thousands of files, materializing the FileList into a plain array
+    // can block the main thread for seconds, which is exactly the freeze
+    // users see between picker close and the Scanning… indicator.
+    const list = e.target.files as FileList | File[] | null
+    const total = list?.length ?? 0
+    if (!list || total === 0) return
+
+    // Surface the indicator synchronously so React schedules a paint, then
+    // yield once before doing any per-file work.
     setScan({ active: true, filesSeen: 0, dirsSeen: 0 })
-    // Yield to the browser so the "Scanning..." UI paints before the
-    // (potentially slow) filter runs over thousands of File objects.
     await new Promise((r) => setTimeout(r, 0))
+
     try {
       const filtered: File[] = []
-      for (let i = 0; i < raw.length; i++) {
-        if (isImage(raw[i].name)) filtered.push(raw[i])
-        // Live counter every 200 entries.
+      for (let i = 0; i < total; i++) {
+        const f = list[i] as File
+        if (isImage(f.name)) filtered.push(f)
+        // Yield + paint progress every 200 entries so the UI stays alive
+        // even on 50k-file folders.
         if (i % 200 === 0) {
           setScan({ active: true, filesSeen: filtered.length, dirsSeen: 0 })
           // eslint-disable-next-line no-await-in-loop
@@ -169,6 +177,7 @@ export function FileDropzone() {
       }
       addFiles(filtered)
     } finally {
+      e.target.value = ''
       setScan({ active: false, filesSeen: 0, dirsSeen: 0 })
     }
   }

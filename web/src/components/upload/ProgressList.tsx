@@ -18,7 +18,17 @@ export function ProgressList() {
   const visible = order.slice(0, MAX_VISIBLE_ROWS)
   const hidden = order.length - visible.length
   return (
-    <div data-testid="progress-list" style={{ marginTop: 8 }}>
+    <div
+      data-testid="progress-list"
+      style={{
+        marginTop: 8,
+        maxHeight: 280,
+        overflowY: 'auto',
+        border: '1px solid #e5e7eb',
+        borderRadius: 4,
+        padding: 4,
+      }}
+    >
       <div
         style={{
           display: 'grid',
@@ -27,6 +37,9 @@ export function ProgressList() {
           fontSize: 11,
           color: '#6b7280',
           padding: '4px 0',
+          position: 'sticky',
+          top: 0,
+          background: 'white',
         }}
       >
         <span>filename</span>

@@ -92,6 +92,13 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   const allDone = order.length > 0 && order.every((uid) => files[uid]?.status === 'done')
   const droppedCount = order.length
 
+  // Surface why Start is disabled — for 4000-file folders the ScanForm
+  // scrolls out of view and users can't tell what's missing.
+  const startBlockReasons: string[] = []
+  if (!scanMeta.name.trim()) startBlockReasons.push('scan name')
+  if (!scanMeta.material.trim()) startBlockReasons.push('material')
+  if (droppedCount === 0) startBlockReasons.push('at least one file')
+
   if (!open) return null
 
   return (
@@ -145,27 +152,46 @@ export function UploadModal({ projectId, open, onClose }: Props) {
         <FileDropzone />
         <ProgressList />
 
-        <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
-          <button
-            data-testid="upload-modal-start"
-            disabled={
-              running ||
-              allDone ||
-              droppedCount === 0 ||
-              !metaValid ||
-              createScanMut.isPending
-            }
-            onClick={startUpload}
-          >
-            {running ? 'Uploading...' : 'Start upload'}
-          </button>
-          <button
-            data-testid="upload-modal-finalize"
-            disabled={!allDone || finalizeMut.isPending}
-            onClick={() => finalizeMut.mutate()}
-          >
-            {finalizeMut.isPending ? 'Finalizing...' : 'Finalize scan'}
-          </button>
+        <div
+          style={{
+            position: 'sticky',
+            bottom: 0,
+            background: 'white',
+            paddingTop: 8,
+            marginTop: 12,
+            borderTop: '1px solid #e5e7eb',
+          }}
+        >
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <button
+              data-testid="upload-modal-start"
+              disabled={
+                running ||
+                allDone ||
+                !metaValid ||
+                droppedCount === 0 ||
+                createScanMut.isPending
+              }
+              onClick={startUpload}
+            >
+              {running ? 'Uploading...' : 'Start upload'}
+            </button>
+            <button
+              data-testid="upload-modal-finalize"
+              disabled={!allDone || finalizeMut.isPending}
+              onClick={() => finalizeMut.mutate()}
+            >
+              {finalizeMut.isPending ? 'Finalizing...' : 'Finalize scan'}
+            </button>
+            {!running && !allDone && startBlockReasons.length > 0 && (
+              <span
+                data-testid="upload-modal-start-blocked-reason"
+                style={{ color: '#b45309', fontSize: 12 }}
+              >
+                Need: {startBlockReasons.join(', ')}.
+              </span>
+            )}
+          </div>
         </div>
       </div>
     </div>
