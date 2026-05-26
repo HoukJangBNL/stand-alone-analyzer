@@ -7,7 +7,10 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from flake_analysis.db.models import Project, Scan
+from flake_analysis.api import errors as app_errors
+from flake_analysis.api.auth import User
+from flake_analysis.api.services.acl import resolve_effective_project_role
+from flake_analysis.db.models import Project, ProjectRole, ProjectUser, Scan
 
 
 class DuplicateProjectName(Exception):
@@ -63,6 +66,44 @@ async def get_project(session: AsyncSession, *, project_id: str) -> Project:
     if p is None:
         raise ProjectNotFound(project_id)
     return p
+
+
+async def get_project_for_user(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    user: User,
+    require_editor: bool = False,
+) -> Project:
+    """Return the project iff caller has access, raising ProjectNotFound (404) otherwise.
+
+    When require_editor=True and the caller's effective role is VIEWER, raises
+    Forbidden (403). Outsiders (no relationship to the project) always get 404 —
+    never 403 — so we don't leak the existence of projects they can't see.
+    """
+    project = (
+        await session.execute(select(Project).where(Project.id == project_id))
+    ).scalar_one_or_none()
+    if project is None:
+        raise app_errors.ProjectNotFound(project_id=project_id)
+
+    is_owner = project.owner_id == user.id
+    acl_role = (
+        await session.execute(
+            select(ProjectUser.project_role)
+            .where(ProjectUser.project_id == project_id)
+            .where(ProjectUser.user_id == user.id)
+        )
+    ).scalar_one_or_none()
+
+    effective = resolve_effective_project_role(
+        user.role, is_owner=is_owner, acl_role=acl_role,
+    )
+    if effective is None:
+        raise app_errors.ProjectNotFound(project_id=project_id)
+    if require_editor and effective != ProjectRole.EDITOR:
+        raise app_errors.Forbidden(action="project_edit", project_id=project_id)
+    return project
 
 
 async def get_project_with_scan_count(
