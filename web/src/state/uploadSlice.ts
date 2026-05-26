@@ -42,12 +42,24 @@ function genUid(): string {
   return `f_${Math.random().toString(36).slice(2, 10)}`
 }
 
-/** Auto-detect (ix, iy) from filename pattern `tile_{ix}_{iy}.<ext>`. */
-const FILENAME_GRID_RE = /^.*tile_(\d+)_(\d+)\..*$/i
+/**
+ * Auto-detect (ix, iy) from common scan filename patterns.
+ *
+ * Supported (case-insensitive):
+ *   - `tile_3_5.tif`               → tile_<ix>_<iy>
+ *   - `ix002_iy025.png`            → ix<ix>_iy<iy> (scanner default)
+ *   - `scan_ix12_iy7_extra.png`    → ix<ix>...iy<iy> embedded
+ *
+ * The `ix...iy` pattern wins over the `tile_` pattern when both could match.
+ */
+const IX_IY_RE = /ix(\d+).*?iy(\d+)/i
+const TILE_RE = /tile[_-](\d+)[_-](\d+)/i
 export function detectGrid(filename: string): { ix: number | null; iy: number | null } {
-  const m = filename.match(FILENAME_GRID_RE)
-  if (!m) return { ix: null, iy: null }
-  return { ix: parseInt(m[1], 10), iy: parseInt(m[2], 10) }
+  const ixIy = filename.match(IX_IY_RE)
+  if (ixIy) return { ix: parseInt(ixIy[1], 10), iy: parseInt(ixIy[2], 10) }
+  const tile = filename.match(TILE_RE)
+  if (tile) return { ix: parseInt(tile[1], 10), iy: parseInt(tile[2], 10) }
+  return { ix: null, iy: null }
 }
 
 export const useUploadStore = create<UploadState>((set) => ({
