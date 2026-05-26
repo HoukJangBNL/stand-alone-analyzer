@@ -60,7 +60,7 @@ describe('ClusteringTab integration', () => {
       })
     )
 
-    wrap(<ClusteringTab projectId="local" />)
+    wrap(<ClusteringTab projectId="local" scanId={11} />)
     await waitFor(() => expect(screen.getByText(/Seed groups/)).not.toBeNull())
     expect(screen.getByRole('button', { name: /Fit GMM/ })).not.toBeNull()
     expect(screen.queryByText(/Per-cluster thresholds/)).toBeNull()
@@ -101,7 +101,7 @@ describe('ClusteringTab integration', () => {
       })
     )
 
-    wrap(<ClusteringTab projectId="local" />)
+    wrap(<ClusteringTab projectId="local" scanId={11} />)
     await waitFor(() => expect(screen.getByText(/Per-cluster thresholds/)).not.toBeNull())
     expect(screen.getByRole('button', { name: /Commit clustering/ })).not.toBeNull()
     expect(screen.getAllByTestId('plotly-mock').length).toBe(2)
@@ -134,7 +134,7 @@ describe('ClusteringTab integration', () => {
       })
     )
 
-    wrap(<ClusteringTab projectId="local" />)
+    wrap(<ClusteringTab projectId="local" scanId={11} />)
     await waitFor(() => expect(useClusteringStore.getState().seedGroups.length).toBe(2))
     expect(useClusteringStore.getState().seedGroups.map((g) => g.name)).toEqual(['thin', 'thick'])
 
