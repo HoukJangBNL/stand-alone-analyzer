@@ -130,7 +130,7 @@ describe('ExplorerTab integration — happy path', () => {
       })
     )
 
-    wrap(<ExplorerTab projectId="local" />)
+    wrap(<ExplorerTab projectId="local" scanId={11} />)
 
     // 1. Manifest loads, mosaic + right-rail render.
     await screen.findByTestId('explorer-main-grid')
