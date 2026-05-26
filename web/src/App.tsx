@@ -86,7 +86,7 @@ function HomeRedirect() {
       navigate(`/projects/${slice}`, { replace: true })
     }
   }, [slice, navigate])
-  return <p style={{ padding: 16 }}>프로젝트를 선택하거나 만들어주세요.</p>
+  return <p style={{ padding: 16 }}>Select or create a project.</p>
 }
 
 function AppContent() {

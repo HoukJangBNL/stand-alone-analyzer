@@ -15,7 +15,7 @@ interface Props {
 }
 
 export function ExplorerTab({ projectId, scanId = null }: Props) {
-  if (!scanId) return <p data-testid="explorer-tab-no-scan">스캔을 선택하세요.</p>
+  if (!scanId) return <p data-testid="explorer-tab-no-scan">Select a scan.</p>
   return <ExplorerTabBody projectId={projectId} scanId={scanId} />
 }
 

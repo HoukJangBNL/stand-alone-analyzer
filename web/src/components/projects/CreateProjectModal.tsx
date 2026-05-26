@@ -68,8 +68,8 @@ export function CreateProjectModal({ open, onClose, onCreated }: Props) {
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <h3 style={{ margin: 0 }}>새 프로젝트</h3>
-          <button data-testid="create-project-modal-close" onClick={onClose}>닫기</button>
+          <h3 style={{ margin: 0 }}>New project</h3>
+          <button data-testid="create-project-modal-close" onClick={onClose}>Close</button>
         </div>
 
         <form
@@ -108,13 +108,13 @@ export function CreateProjectModal({ open, onClose, onCreated }: Props) {
           )}
 
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-            <button type="button" onClick={onClose}>취소</button>
+            <button type="button" onClick={onClose}>Cancel</button>
             <button
               data-testid="create-project-modal-submit"
               type="submit"
               disabled={!name.trim() || mut.isPending}
             >
-              {mut.isPending ? 'Creating...' : '만들기'}
+              {mut.isPending ? 'Creating...' : 'Create'}
             </button>
           </div>
         </form>

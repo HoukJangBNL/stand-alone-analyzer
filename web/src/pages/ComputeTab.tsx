@@ -11,16 +11,16 @@ export function ComputeTab() {
   const [showUpload, setShowUpload] = useState(false)
 
   if (!pid) {
-    return <p data-testid="compute-tab-no-project">프로젝트를 선택하거나 만들어주세요.</p>
+    return <p data-testid="compute-tab-no-project">Select or create a project.</p>
   }
 
   if (sid === null) {
     return (
       <div data-testid="compute-tab-no-scan">
         <h2>Compute Tab</h2>
-        <p style={{ color: '#6b7280' }}>이 프로젝트에는 아직 스캔이 없습니다. 새 스캔을 만들어 시작하세요.</p>
+        <p style={{ color: '#6b7280' }}>No scans in this project yet. Create one to get started.</p>
         <button data-testid="compute-tab-new-scan" onClick={() => setShowUpload(true)}>
-          + 새 스캔
+          + New scan
         </button>
         <UploadModal projectId={pid} open={showUpload} onClose={() => setShowUpload(false)} />
       </div>
@@ -32,7 +32,7 @@ export function ComputeTab() {
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2>Compute Tab</h2>
         <button data-testid="compute-tab-new-scan" onClick={() => setShowUpload(true)}>
-          + 새 스캔
+          + New scan
         </button>
       </div>
 

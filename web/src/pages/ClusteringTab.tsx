@@ -15,7 +15,7 @@ interface Props {
 }
 
 export function ClusteringTab({ projectId, scanId = null }: Props) {
-  if (!scanId) return <p data-testid="clustering-tab-no-scan">스캔을 선택하세요.</p>
+  if (!scanId) return <p data-testid="clustering-tab-no-scan">Select a scan.</p>
   return <ClusteringTabBody projectId={projectId} scanId={scanId} />
 }
 

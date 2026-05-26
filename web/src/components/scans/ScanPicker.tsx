@@ -31,7 +31,7 @@ export function ScanPicker() {
   if (!projectId) return null
 
   if (scans.isLoading) {
-    return <div data-testid="scan-picker-loading" style={{ fontSize: 12, color: '#6b7280' }}>스캔 로딩...</div>
+    return <div data-testid="scan-picker-loading" style={{ fontSize: 12, color: '#6b7280' }}>Loading scans…</div>
   }
 
   if ((scans.data ?? []).length === 0) {
@@ -40,13 +40,13 @@ export function ScanPicker() {
         data-testid="scan-picker-empty"
         style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 0' }}
       >
-        <span style={{ fontSize: 12, color: '#6b7280' }}>이 프로젝트에는 아직 스캔이 없습니다.</span>
+        <span style={{ fontSize: 12, color: '#6b7280' }}>No scans in this project yet.</span>
         <button
           data-testid="scan-picker-empty-cta"
           type="button"
           onClick={() => setShowUpload(true)}
         >
-          + 스캔 만들기
+          + New scan
         </button>
         <UploadModal projectId={projectId} open={showUpload} onClose={() => setShowUpload(false)} />
       </div>
@@ -71,7 +71,7 @@ export function ScanPicker() {
         value={activeSid ?? ''}
         onChange={(e) => onChange(e.target.value)}
       >
-        {!activeSid && <option value="" disabled>스캔 선택...</option>}
+        {!activeSid && <option value="" disabled>Select scan…</option>}
         {(scans.data ?? []).map((s) => (
           <option
             key={s.scan_id}
@@ -87,7 +87,7 @@ export function ScanPicker() {
         type="button"
         onClick={() => setShowUpload(true)}
       >
-        + 새 스캔
+        + New scan
       </button>
       <UploadModal projectId={projectId} open={showUpload} onClose={() => setShowUpload(false)} />
     </div>

@@ -46,7 +46,7 @@ export function Sidebar() {
           data-testid="sidebar-new-project-btn"
           type="button"
           onClick={() => setOpenCreate(true)}
-          aria-label="새 프로젝트"
+          aria-label="New project"
           style={{ padding: '2px 8px' }}
         >
           +
@@ -58,7 +58,7 @@ export function Sidebar() {
 
       {empty ? (
         <p data-testid="sidebar-empty-state" style={{ fontSize: 12, color: '#6b7280' }}>
-          시작하려면 프로젝트를 만들어주세요.
+          Create a project to get started.
         </p>
       ) : (
         <ul
