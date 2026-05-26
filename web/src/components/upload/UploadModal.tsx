@@ -1,5 +1,5 @@
 // web/src/components/upload/UploadModal.tsx
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { ScanForm, type ScanFormValues } from './ScanForm'
@@ -32,6 +32,11 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   // metadata while the user is filling it in. Start upload reads this
   // directly, so there's no separate "Save" gate.
   const [scanMeta, setScanMeta] = useState<ScanFormValues>(EMPTY_META)
+  // AbortController for the in-flight createScan request. Stop & Close
+  // aborts this so a stale onSuccess can't write scanId / fire a toast on a
+  // closed modal. Owned by a ref because we need to .abort() across renders
+  // without retriggering effects.
+  const createScanCtrlRef = useRef<AbortController | null>(null)
 
   // hard-reset everything when modal opens fresh
   useEffect(() => {
@@ -40,16 +45,28 @@ export function UploadModal({ projectId, open, onClose }: Props) {
       resetOrchestrator()
       setScanMeta(EMPTY_META)
       setConfirmingClose(false)
+      createScanCtrlRef.current = null
     }
   }, [open])
 
   const createScanMut = useMutation({
-    mutationFn: (vals: ScanFormValues & { image_count: number }) => createScan(projectId, vals),
+    mutationFn: (vals: ScanFormValues & { image_count: number }) => {
+      const ctrl = new AbortController()
+      createScanCtrlRef.current = ctrl
+      return createScan(projectId, vals, ctrl.signal)
+    },
     onSuccess: (res) => {
+      // Defensive: if the user already closed the modal mid-flight, the
+      // controller will be aborted. Skip the side effects so we don't leak
+      // scanId or pop a toast on a closed modal.
+      if (createScanCtrlRef.current?.signal.aborted) return
       setScanId(res.scan_id)
       toast.success(`Scan ${res.scan_id} created`)
     },
     onError: (e: unknown) => {
+      // AbortError on a deliberate Stop & Close is not a user-facing error.
+      const name = (e as { name?: string })?.name
+      if (name === 'AbortError' || createScanCtrlRef.current?.signal.aborted) return
       toast.error((e as { message?: string })?.message ?? 'createScan failed')
     },
   })
@@ -86,6 +103,10 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   // failed). `scanId` and `done` rows survive so the server-side scan stays
   // intact — a future task can wire up a resume UX.
   const handleConfirmStopAndClose = () => {
+    // Abort the createScan mutation FIRST so a late-arriving response can't
+    // race past clearTransientFiles and write scanId / fire a toast on a
+    // closed modal. The abort flag is also what onSuccess/onError check.
+    createScanCtrlRef.current?.abort()
     getOrchestrator().cancelAll()
     useUploadStore.getState().clearTransientFiles()
     setRunning(false)
@@ -112,6 +133,11 @@ export function UploadModal({ projectId, open, onClose }: Props) {
           image_count: order.length,
         })
       }
+      // Bail if Stop & Close fired between createScan and runAll: the
+      // controller is aborted, scanId may have been intentionally left out
+      // (when onSuccess no-ops on aborted), and runAll would throw on a
+      // missing scanId. This keeps the cancel path silent.
+      if (createScanCtrlRef.current?.signal.aborted) return
       await getOrchestrator().runAll()
     } finally {
       setRunning(false)
@@ -161,7 +187,10 @@ export function UploadModal({ projectId, open, onClose }: Props) {
         zIndex: 100,
       }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) handleClose()
+        // Ignore backdrop clicks while the confirm overlay is up — clicking
+        // through the dimmed area shouldn't re-trigger handleClose; the user
+        // must use the explicit Cancel / Stop & Close buttons.
+        if (e.target === e.currentTarget && !confirmingClose) handleClose()
       }}
     >
       <div

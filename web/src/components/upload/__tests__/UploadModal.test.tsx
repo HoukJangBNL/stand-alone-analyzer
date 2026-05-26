@@ -7,6 +7,7 @@ import { resetUploadStore, useUploadStore, type UploadFile } from '@/state/uploa
 import * as upload from '@/api/upload'
 import * as materials from '@/api/materials'
 import * as sha from '@/lib/sha256'
+import { toast } from 'sonner'
 
 function wrap(ui: React.ReactNode) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -208,6 +209,67 @@ describe('UploadModal', () => {
       await userEvent.click(screen.getByTestId('upload-modal-close'))
       expect(onClose).toHaveBeenCalled()
       expect(useUploadStore.getState().scanId).toBeNull()
+    })
+
+    it('Test E: stale createScan resolution after Stop & Close does NOT leak scanId or toast', async () => {
+      // Spy on toast.success so we can assert nothing fires post-close.
+      const toastSuccessSpy = vi.spyOn(toast, 'success').mockImplementation(() => 'tid' as unknown as string | number)
+
+      // Capture the AbortSignal that handleClose -> abort() should mark.
+      let capturedSignal: AbortSignal | undefined
+      let resolveCreateScan: (v: { scan_id: string }) => void = () => {}
+      const blocked = new Promise<{ scan_id: string }>((resolve) => {
+        resolveCreateScan = resolve
+      })
+      vi.spyOn(upload, 'createScan').mockImplementation(
+        async (_pid: string, _body: upload.CreateScanBody, signal?: AbortSignal) => {
+          capturedSignal = signal
+          return blocked
+        },
+      )
+
+      const onClose = vi.fn()
+      render(wrap(<UploadModal projectId="p1" open onClose={onClose} />))
+
+      // Drive the modal into running=true via the public path.
+      await userEvent.type(screen.getByTestId('scan-form-name'), 'scan-A')
+      const matInput = await screen.findByTestId('material-combobox-input')
+      await userEvent.click(matInput)
+      await userEvent.click(await screen.findByTestId('material-combobox-option-graphene'))
+      const dz = screen.getByTestId('file-dropzone')
+      const f1 = new File([new Uint8Array(8)], 'tile_0_0.tif')
+      fireEvent.drop(dz, { dataTransfer: { files: [f1], items: [], types: ['Files'] } })
+      await waitFor(() =>
+        expect((screen.getByTestId('upload-modal-start') as HTMLButtonElement).disabled).toBe(false),
+      )
+      await userEvent.click(screen.getByTestId('upload-modal-start'))
+
+      // Wait until createScan has actually been called and got a signal.
+      await waitFor(() => expect(capturedSignal).toBeDefined())
+
+      // Reset toast count: the typed-in name and other interactions don't
+      // call toast.success, but be defensive — count from this point on.
+      toastSuccessSpy.mockClear()
+
+      // Close → confirm Stop & Close.
+      await userEvent.click(screen.getByTestId('upload-modal-close'))
+      await screen.findByTestId('upload-modal-close-confirm')
+      await userEvent.click(screen.getByTestId('upload-modal-close-confirm-stop'))
+      expect(onClose).toHaveBeenCalled()
+
+      // The signal should be aborted (approach 1 — controller wired through).
+      expect(capturedSignal?.aborted).toBe(true)
+
+      // Now resolve the stale createScan promise. The mutation's onSuccess
+      // would normally fire setScanId + toast.success — neither must happen
+      // on a closed modal.
+      resolveCreateScan({ scan_id: 's999' })
+      // Let microtasks flush.
+      await new Promise((r) => setTimeout(r, 0))
+      await new Promise((r) => setTimeout(r, 0))
+
+      expect(useUploadStore.getState().scanId).not.toBe('s999')
+      expect(toastSuccessSpy).not.toHaveBeenCalled()
     })
   })
 })
