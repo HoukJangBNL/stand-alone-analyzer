@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from flake_analysis.api import errors as app_errors
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import get_db_session
 from flake_analysis.api.schemas.upload import (
@@ -24,7 +25,11 @@ from flake_analysis.api.schemas.upload import (
     ScanDetailResponse,
     ScanResponse,
 )
-from flake_analysis.api.services import s3_presign, upload_service
+from flake_analysis.api.services import (
+    projects_service as projects_svc,
+    s3_presign,
+    upload_service,
+)
 from flake_analysis.api.services.usage import emit as emit_usage
 from flake_analysis.db.models import Scan
 from flake_analysis.db.models.upload import Image, UploadItem, UploadItemStatus
@@ -43,14 +48,14 @@ async def create_scan(
     user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ScanResponse:
-    """Create a scan under the given project.
-
-    NOTE: project_id is currently routing-only (no scans.project_id FK in v7).
-    See "Open follow-up" in the W5-B1 plan for the deferred binding (locked:
-    v1 leaves it path-only; v2 introduces a projects table).
-    """
+    """Create a scan under the given project (W10-A: scans.project_id FK enforced)."""
+    try:
+        await projects_svc.get_project(session, project_id=project_id)
+    except projects_svc.ProjectNotFound as exc:
+        raise app_errors.ProjectNotFound(project_id=project_id) from exc
     scan = await upload_service.create_scan(
         session,
+        project_id=project_id,
         name=req.name,
         material=req.material,
         image_count=req.image_count,

@@ -31,9 +31,9 @@ def _create_bucket():
     )
 
 
-async def _scan_and_presign(client, sha="a" * 64, ix=0, iy=0):
+async def _scan_and_presign(client, project_id, sha="a" * 64, ix=0, iy=0):
     sr = await client.post(
-        "/api/v1/projects/local/scans",
+        f"/api/v1/projects/{project_id}/scans",
         json={"name": "s1", "material": "graphene", "image_count": 2},
     )
     scan_id = sr.json()["scan_id"]
@@ -52,13 +52,17 @@ def _put_object(key: str, body: bytes = b"x"):
 
 
 @pytest.mark.asyncio
-async def test_complete_inserts_image_row(pg_session):
+async def test_complete_inserts_image_row(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id, presign = await _scan_and_presign(c)
+                scan_id, presign = await _scan_and_presign(c, project.id)
                 # Simulate a successful S3 PUT
                 key = presign["s3_uri"].split("/", 3)[-1]
                 _put_object(key)
@@ -87,13 +91,17 @@ async def test_complete_inserts_image_row(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_complete_409_when_s3_object_missing(pg_session):
+async def test_complete_409_when_s3_object_missing(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id, presign = await _scan_and_presign(c)
+                scan_id, presign = await _scan_and_presign(c, project.id)
                 # Do NOT put the object — head_object should 404 → API 409
                 r = await c.post(
                     f"/api/v1/scans/{scan_id}/images/{presign['upload_item_id']}/complete",
@@ -106,14 +114,18 @@ async def test_complete_409_when_s3_object_missing(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_complete_404_when_upload_item_missing(pg_session):
+async def test_complete_404_when_upload_item_missing(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
                 sr = await c.post(
-                    "/api/v1/projects/local/scans",
+                    f"/api/v1/projects/{project.id}/scans",
                     json={"name": "s1", "material": "graphene", "image_count": 1},
                 )
                 scan_id = sr.json()["scan_id"]
@@ -127,13 +139,17 @@ async def test_complete_404_when_upload_item_missing(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_complete_is_idempotent_on_already_uploaded(pg_session):
+async def test_complete_is_idempotent_on_already_uploaded(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id, presign = await _scan_and_presign(c)
+                scan_id, presign = await _scan_and_presign(c, project.id)
                 key = presign["s3_uri"].split("/", 3)[-1]
                 _put_object(key)
                 r1 = await c.post(

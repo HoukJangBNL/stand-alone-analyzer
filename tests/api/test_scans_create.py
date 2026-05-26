@@ -19,12 +19,16 @@ def _override(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_create_scan_with_known_material(pg_session):
+async def test_create_scan_with_known_material(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     _override(pg_session)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
             r = await c.post(
-                "/api/v1/projects/local/scans",
+                f"/api/v1/projects/{project.id}/scans",
                 json={
                     "name": "scan_2026_05_22_a",
                     "material": "graphene",
@@ -43,18 +47,23 @@ async def test_create_scan_with_known_material(pg_session):
                 select(Scan).where(Scan.id == body["scan_id"])
             )).scalar_one()
             assert row.created_by_id is not None
+            assert row.project_id == project.id
     finally:
         app.dependency_overrides.pop(get_db_session, None)
 
 
 @pytest.mark.asyncio
-async def test_create_scan_auto_adds_material(pg_session):
+async def test_create_scan_auto_adds_material(
+    pg_session, sample_user_factory, sample_project_factory,
+):
     """Unknown material is normalized + inserted, then scan binds to it."""
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     _override(pg_session)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
             r = await c.post(
-                "/api/v1/projects/local/scans",
+                f"/api/v1/projects/{project.id}/scans",
                 json={
                     "name": "scan_b",
                     "material": "  NewMat  ",
@@ -72,14 +81,33 @@ async def test_create_scan_auto_adds_material(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_create_scan_rejects_zero_image_count(pg_session):
+async def test_create_scan_rejects_zero_image_count(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     _override(pg_session)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
             r = await c.post(
-                "/api/v1/projects/local/scans",
+                f"/api/v1/projects/{project.id}/scans",
                 json={"name": "x", "material": "graphene", "image_count": 0},
             )
             assert r.status_code == 422
+    finally:
+        app.dependency_overrides.pop(get_db_session, None)
+
+
+@pytest.mark.asyncio
+async def test_create_scan_404_for_unknown_project(pg_session):
+    _override(pg_session)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.post(
+                "/api/v1/projects/does-not-exist/scans",
+                json={"name": "x", "material": "graphene", "image_count": 1},
+            )
+            assert r.status_code == 404
+            assert r.json()["error"]["code"] == "project_not_found"
     finally:
         app.dependency_overrides.pop(get_db_session, None)

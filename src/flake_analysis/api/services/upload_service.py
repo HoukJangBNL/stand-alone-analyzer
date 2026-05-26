@@ -63,6 +63,7 @@ async def list_materials(session: AsyncSession) -> list[Material]:
 async def create_scan(
     session: AsyncSession,
     *,
+    project_id: str,
     name: str,
     material: str,
     image_count: int,
@@ -75,6 +76,7 @@ async def create_scan(
     )
     scan = Scan(
         name=name,
+        project_id=project_id,
         material=canonical,
         image_count=image_count,
         extra_metadata=extra_metadata,

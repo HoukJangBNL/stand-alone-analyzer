@@ -27,10 +27,10 @@ def _create_bucket():
     )
 
 
-async def _full_upload(client, scan_image_count: int, n: int):
+async def _full_upload(client, project_id, scan_image_count: int, n: int):
     """Helper: create a scan with image_count, complete `n` images."""
     sr = await client.post(
-        "/api/v1/projects/local/scans",
+        f"/api/v1/projects/{project_id}/scans",
         json={"name": "s1", "material": "graphene", "image_count": scan_image_count},
     )
     scan_id = sr.json()["scan_id"]
@@ -54,13 +54,17 @@ async def _full_upload(client, scan_image_count: int, n: int):
 
 
 @pytest.mark.asyncio
-async def test_finalize_ready_when_count_matches(pg_session):
+async def test_finalize_ready_when_count_matches(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id = await _full_upload(c, scan_image_count=3, n=3)
+                scan_id = await _full_upload(c, project.id, scan_image_count=3, n=3)
                 r = await c.post(f"/api/v1/scans/{scan_id}/finalize")
                 assert r.status_code == 200, r.text
                 body = r.json()
@@ -76,13 +80,17 @@ async def test_finalize_ready_when_count_matches(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_finalize_409_when_incomplete(pg_session):
+async def test_finalize_409_when_incomplete(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id = await _full_upload(c, scan_image_count=5, n=2)
+                scan_id = await _full_upload(c, project.id, scan_image_count=5, n=2)
                 r = await c.post(f"/api/v1/scans/{scan_id}/finalize")
                 assert r.status_code == 409
                 body = r.json()
@@ -93,13 +101,17 @@ async def test_finalize_409_when_incomplete(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_get_scan_detail(pg_session):
+async def test_get_scan_detail(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id = await _full_upload(c, scan_image_count=4, n=2)
+                scan_id = await _full_upload(c, project.id, scan_image_count=4, n=2)
                 r = await c.get(f"/api/v1/scans/{scan_id}")
                 assert r.status_code == 200, r.text
                 body = r.json()

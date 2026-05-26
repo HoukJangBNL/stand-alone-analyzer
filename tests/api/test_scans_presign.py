@@ -32,9 +32,9 @@ def _create_bucket():
     )
 
 
-async def _create_scan(client, image_count=4):
+async def _create_scan(client, project_id, image_count=4):
     r = await client.post(
-        "/api/v1/projects/local/scans",
+        f"/api/v1/projects/{project_id}/scans",
         json={"name": "s1", "material": "graphene", "image_count": image_count},
     )
     assert r.status_code == 201, r.text
@@ -42,13 +42,17 @@ async def _create_scan(client, image_count=4):
 
 
 @pytest.mark.asyncio
-async def test_presign_creates_session_and_item(pg_session):
+async def test_presign_creates_session_and_item(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id = await _create_scan(c)
+                scan_id = await _create_scan(c, project.id)
                 r = await c.post(
                     f"/api/v1/scans/{scan_id}/images/presign",
                     json={
@@ -82,13 +86,17 @@ async def test_presign_creates_session_and_item(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_presign_rejects_duplicate_sha256(pg_session):
+async def test_presign_rejects_duplicate_sha256(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id = await _create_scan(c)
+                scan_id = await _create_scan(c, project.id)
                 body = {
                     "filename": "a.tif", "sha256": "b" * 64,
                     "grid_ix": 0, "grid_iy": 0, "size_bytes": 100,
@@ -106,13 +114,17 @@ async def test_presign_rejects_duplicate_sha256(pg_session):
 
 
 @pytest.mark.asyncio
-async def test_presign_rejects_duplicate_grid(pg_session):
+async def test_presign_rejects_duplicate_grid(
+    pg_session, sample_user_factory, sample_project_factory,
+):
+    user = await sample_user_factory()
+    project = await sample_project_factory(owner=user)
     with mock_aws():
         _create_bucket()
         _override(pg_session)
         try:
             async with AsyncClient(transport=ASGITransport(app=app), base_url="http://t") as c:
-                scan_id = await _create_scan(c)
+                scan_id = await _create_scan(c, project.id)
                 ok = await c.post(
                     f"/api/v1/scans/{scan_id}/images/presign",
                     json={"filename": "a.tif", "sha256": "c" * 64,
