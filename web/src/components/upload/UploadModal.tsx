@@ -147,6 +147,19 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   const allDone = order.length > 0 && order.every((uid) => files[uid]?.status === 'done')
   const droppedCount = order.length
 
+  // Batch retry: flip every failed row back to queued and re-run. Mirrors
+  // startUpload's running-flag wrapping so the rest of the modal (Close
+  // confirm, Start disabled, retry-all hidden) reacts correctly while the
+  // batch is in flight.
+  const retryAllFailed = async () => {
+    setRunning(true)
+    try {
+      await getOrchestrator().retryAllFailed()
+    } finally {
+      setRunning(false)
+    }
+  }
+
   // Aggregate counts for the modal-level progress summary. With 3000+ files
   // the per-row list is virtualized/truncated, so users need a single
   // headline number to know how the batch is going.
@@ -269,6 +282,11 @@ export function UploadModal({ projectId, open, onClose }: Props) {
             >
               {finalizeMut.isPending ? 'Finalizing...' : 'Finalize scan'}
             </button>
+            {counts.failed > 0 && !running && (
+              <button data-testid="upload-modal-retry-all" onClick={retryAllFailed}>
+                Retry failed ({counts.failed})
+              </button>
+            )}
             {!running && !allDone && startBlockReasons.length > 0 && (
               <span
                 data-testid="upload-modal-start-blocked-reason"

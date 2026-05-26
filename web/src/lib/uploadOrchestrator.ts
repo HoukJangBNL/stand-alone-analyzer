@@ -90,6 +90,22 @@ export class Orchestrator {
     this.controllers.clear()
   }
 
+  /**
+   * Batch retry: flip every currently-failed row back to `queued` (clearing
+   * its error + request_id) and then run the standard pipeline. The
+   * `cancelled` latch is reset by `runAll`, so a prior `cancelAll()` does
+   * not block this entry point.
+   */
+  async retryAllFailed(): Promise<void> {
+    const store = useUploadStore.getState()
+    for (const uid of store.order) {
+      if (store.files[uid]?.status === 'failed') {
+        store.patch(uid, { status: 'queued', error: null, progress: 0, request_id: null })
+      }
+    }
+    await this.runAll()
+  }
+
   /** Retry a single failed file. */
   async retry(uid: string): Promise<void> {
     // Same reset as runAll — retry is also an entry point.

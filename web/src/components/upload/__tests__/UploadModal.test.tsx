@@ -7,6 +7,7 @@ import { resetUploadStore, useUploadStore, type UploadFile } from '@/state/uploa
 import * as upload from '@/api/upload'
 import * as materials from '@/api/materials'
 import * as sha from '@/lib/sha256'
+import * as orchestratorMod from '@/lib/uploadOrchestrator'
 import { toast } from 'sonner'
 
 function wrap(ui: React.ReactNode) {
@@ -270,6 +271,101 @@ describe('UploadModal', () => {
 
       expect(useUploadStore.getState().scanId).not.toBe('s999')
       expect(toastSuccessSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  // ---- Retry-all batch button (Task D4) ----
+  describe('retry all failed', () => {
+    function seedFailedFiles(count: number) {
+      const mkFile = (uid: string, status: UploadFile['status']): UploadFile => ({
+        uid,
+        file: new File([new Uint8Array(1)], `${uid}.tif`),
+        filename: `${uid}.tif`,
+        size: 1,
+        grid_ix: 0,
+        grid_iy: 0,
+        status,
+        progress: 0,
+        sha256_hex: null,
+        upload_item_id: null,
+        image_id: null,
+        error: 'boom',
+        request_id: 'req-x',
+      })
+      const files: Record<string, UploadFile> = {}
+      const order: string[] = []
+      for (let i = 0; i < count; i++) {
+        const uid = `failed_${i}`
+        files[uid] = mkFile(uid, 'failed')
+        order.push(uid)
+      }
+      useUploadStore.setState({ files, order, scanId: 's_retry' })
+    }
+
+    it('shows retry-all button when failed > 0 and not running; clicking it calls retryAllFailed', async () => {
+      // Mock the orchestrator singleton so we can observe retryAllFailed calls
+      // without actually driving the upload pipeline.
+      const retryAllSpy = vi.fn().mockResolvedValue(undefined)
+      vi.spyOn(orchestratorMod, 'getOrchestrator').mockReturnValue({
+        retryAllFailed: retryAllSpy,
+        runAll: vi.fn().mockResolvedValue(undefined),
+        cancelAll: vi.fn(),
+        retry: vi.fn().mockResolvedValue(undefined),
+      } as unknown as orchestratorMod.Orchestrator)
+
+      render(wrap(<UploadModal projectId="p1" open onClose={() => {}} />))
+      // Open-effect resets the store; seed failed rows AFTER mount.
+      seedFailedFiles(3)
+
+      const btn = await screen.findByTestId('upload-modal-retry-all')
+      expect(btn).toBeTruthy()
+      // Label surfaces the count so the user knows what they're triggering.
+      expect(btn.textContent).toMatch(/3/)
+
+      await userEvent.click(btn)
+      await waitFor(() => expect(retryAllSpy).toHaveBeenCalledTimes(1))
+    })
+
+    it('hides retry-all button when failed === 0', async () => {
+      render(wrap(<UploadModal projectId="p1" open onClose={() => {}} />))
+      // No failed files seeded — button must not appear.
+      expect(screen.queryByTestId('upload-modal-retry-all')).toBeNull()
+    })
+
+    it('hides retry-all button while running', async () => {
+      // Block createScan so startUpload puts the modal into running=true.
+      vi.spyOn(upload, 'createScan').mockReturnValue(
+        new Promise(() => {}) as unknown as ReturnType<typeof upload.createScan>,
+      )
+
+      render(wrap(<UploadModal projectId="p1" open onClose={() => {}} />))
+
+      // Drive the modal into running=true via the public path (mirrors Test E
+      // helper). Drop a single file + meta + click Start.
+      await userEvent.type(screen.getByTestId('scan-form-name'), 'scan-A')
+      const matInput = await screen.findByTestId('material-combobox-input')
+      await userEvent.click(matInput)
+      await userEvent.click(await screen.findByTestId('material-combobox-option-graphene'))
+      const dz = screen.getByTestId('file-dropzone')
+      const f1 = new File([new Uint8Array(8)], 'tile_0_0.tif')
+      fireEvent.drop(dz, { dataTransfer: { files: [f1], items: [], types: ['Files'] } })
+      await waitFor(() =>
+        expect((screen.getByTestId('upload-modal-start') as HTMLButtonElement).disabled).toBe(false),
+      )
+      await userEvent.click(screen.getByTestId('upload-modal-start'))
+
+      // Now flip the dropped file to 'failed' so failed > 0 — but `running`
+      // is still true, so the retry-all button must remain hidden.
+      const uid = useUploadStore.getState().order[0]
+      useUploadStore.getState().patch(uid, { status: 'failed', error: 'x', request_id: null })
+
+      // Counter should reflect the failure (sanity that state propagated).
+      await waitFor(() => {
+        const counts = screen.getByTestId('upload-modal-counts')
+        expect(counts.textContent).toMatch(/1 failed/)
+      })
+
+      expect(screen.queryByTestId('upload-modal-retry-all')).toBeNull()
     })
   })
 })

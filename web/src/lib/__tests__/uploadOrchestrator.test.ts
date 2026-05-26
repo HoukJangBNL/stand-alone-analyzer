@@ -155,6 +155,83 @@ describe('Orchestrator', () => {
     expect(useUploadStore.getState().files[order[1]].status).toBe('done')
   })
 
+  it('retryAllFailed flips all failed rows to queued and runs them', async () => {
+    vi.spyOn(sha, 'sha256Hex').mockResolvedValue('a'.repeat(64))
+    vi.spyOn(upload, 'presignImage').mockResolvedValue({
+      put_url: 'http://s3.fake/put',
+      headers: {},
+      upload_item_id: 'ui_retry',
+    })
+    vi.spyOn(upload, 'putToS3').mockResolvedValue(undefined)
+    vi.spyOn(upload, 'completeImage').mockResolvedValue({ image_id: 'img_retry' })
+
+    useUploadStore.getState().setScanId('scan_retry')
+    useUploadStore
+      .getState()
+      .addFiles([fakeFile('tile_0_0.tif'), fakeFile('tile_0_1.tif'), fakeFile('tile_0_2.tif')])
+    const order = [...useUploadStore.getState().order]
+    // Seed: all three are failed, with non-null error and request_id, plus
+    // grids set so runOne won't bail on the grid_ix/grid_iy guard.
+    for (const uid of order) {
+      useUploadStore.getState().setGrid(uid, 0, 0)
+      useUploadStore.getState().patch(uid, {
+        status: 'failed',
+        error: 'previous failure',
+        request_id: 'req-old',
+      })
+    }
+
+    const orch = new Orchestrator({ concurrency: 4 })
+    await orch.retryAllFailed()
+
+    for (const uid of order) {
+      const f = useUploadStore.getState().files[uid]
+      expect(f.status).toBe('done')
+      expect(f.error).toBeNull()
+      expect(f.request_id).toBeNull()
+    }
+  })
+
+  it('retryAllFailed leaves non-failed rows untouched', async () => {
+    vi.spyOn(sha, 'sha256Hex').mockResolvedValue('a'.repeat(64))
+    vi.spyOn(upload, 'presignImage').mockResolvedValue({
+      put_url: 'http://s3.fake/put',
+      headers: {},
+      upload_item_id: 'ui_x',
+    })
+    vi.spyOn(upload, 'putToS3').mockResolvedValue(undefined)
+    vi.spyOn(upload, 'completeImage').mockResolvedValue({ image_id: 'img_x' })
+
+    useUploadStore.getState().setScanId('scan_mix')
+    useUploadStore
+      .getState()
+      .addFiles([fakeFile('tile_0_0.tif'), fakeFile('tile_0_1.tif')])
+    const order = [...useUploadStore.getState().order]
+    // First row stays 'done' — it must NOT be re-run; second row is failed.
+    useUploadStore.getState().setGrid(order[0], 0, 0)
+    useUploadStore.getState().patch(order[0], {
+      status: 'done',
+      image_id: 'img_pre',
+      upload_item_id: 'ui_pre',
+    })
+    useUploadStore.getState().setGrid(order[1], 0, 1)
+    useUploadStore.getState().patch(order[1], {
+      status: 'failed',
+      error: 'old',
+      request_id: 'req-old',
+    })
+
+    const orch = new Orchestrator({ concurrency: 4 })
+    await orch.retryAllFailed()
+
+    // The 'done' row's terminal id is preserved (proof we didn't re-run it).
+    expect(useUploadStore.getState().files[order[0]].status).toBe('done')
+    expect(useUploadStore.getState().files[order[0]].image_id).toBe('img_pre')
+    // The failed row got retried and is now done.
+    expect(useUploadStore.getState().files[order[1]].status).toBe('done')
+    expect(useUploadStore.getState().files[order[1]].error).toBeNull()
+  })
+
   it('cancel() aborts in-flight work and the file lands non-done', async () => {
     vi.spyOn(sha, 'sha256Hex').mockResolvedValue('e'.repeat(64))
     vi.spyOn(upload, 'presignImage').mockImplementation(async (_sid, _body, signal) => {
