@@ -69,14 +69,12 @@ async def create_scan(
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ScanResponse:
     """Create a scan under the given project (W10-A: scans.project_id FK enforced)."""
-    try:
-        await projects_svc.get_project(session, project_id=project_id)
-    except projects_svc.ProjectNotFound as exc:
-        logger.info(
-            "create_scan aborted: project not found",
-            extra=_log_extra(event="create_scan_project_not_found", project_id=project_id),
-        )
-        raise app_errors.ProjectNotFound(project_id=project_id) from exc
+    await projects_svc.get_project_for_user(
+        session,
+        project_id=project_id,
+        user=user,
+        require_editor=True,
+    )
     scan = await upload_service.create_scan(
         session,
         project_id=project_id,
@@ -111,6 +109,12 @@ async def list_scans_for_project(
     `uploaded_count` is derived via JOIN-count against `images` (never
     stored as a column). `status` is read from `scans.status`.
     """
+    await projects_svc.get_project_for_user(
+        session,
+        project_id=project_id,
+        user=user,
+        require_editor=False,
+    )
     uploaded_subq = (
         select(func.count(Image.id))
         .where(Image.scan_id == Scan.id)
@@ -617,15 +621,9 @@ async def get_scan(
     user: Annotated[User, Depends(get_current_user)],
     session: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> ScanDetailResponse:
-    scan = (await session.execute(
-        select(Scan).where(Scan.id == scan_id)
-    )).scalar_one_or_none()
-    if scan is None:
-        logger.info(
-            "get_scan aborted: scan not found",
-            extra=_log_extra(event="get_scan_not_found", scan_id=scan_id),
-        )
-        raise app_errors.ScanNotFound(scan_id=scan_id)
+    scan = await scans_service.get_scan_for_user(
+        session, scan_id=scan_id, user=user,
+    )
 
     images = (await session.execute(
         select(Image).where(Image.scan_id == scan_id).order_by(Image.id)
