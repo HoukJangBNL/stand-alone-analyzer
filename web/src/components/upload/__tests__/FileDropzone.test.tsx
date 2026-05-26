@@ -90,6 +90,7 @@ describe('FileDropzone', () => {
 
   it('recurses into nested subfolders and aggregates all images', async () => {
     render(<FileDropzone />)
+    fireEvent.click(screen.getByTestId('file-dropzone-include-sub'))
     const dz = screen.getByTestId('file-dropzone')
     const top = ['t1.png', 't2.jpg', 't3.tif'].map(
       (n) => new File([new Uint8Array(1)], n),
@@ -105,6 +106,43 @@ describe('FileDropzone', () => {
     const state = useUploadStore.getState()
     const names = state.order.map((uid) => state.files[uid].filename).sort()
     expect(names).toEqual(['n1.png', 'n2.bmp', 't1.png', 't2.jpg', 't3.tif'].sort())
+  })
+
+  it('drop with subfolders toggle OFF (default) ignores nested folder images', async () => {
+    render(<FileDropzone />)
+    const dz = screen.getByTestId('file-dropzone')
+    const top = ['t1.png', 't2.tif'].map((n) => new File([new Uint8Array(1)], n))
+    const nested = ['n1.png'].map((n) => new File([new Uint8Array(1)], n))
+    const sub = makeDirEntry('raw', nested.map(makeFileEntry))
+    const dir = makeDirEntry('scan', [...top.map(makeFileEntry), sub])
+    fireEvent.drop(dz, {
+      dataTransfer: { files: [], items: [makeItem(dir)], types: ['Files'] },
+    })
+    await flush()
+    await flush()
+    const state = useUploadStore.getState()
+    const names = state.order.map((uid) => state.files[uid].filename).sort()
+    expect(names).toEqual(['t1.png', 't2.tif'])
+  })
+
+  it('picker with subfolders toggle OFF filters by webkitRelativePath depth', async () => {
+    render(<FileDropzone />)
+    const input = screen.getByTestId('file-dropzone-input') as HTMLInputElement
+    const top = new File([new Uint8Array(1)], 'a.png')
+    const nested = new File([new Uint8Array(1)], 'b.png')
+    Object.defineProperty(top, 'webkitRelativePath', {
+      value: 'scan/a.png', configurable: true,
+    })
+    Object.defineProperty(nested, 'webkitRelativePath', {
+      value: 'scan/raw/b.png', configurable: true,
+    })
+    Object.defineProperty(input, 'files', { value: [top, nested], configurable: true })
+    fireEvent.change(input)
+    await flush()
+    await flush()
+    const state = useUploadStore.getState()
+    const names = state.order.map((uid) => state.files[uid].filename).sort()
+    expect(names).toEqual(['a.png'])
   })
 
   it('picker change event filters by extension (case-insensitive)', async () => {

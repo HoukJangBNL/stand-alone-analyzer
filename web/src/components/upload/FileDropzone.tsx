@@ -54,7 +54,12 @@ interface ScanReporter {
   onDir(): void
 }
 
-async function walkEntry(entry: FsEntry, report: ScanReporter): Promise<File[]> {
+async function walkEntry(
+  entry: FsEntry,
+  report: ScanReporter,
+  recurse: boolean,
+  depth: number = 0,
+): Promise<File[]> {
   if (entry.isFile) {
     const f = await entryToFile(entry)
     if (f && isImage(f.name)) {
@@ -64,9 +69,15 @@ async function walkEntry(entry: FsEntry, report: ScanReporter): Promise<File[]> 
     return []
   }
   if (entry.isDirectory) {
+    // When recurse=false, allow a single descent into the dropped entry (so
+    // dropping a folder of tiles still works — those are direct children at
+    // depth 1) but skip any nested directories beneath that.
+    if (!recurse && depth >= 1) return []
     report.onDir()
     const children = await readAllEntries(entry)
-    const nested = await Promise.all(children.map((c) => walkEntry(c, report)))
+    const nested = await Promise.all(
+      children.map((c) => walkEntry(c, report, recurse, depth + 1)),
+    )
     return nested.flat()
   }
   return []
@@ -82,6 +93,11 @@ export function FileDropzone() {
   const addFiles = useUploadStore((s) => s.addFiles)
   const inputRef = useRef<HTMLInputElement>(null)
   const [over, setOver] = useState(false)
+  // Subfolder recursion is opt-in. Default OFF matches the user's mental model:
+  // "I picked a folder with my tiles, I didn't ask you to crawl every subdir."
+  // Sibling folders like raw/ previews/ metadata/ would otherwise pollute the
+  // upload with non-grid-named files that the server rejects.
+  const [includeSub, setIncludeSub] = useState(false)
   // Folder scanning is synchronous from the user's view (their click is
   // blocked until walk finishes), so we surface a live counter while it runs.
   const [scan, setScan] = useState<ScanState>({ active: false, filesSeen: 0, dirsSeen: 0 })
@@ -134,7 +150,7 @@ export function FileDropzone() {
         try {
           const reporter = makeReporter()
           const collected = (
-            await Promise.all(entries.map((en) => walkEntry(en, reporter)))
+            await Promise.all(entries.map((en) => walkEntry(en, reporter, includeSub)))
           ).flat()
           addFiles(collected)
         } finally {
@@ -166,7 +182,20 @@ export function FileDropzone() {
       const filtered: File[] = []
       for (let i = 0; i < total; i++) {
         const f = list[i] as File
-        if (isImage(f.name)) filtered.push(f)
+        if (isImage(f.name)) {
+          // The directory picker (webkitdirectory) flattens the entire tree
+          // into one FileList. When subfolder recursion is OFF, drop anything
+          // deeper than <rootFolder>/<file> based on webkitRelativePath. Path
+          // shape: "rootFolder/file.png" (depth 1, keep) vs
+          // "rootFolder/sub/file.png" (depth 2+, skip). Empty path => not from
+          // a directory picker; keep it.
+          const rel = (f as File & { webkitRelativePath?: string }).webkitRelativePath
+          if (!includeSub && rel && rel.split('/').length > 2) {
+            // skip nested
+          } else {
+            filtered.push(f)
+          }
+        }
         // Yield + paint progress every 200 entries so the UI stays alive
         // even on 50k-file folders.
         if (i % 200 === 0) {
@@ -189,46 +218,71 @@ export function FileDropzone() {
     : null
 
   return (
-    <div
-      data-testid="file-dropzone"
-      onDragEnter={(e) => {
-        e.preventDefault()
-        setOver(true)
-      }}
-      onDragOver={(e) => {
-        e.preventDefault()
-        setOver(true)
-      }}
-      onDragLeave={() => setOver(false)}
-      onDrop={onDrop}
-      onClick={() => {
-        if (!scan.active) inputRef.current?.click()
-      }}
-      style={{
-        border: `2px dashed ${over ? '#4f46e5' : '#9ca3af'}`,
-        borderRadius: 6,
-        padding: 24,
-        textAlign: 'center',
-        cursor: scan.active ? 'progress' : 'pointer',
-        background: scan.active ? '#fef3c7' : over ? '#eef2ff' : '#fafafa',
-      }}
-    >
-      {scan.active ? (
-        <span data-testid="file-dropzone-scanning">{scanLabel}</span>
-      ) : (
-        <>Drop a folder of images here, or click to pick a folder</>
-      )}
-      <input
-        ref={inputRef}
-        data-testid="file-dropzone-input"
-        type="file"
-        multiple
-        // webkitdirectory enables folder picking in Chrome/Edge/Safari/Firefox.
-        // React types don't include it; lower-case attr survives DOM serialization.
-        {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
-        style={{ display: 'none' }}
-        onChange={onPickerChange}
-      />
+    <div>
+      <label
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          marginBottom: 8,
+          fontSize: 13,
+          color: '#374151',
+          cursor: 'pointer',
+          userSelect: 'none',
+        }}
+      >
+        <input
+          data-testid="file-dropzone-include-sub"
+          type="checkbox"
+          checked={includeSub}
+          onChange={(e) => setIncludeSub(e.target.checked)}
+        />
+        Include subfolders
+      </label>
+      <div
+        data-testid="file-dropzone"
+        onDragEnter={(e) => {
+          e.preventDefault()
+          setOver(true)
+        }}
+        onDragOver={(e) => {
+          e.preventDefault()
+          setOver(true)
+        }}
+        onDragLeave={() => setOver(false)}
+        onDrop={onDrop}
+        onClick={() => {
+          if (!scan.active) inputRef.current?.click()
+        }}
+        style={{
+          border: `2px dashed ${over ? '#4f46e5' : '#9ca3af'}`,
+          borderRadius: 6,
+          padding: 24,
+          textAlign: 'center',
+          cursor: scan.active ? 'progress' : 'pointer',
+          background: scan.active ? '#fef3c7' : over ? '#eef2ff' : '#fafafa',
+        }}
+      >
+        {scan.active ? (
+          <span data-testid="file-dropzone-scanning">{scanLabel}</span>
+        ) : (
+          <>
+            Drop a folder of images here, or click to pick a folder
+            {includeSub ? ' (recursive)' : ''}
+          </>
+        )}
+        <input
+          ref={inputRef}
+          data-testid="file-dropzone-input"
+          type="file"
+          multiple
+          // webkitdirectory enables folder picking in Chrome/Edge/Safari/Firefox.
+          // React types don't include it; lower-case attr survives DOM serialization.
+          {...({ webkitdirectory: '', directory: '' } as Record<string, string>)}
+          style={{ display: 'none' }}
+          onChange={onPickerChange}
+        />
+      </div>
     </div>
   )
 }
