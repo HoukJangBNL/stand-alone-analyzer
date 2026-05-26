@@ -17,6 +17,22 @@ interface Props {
 
 const EMPTY_META: ScanFormValues = { name: '', material: '', extra_metadata: {} }
 
+/**
+ * UploadModal — new-scan-only.
+ *
+ * Every open creates a fresh scan via createScan(). The modal never resumes,
+ * appends to, or otherwise targets a pre-existing scan. The hard reset in the
+ * `open` effect (resetUploadStore / resetOrchestrator / setScanMeta) enforces
+ * this client-side.
+ *
+ * This invariant is load-bearing: the W11 backend guards
+ * (require_editor_for_scan, get_project_for_user) and the wrong-project 404
+ * contract in presign_image_put / complete_image / finalize_scan assume each
+ * upload session corresponds to a scan the current user just created. Adding
+ * a "resume scan" path would require revisiting those guards and the ACL /
+ * re-validation flows that don't exist on the client yet — see
+ * docs/superpowers/plans/2026-05-26-W11-scan-guards.md before changing this.
+ */
 export function UploadModal({ projectId, open, onClose }: Props) {
   const qc = useQueryClient()
   const scanId = useUploadStore((s) => s.scanId)
