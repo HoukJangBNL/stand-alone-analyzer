@@ -654,3 +654,24 @@ async def get_scan(
             for im in images
         ],
     )
+
+
+@router.delete(
+    "/scans/{scan_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_scan(
+    scan_id: int,
+    user: Annotated[User, Depends(get_current_user)],
+    session: Annotated[AsyncSession, Depends(get_db_session)],
+) -> None:
+    """Delete a scan and all its data (DB cascade + S3 prefix wipe).
+
+    Outsiders see 404 `scan_not_found` (no leak). In-project viewers see
+    403 `forbidden{action: scan_delete}`. Editors / owner / admin succeed.
+    """
+    scan = await scans_service.require_editor_for_scan(  # noqa: F841 (used in Task 3)
+        session, scan_id=scan_id, user=user,
+    )
+    # S3 + DB cascade implemented in Task 3
+    raise NotImplementedError("delete body not yet implemented")  # noqa: PIE790
