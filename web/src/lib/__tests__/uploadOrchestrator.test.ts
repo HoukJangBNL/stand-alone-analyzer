@@ -111,6 +111,50 @@ describe('Orchestrator', () => {
     expect(peak).toBeLessThanOrEqual(4)
   })
 
+  it('runAll resumes after cancelAll (cancelled flag is reset)', async () => {
+    vi.spyOn(sha, 'sha256Hex').mockResolvedValue('a'.repeat(64))
+    // First call to presign hangs until aborted; subsequent calls resolve.
+    let presignCalls = 0
+    vi.spyOn(upload, 'presignImage').mockImplementation(async (_sid, _body, signal) => {
+      presignCalls++
+      if (presignCalls === 1) {
+        return new Promise((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        })
+      }
+      return { put_url: 'http://s3.fake/put', headers: {}, upload_item_id: `ui_${presignCalls}` }
+    })
+    vi.spyOn(upload, 'putToS3').mockResolvedValue(undefined)
+    vi.spyOn(upload, 'completeImage').mockImplementation(async (_sid, uiid) => ({
+      image_id: `img_${uiid}`,
+    }))
+
+    useUploadStore.getState().setScanId('scan_1')
+    // Use concurrency=1 so file #2 stays 'queued' while file #1 is hung in presign.
+    useUploadStore
+      .getState()
+      .addFiles([fakeFile('tile_0_0.tif'), fakeFile('tile_0_1.tif')])
+    const order = useUploadStore.getState().order
+    for (const uid of order) useUploadStore.getState().setGrid(uid, 0, 0)
+
+    const orch = new Orchestrator({ concurrency: 1 })
+    const runP = orch.runAll()
+    // Let worker enter presign on file #1, then cancel.
+    await new Promise((r) => setTimeout(r, 5))
+    orch.cancelAll()
+    await runP
+
+    // File #1 should be non-done (cancelled mid-presign); file #2 still queued.
+    expect(useUploadStore.getState().files[order[0]].status).not.toBe('done')
+    expect(useUploadStore.getState().files[order[1]].status).toBe('queued')
+
+    // Second runAll must NOT exit immediately — the cancelled flag has to reset.
+    await orch.runAll()
+
+    // File #2 (still queued) should now be done.
+    expect(useUploadStore.getState().files[order[1]].status).toBe('done')
+  })
+
   it('cancel() aborts in-flight work and the file lands non-done', async () => {
     vi.spyOn(sha, 'sha256Hex').mockResolvedValue('e'.repeat(64))
     vi.spyOn(upload, 'presignImage').mockImplementation(async (_sid, _body, signal) => {

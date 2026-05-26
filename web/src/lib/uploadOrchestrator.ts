@@ -59,6 +59,9 @@ export class Orchestrator {
 
   /** Run every queued file through the pipeline. Resolves when all settle. */
   async runAll(): Promise<void> {
+    // Reset cancellation latch so a prior cancelAll() does not permanently
+    // halt the orchestrator on the next run.
+    this.cancelled = false
     const store = useUploadStore.getState()
     const scanId = store.scanId
     if (!scanId) throw new Error('Orchestrator.runAll: scanId not set')
@@ -89,6 +92,8 @@ export class Orchestrator {
 
   /** Retry a single failed file. */
   async retry(uid: string): Promise<void> {
+    // Same reset as runAll — retry is also an entry point.
+    this.cancelled = false
     const store = useUploadStore.getState()
     const scanId = store.scanId
     if (!scanId) throw new Error('Orchestrator.retry: scanId not set')
