@@ -1,5 +1,5 @@
 // web/src/components/upload/MaterialCombobox.tsx
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 import { fetchMaterials, createMaterial, type Material } from '@/api/materials'
@@ -13,6 +13,21 @@ export function MaterialCombobox({ value, onChange }: Props) {
   const qc = useQueryClient()
   const [input, setInput] = useState(value)
   const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+
+  // Close the dropdown when focus/click leaves the combobox root. Without
+  // this, clicking outside (or in some browsers, clicking a non-focusable
+  // <li> after option selection) leaves the list visible.
+  useEffect(() => {
+    if (!open) return
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => document.removeEventListener('mousedown', onDocMouseDown)
+  }, [open])
 
   const list = useQuery<Material[]>({
     queryKey: ['materials', 'list'],
@@ -40,7 +55,7 @@ export function MaterialCombobox({ value, onChange }: Props) {
   const exact = (list.data ?? []).some((m) => m.name === input)
 
   return (
-    <div data-testid="material-combobox-root" style={{ position: 'relative' }}>
+    <div ref={rootRef} data-testid="material-combobox-root" style={{ position: 'relative' }}>
       <input
         data-testid="material-combobox-input"
         type="text"
@@ -50,6 +65,9 @@ export function MaterialCombobox({ value, onChange }: Props) {
           setOpen(true)
         }}
         onFocus={() => setOpen(true)}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') setOpen(false)
+        }}
         placeholder="Type to search or add new material"
         style={{ width: '100%' }}
       />

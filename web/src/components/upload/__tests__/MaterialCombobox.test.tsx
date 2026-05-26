@@ -27,6 +27,10 @@ describe('MaterialCombobox', () => {
     await waitFor(() => expect(screen.getByTestId('material-combobox-option-graphene')).toBeTruthy())
     await userEvent.click(screen.getByTestId('material-combobox-option-graphene'))
     expect(onChange).toHaveBeenCalledWith('graphene')
+    // Dropdown must close after selection.
+    await waitFor(() =>
+      expect(screen.queryByTestId('material-combobox-list')).toBeNull(),
+    )
   })
 
   it('creates a new material via POST when user types unknown name + commits', async () => {
