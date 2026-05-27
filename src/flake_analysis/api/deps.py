@@ -8,6 +8,7 @@ folder is `<SAA_ANALYSIS_ROOT>/<project_id>/<scan_id>/`.
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
 from sqlalchemy import select
@@ -36,6 +37,19 @@ async def get_manifest(project_id: str, scan_id: int) -> Manifest:
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:
     """Yield an async session per request; close on exit."""
+    async with async_session_maker() as session:
+        yield session
+
+
+@asynccontextmanager
+async def get_session_for_background():
+    """Open a fresh session for code that runs in a background task /
+    executor outside the request-scoped ``get_db_session`` lifetime.
+
+    Caller must ``await session.commit()`` to persist. Used by SSE step
+    routes (P2.6) to record `runs.completed_at` after the request scope
+    has ended.
+    """
     async with async_session_maker() as session:
         yield session
 

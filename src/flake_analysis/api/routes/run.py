@@ -1,12 +1,18 @@
 """Compute run endpoints (SSE) per backend design §1.2."""
 from __future__ import annotations
 import asyncio
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from flake_analysis.api.auth import User, get_current_user
-from flake_analysis.api.deps import get_db_session, get_manifest
+from flake_analysis.api.deps import (
+    get_active_analysis,
+    get_db_session,
+    get_manifest,
+    get_session_for_background,
+)
 from flake_analysis.api.mutex import acquire_scan_lock
+from flake_analysis.api.services.runs import record_run_end, record_run_start
 from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.api.schemas.compute import (
     BackgroundParams,
@@ -101,6 +107,10 @@ async def run_background(
     """Run background generation step with SSE progress."""
     manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
 
+    analysis = await get_active_analysis(scan_id, session)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="no analysis for scan")
+
     # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
     # that opens and immediately errors. The lock must be held for the lifetime
@@ -117,6 +127,11 @@ async def run_background(
         user,
         "scan_run",
         {"step": "background", "project_id": project_id, "scan_id": scan_id},
+    )
+    await session.commit()
+
+    run_id = await record_run_start(
+        session, analysis_id=analysis.id, step="background"
     )
     await session.commit()
 
@@ -139,8 +154,24 @@ async def run_background(
         async def run_pipeline():
             try:
                 result = await loop.run_in_executor(None, call_wrapper)
+                async with get_session_for_background() as bg:
+                    await record_run_end(
+                        bg,
+                        run_id=run_id,
+                        status="completed",
+                        metrics={
+                            "max_images": params.max_images,
+                            "method": params.method,
+                        },
+                    )
+                    await bg.commit()
                 bridge.emit_done(result)
             except Exception as e:
+                async with get_session_for_background() as bg:
+                    await record_run_end(
+                        bg, run_id=run_id, status="failed", error=str(e)
+                    )
+                    await bg.commit()
                 bridge.emit_error("pipeline_failed", str(e), {"exc_type": type(e).__name__})
             finally:
                 bridge.close()
@@ -169,6 +200,10 @@ async def run_domain_stats(
     """Run domain stats step with SSE progress."""
     manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
 
+    analysis = await get_active_analysis(scan_id, session)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="no analysis for scan")
+
     # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
     # that opens and immediately errors. The lock must be held for the lifetime
@@ -185,6 +220,11 @@ async def run_domain_stats(
         user,
         "scan_run",
         {"step": "domain_stats", "project_id": project_id, "scan_id": scan_id},
+    )
+    await session.commit()
+
+    run_id = await record_run_start(
+        session, analysis_id=analysis.id, step="domain_stats"
     )
     await session.commit()
 
@@ -206,8 +246,24 @@ async def run_domain_stats(
         async def run_pipeline():
             try:
                 result = await loop.run_in_executor(None, call_wrapper)
+                async with get_session_for_background() as bg:
+                    await record_run_end(
+                        bg,
+                        run_id=run_id,
+                        status="completed",
+                        metrics={
+                            "repr_mode": params.repr_mode,
+                            "raw_ext": params.raw_ext,
+                        },
+                    )
+                    await bg.commit()
                 bridge.emit_done(result)
             except Exception as e:
+                async with get_session_for_background() as bg:
+                    await record_run_end(
+                        bg, run_id=run_id, status="failed", error=str(e)
+                    )
+                    await bg.commit()
                 bridge.emit_error("pipeline_failed", str(e), {"exc_type": type(e).__name__})
             finally:
                 bridge.close()
@@ -236,6 +292,10 @@ async def run_domain_proximity(
     """Run domain proximity step with SSE progress."""
     manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
 
+    analysis = await get_active_analysis(scan_id, session)
+    if analysis is None:
+        raise HTTPException(status_code=404, detail="no analysis for scan")
+
     # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
     # that opens and immediately errors. The lock must be held for the lifetime
@@ -252,6 +312,11 @@ async def run_domain_proximity(
         user,
         "scan_run",
         {"step": "domain_proximity", "project_id": project_id, "scan_id": scan_id},
+    )
+    await session.commit()
+
+    run_id = await record_run_start(
+        session, analysis_id=analysis.id, step="domain_proximity"
     )
     await session.commit()
 
@@ -277,8 +342,24 @@ async def run_domain_proximity(
         async def run_pipeline():
             try:
                 result = await loop.run_in_executor(None, call_wrapper)
+                async with get_session_for_background() as bg:
+                    await record_run_end(
+                        bg,
+                        run_id=run_id,
+                        status="completed",
+                        metrics={
+                            "r_max_px": params.r_max_px,
+                            "workers": params.workers,
+                        },
+                    )
+                    await bg.commit()
                 bridge.emit_done(result)
             except Exception as e:
+                async with get_session_for_background() as bg:
+                    await record_run_end(
+                        bg, run_id=run_id, status="failed", error=str(e)
+                    )
+                    await bg.commit()
                 bridge.emit_error("pipeline_failed", str(e), {"exc_type": type(e).__name__})
             finally:
                 bridge.close()

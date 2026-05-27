@@ -3,7 +3,9 @@ import pytest
 import asyncio
 import json
 import threading
-from unittest.mock import patch
+from contextlib import contextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
 
@@ -83,6 +85,35 @@ def _stub_session_dep(app):
     app.dependency_overrides[get_db_session] = _yield
 
 
+@contextmanager
+def _runs_audit_patches():
+    """Compose mocks for the runs audit-log helpers + get_active_analysis.
+
+    P2.6 wired ``record_run_start`` / ``record_run_end`` into the route. With a
+    stubbed session those functions can't return a real ``run_id`` (they call
+    ``session.flush()`` and read ``row.id``). Patching them to AsyncMock keeps
+    the existing SSE tests focused on streaming semantics.
+
+    Also patches ``get_active_analysis`` to return a stub Analysis row so the
+    route's ``404 if analysis is None`` guard passes without a real DB.
+    """
+    with (
+        patch(
+            "flake_analysis.api.routes.run.get_active_analysis",
+            new=AsyncMock(return_value=SimpleNamespace(id=99)),
+        ),
+        patch(
+            "flake_analysis.api.routes.run.record_run_start",
+            new=AsyncMock(return_value=1),
+        ),
+        patch(
+            "flake_analysis.api.routes.run.record_run_end",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_run_domain_proximity_sse(tmp_path, monkeypatch, _client_app):
     """POST /run/domain_proximity streams progress and completes."""
@@ -114,7 +145,7 @@ async def test_run_domain_proximity_sse(tmp_path, monkeypatch, _client_app):
         }
 
     _stub_session_dep(_client_app)
-    with patch(
+    with _runs_audit_patches(), patch(
         "flake_analysis.api.routes.run.run_domain_proximity_step",
         side_effect=mock_run_domain_proximity,
     ):
@@ -178,7 +209,7 @@ async def test_run_domain_proximity_sse_wire_format(tmp_path, monkeypatch, _clie
         }
 
     _stub_session_dep(_client_app)
-    with patch(
+    with _runs_audit_patches(), patch(
         "flake_analysis.api.routes.run.run_domain_proximity_step",
         side_effect=mock_run_domain_proximity,
     ):
@@ -230,7 +261,7 @@ async def test_run_domain_proximity_mutex_contention_returns_locked(tmp_path, mo
         }
 
     _stub_session_dep(_client_app)
-    with patch(
+    with _runs_audit_patches(), patch(
         "flake_analysis.api.routes.run.run_domain_proximity_step",
         side_effect=mock_run_domain_proximity,
     ):
@@ -278,7 +309,7 @@ async def test_run_domain_proximity_pipeline_error_emits_sse_error_event(tmp_pat
         raise RuntimeError("annotations missing required fields")
 
     _stub_session_dep(_client_app)
-    with patch(
+    with _runs_audit_patches(), patch(
         "flake_analysis.api.routes.run.run_domain_proximity_step",
         side_effect=mock_run_domain_proximity,
     ):
@@ -301,3 +332,95 @@ async def test_run_domain_proximity_pipeline_error_emits_sse_error_event(tmp_pat
     assert "annotations missing required fields" in err["error"]["message"]
     assert err["error"]["details"]["exc_type"] == "RuntimeError"
     assert "request_id" in err["error"]
+
+
+@pytest.mark.pg
+@pytest.mark.asyncio
+async def test_run_domain_proximity_writes_runs_row(tmp_path, monkeypatch, pg_session, active_scan, _client_app):
+    """End-to-end: SSE flow writes a runs audit-log row with status=completed."""
+    from contextlib import asynccontextmanager
+
+    from sqlalchemy import select
+
+    from flake_analysis.api.deps import get_db_session
+    from flake_analysis.db.models import Analysis, Model
+    from flake_analysis.db.models.analysis import Run
+
+    pid = "p_dp_pg"
+    folder = _setup_project(tmp_path, monkeypatch, pid=pid, sid=active_scan.id)
+
+    model = Model(name="t-dp-pg-model", base_model="sam2", s3_uri="s3://t/dp-pg")
+    pg_session.add(model)
+    await pg_session.flush()
+    analysis = Analysis(
+        scan_id=active_scan.id,
+        model_id=model.id,
+        amg_params={},
+        link_distance_px=10.0,
+        steps_done={},
+    )
+    pg_session.add(analysis)
+    await pg_session.flush()
+    await pg_session.refresh(analysis)
+
+    async def _yield_pg():
+        yield pg_session
+
+    _client_app.dependency_overrides[get_db_session] = _yield_pg
+
+    @asynccontextmanager
+    async def _bg_pg():
+        yield pg_session
+
+    monkeypatch.setattr(
+        "flake_analysis.api.routes.run.get_session_for_background", _bg_pg
+    )
+
+    def mock_run_domain_proximity(**kwargs):
+        cb = kwargs.get("progress_callback")
+        if cb:
+            cb(1.0, "done")
+        return {
+            "distances_path": str(folder / "05_domain_proximity" / "distances.parquet"),
+            "flake_assignments_path": str(folder / "05_domain_proximity" / "flake_assignments.parquet"),
+            "n_pairs": 1,
+            "n_domains": 1,
+            "n_flakes": 1,
+            "params": {
+                "r_max_px": 200.0,
+                "min_area_px": 10,
+                "max_area_px": None,
+                "d_touch_px": 2.0,
+                "pixel_size_um": 0.5,
+                "link_distance_um": 5.0,
+                "workers": 4,
+            },
+        }
+
+    with patch(
+        "flake_analysis.api.routes.run.run_domain_proximity_step",
+        side_effect=mock_run_domain_proximity,
+    ):
+        async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
+            async with client.stream(
+                "POST",
+                f"/api/v1/projects/{pid}/scans/{active_scan.id}/run/domain_proximity",
+                json={},
+            ) as resp:
+                assert resp.status_code == 200
+                async for _ in resp.aiter_lines():
+                    pass
+
+    rows = (
+        await pg_session.execute(
+            select(Run).where(Run.analysis_id == analysis.id).order_by(Run.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1, f"expected 1 Run row, got {len(rows)}"
+    row = rows[0]
+    assert row.step == "domain_proximity"
+    await pg_session.refresh(row)
+    assert row.status.value == "completed"
+    assert row.completed_at is not None
+    assert row.error is None
+    assert row.metrics == {"r_max_px": 200.0, "workers": 4}

@@ -3,7 +3,8 @@ import pytest
 import asyncio
 import json
 import threading
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from fastapi import FastAPI
 from httpx import AsyncClient, ASGITransport
 
@@ -74,6 +75,38 @@ def _stub_session_dep(app):
     app.dependency_overrides[get_db_session] = _yield
 
 
+from contextlib import contextmanager
+
+
+@contextmanager
+def _runs_audit_patches():
+    """Compose mocks for the runs audit-log helpers + get_active_analysis.
+
+    P2.6 wired ``record_run_start`` / ``record_run_end`` into the route. With a
+    stubbed session those functions can't return a real ``run_id`` (they call
+    ``session.flush()`` and read ``row.id``). Patching them to AsyncMock keeps
+    the existing SSE tests focused on streaming semantics.
+
+    Also patches ``get_active_analysis`` to return a stub Analysis row so the
+    route's ``404 if analysis is None`` guard passes without a real DB.
+    """
+    with (
+        patch(
+            "flake_analysis.api.routes.run.get_active_analysis",
+            new=AsyncMock(return_value=SimpleNamespace(id=99)),
+        ),
+        patch(
+            "flake_analysis.api.routes.run.record_run_start",
+            new=AsyncMock(return_value=1),
+        ),
+        patch(
+            "flake_analysis.api.routes.run.record_run_end",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        yield
+
+
 @pytest.mark.asyncio
 async def test_run_background_sse(tmp_path, monkeypatch, _client_app):
     """POST /run/background streams progress and completes."""
@@ -97,7 +130,7 @@ async def test_run_background_sse(tmp_path, monkeypatch, _client_app):
         }
 
     _stub_session_dep(_client_app)
-    with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
+    with _runs_audit_patches(), patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
         async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async with client.stream(
                 "POST",
@@ -138,7 +171,7 @@ async def test_run_background_sse_wire_format(tmp_path, monkeypatch, _client_app
         }
 
     _stub_session_dep(_client_app)
-    with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
+    with _runs_audit_patches(), patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
         async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             resp = await client.post(
                 f"/api/v1/projects/p_bg_wire/scans/{SID}/run/background",
@@ -176,7 +209,7 @@ async def test_run_background_mutex_contention_returns_locked(tmp_path, monkeypa
         }
 
     _stub_session_dep(_client_app)
-    with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
+    with _runs_audit_patches(), patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
         async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async def first_request():
                 async with client.stream(
@@ -221,7 +254,7 @@ async def test_run_background_pipeline_error_emits_sse_error_event(tmp_path, mon
         raise RuntimeError("no raw images")
 
     _stub_session_dep(_client_app)
-    with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
+    with _runs_audit_patches(), patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
         async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async with client.stream(
                 "POST", f"/api/v1/projects/p_bg_err/scans/{SID}/run/background", json={"seed": 0}
@@ -241,3 +274,96 @@ async def test_run_background_pipeline_error_emits_sse_error_event(tmp_path, mon
     assert "no raw images" in err["error"]["message"]
     assert err["error"]["details"]["exc_type"] == "RuntimeError"
     assert "request_id" in err["error"]
+
+
+@pytest.mark.pg
+@pytest.mark.asyncio
+async def test_run_background_writes_runs_row(tmp_path, monkeypatch, pg_session, active_scan, _client_app):
+    """End-to-end: SSE flow writes a runs audit-log row with status=completed.
+
+    Coordinates two sessions:
+      - request scope: ``get_db_session`` overridden to yield ``pg_session``,
+        so ``record_run_start`` runs inside the per-test SAVEPOINT.
+      - background scope: ``get_session_for_background`` monkey-patched to
+        yield ``pg_session`` as well, so ``record_run_end`` updates are
+        visible to the same identity-map after refresh.
+    """
+    from contextlib import asynccontextmanager
+
+    from sqlalchemy import select
+
+    from flake_analysis.api.deps import get_db_session
+    from flake_analysis.db.models import Analysis, Model
+    from flake_analysis.db.models.analysis import Run
+
+    pid = "p_bg_pg"
+    folder = _setup_project(tmp_path, monkeypatch, pid=pid, sid=active_scan.id)
+
+    # Build Model + Analysis tied to active_scan so get_active_analysis()
+    # returns a real row keyed by scan_id.
+    model = Model(name="t-bg-pg-model", base_model="sam2", s3_uri="s3://t/bg-pg")
+    pg_session.add(model)
+    await pg_session.flush()
+    analysis = Analysis(
+        scan_id=active_scan.id,
+        model_id=model.id,
+        amg_params={},
+        link_distance_px=10.0,
+        steps_done={},
+    )
+    pg_session.add(analysis)
+    await pg_session.flush()
+    await pg_session.refresh(analysis)
+
+    # Wire pg_session into the request scope.
+    async def _yield_pg():
+        yield pg_session
+
+    _client_app.dependency_overrides[get_db_session] = _yield_pg
+
+    # Wire pg_session into the background scope. asynccontextmanager preserves
+    # the same call-site shape as the production helper.
+    @asynccontextmanager
+    async def _bg_pg():
+        yield pg_session
+
+    monkeypatch.setattr(
+        "flake_analysis.api.routes.run.get_session_for_background", _bg_pg
+    )
+
+    def mock_run_background(**kwargs):
+        cb = kwargs.get("progress_callback")
+        if cb:
+            cb(1.0, "done")
+        return {
+            "output_path": str(folder / "01_background" / "background.npy"),
+            "shape": (256, 256, 3),
+            "params": {"seed": 0, "max_images": 1, "gaussian_sigma": 10.0, "method": "median"},
+        }
+
+    with patch("flake_analysis.api.routes.run.run_background_step", side_effect=mock_run_background):
+        async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
+            async with client.stream(
+                "POST",
+                f"/api/v1/projects/{pid}/scans/{active_scan.id}/run/background",
+                json={"seed": 0, "max_images": 1},
+            ) as resp:
+                assert resp.status_code == 200
+                async for _ in resp.aiter_lines():
+                    pass
+
+    # Verify a Run row landed with status=completed.
+    rows = (
+        await pg_session.execute(
+            select(Run).where(Run.analysis_id == analysis.id).order_by(Run.id)
+        )
+    ).scalars().all()
+    assert len(rows) == 1, f"expected 1 Run row, got {len(rows)}"
+    row = rows[0]
+    assert row.step == "background"
+    # Status enum: SAVEPOINT-released update shows up after refresh.
+    await pg_session.refresh(row)
+    assert row.status.value == "completed"
+    assert row.completed_at is not None
+    assert row.error is None
+    assert row.metrics == {"max_images": 1, "method": "median"}
