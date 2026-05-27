@@ -2,6 +2,7 @@
 import { useState } from 'react'
 import { useParams } from 'react-router-dom'
 import { StepCard } from '@/components/StepCard'
+import { SamRunPanel } from '@/components/run/SamRunPanel'
 import { UploadModal } from '@/components/upload/UploadModal'
 
 export function ComputeTab() {
@@ -40,6 +41,7 @@ export function ComputeTab() {
 
       <StepCard projectId={pid} scanId={sid} step="thumbnails" stepName="Thumbnails" />
       <StepCard projectId={pid} scanId={sid} step="background" stepName="Background" />
+      <SamRunPanel projectId={pid} scanId={sid} />
       <StepCard projectId={pid} scanId={sid} step="domain_stats" stepName="Domain Stats" />
       <StepCard projectId={pid} scanId={sid} step="domain_proximity" stepName="Domain Proximity" />
     </div>
