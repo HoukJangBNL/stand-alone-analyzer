@@ -42,6 +42,14 @@ serve `web/dist/` + reverse-proxy uvicorn). For development with
 hot-reload, see `CONTRIBUTING.md` (`npm run dev` on :5173 + uvicorn
 `--reload` on :8000).
 
+### Submodules
+
+This repo carries `vendor/QPress-SAM-Flake` (our SAM2.1 inference fork) as a git submodule. After cloning:
+
+```bash
+git submodule update --init --recursive
+```
+
 Open the SPA at http://127.0.0.1:8000/ (or http://localhost:5173/ in dev). The 3 input paths are wired through the FastAPI backend:
 
 1. **raw_images/** — folder of microscope tile PNGs

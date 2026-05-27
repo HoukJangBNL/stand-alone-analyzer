@@ -1,0 +1,3 @@
+[submodule "vendor/QPress-SAM-Flake"]
+	path = vendor/QPress-SAM-Flake
+	url = https://github.com/HoukJangBNL/QPress-SAM-Flake.git
