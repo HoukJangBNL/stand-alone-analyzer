@@ -6,7 +6,8 @@ from pathlib import Path
 
 def test_pipeline_steps_count():
     # v0.2.15 added the ``thumbnails`` LOD pre-render step (00_thumbnails/).
-    assert len(PIPELINE_STEPS) == 7
+    # P2.1 (segmentation web integration) added ``sam`` (07_sam/).
+    assert len(PIPELINE_STEPS) == 8
 
 
 def test_subdirs_match_steps():
