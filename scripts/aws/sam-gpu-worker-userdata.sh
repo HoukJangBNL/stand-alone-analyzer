@@ -4,10 +4,20 @@
 
 set -euo pipefail
 
-# --- Force IPv4 for apt --------------------------------------------------
-# Some AZs have flaky IPv6 egress to archive.ubuntu.com which causes apt-get
-# update to hang/timeout under `set -e`. Pinning apt to IPv4 makes bootstrap
-# deterministic across AZs. Must run BEFORE any apt-get / apt update call.
+# --- Force IPv4 for apt + system DNS resolution --------------------------
+# Default VPC has no IPv6 egress (verified 2026-05-27 across us-east-2a/b/c:
+# single Main RT, IPv4-only default route, no IPv6 CIDR on subnets), but
+# archive.ubuntu.com (Cloudflare CDN), security.ubuntu.com, and
+# ppa.launchpadcontent.net all return AAAA records that glibc prefers under
+# RFC 6724. apt-get update / add-apt-repository then hang on AAAA connect
+# attempts and `set -euo pipefail` kills the whole bootstrap. Two-layer fix:
+#   1. /etc/gai.conf precedence override flips glibc to prefer IPv4 (covers
+#      curl, wget, dpkg, add-apt-repository — anything that resolves via
+#      the system resolver). Live-verified on a t3.micro probe in -2b.
+#   2. apt's own ForceIPv4 belt-and-suspenders.
+# Both must run BEFORE any apt-get / apt update / add-apt-repository call.
+echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
+resolvectl flush-caches || true
 mkdir -p /etc/apt/apt.conf.d
 echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 

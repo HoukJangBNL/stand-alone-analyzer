@@ -34,6 +34,17 @@
 
 set -euo pipefail
 
+# --- Force IPv4 for apt + system DNS resolution --------------------------
+# Same fix as sam-gpu-worker-userdata.sh. Default VPC has no IPv6 egress,
+# but archive.ubuntu.com / ppa.launchpadcontent.net / security.ubuntu.com
+# return AAAA records that glibc prefers under RFC 6724 — causing apt and
+# add-apt-repository to hang on AAAA connect attempts. Layer 1 fixes glibc
+# resolver, layer 2 covers apt directly. Run BEFORE any apt call.
+echo 'precedence ::ffff:0:0/96  100' >> /etc/gai.conf
+resolvectl flush-caches || true
+mkdir -p /etc/apt/apt.conf.d
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+
 # --- Configurable tunables ------------------------------------------------
 REPO_URL="${REPO_URL:-https://github.com/HoukJangBNL/stand-alone-analyzer.git}"
 REPO_REF="${REPO_REF:-main}"
