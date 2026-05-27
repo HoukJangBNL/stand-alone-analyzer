@@ -5,6 +5,7 @@ from scripts.check_alembic_drift import compute_drift
 
 
 @pytest.mark.pg
+@pytest.mark.asyncio
 async def test_compute_drift_clean(pg_engine):
     """A schema that exactly matches Base.metadata returns []."""
     from flake_analysis.db import Base
@@ -16,6 +17,7 @@ async def test_compute_drift_clean(pg_engine):
 
 
 @pytest.mark.pg
+@pytest.mark.asyncio
 async def test_compute_drift_extra_db_table(pg_engine):
     """An extra table in the DB but not in metadata is flagged."""
     from flake_analysis.db import Base

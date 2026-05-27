@@ -8,7 +8,9 @@ until W10-C.4c migrates clustering + explorer.
 """
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 from uuid import UUID
 
 import pytest
@@ -45,6 +47,37 @@ def _clear_scan_locks():
     mutex._scan_locks.clear()
     yield
     mutex._scan_locks.clear()
+
+
+@contextmanager
+def _runs_audit_patches():
+    """Compose mocks for the runs audit-log helpers + get_active_analysis.
+
+    P5.2 wired ``record_run_start`` / ``record_run_end`` into the route. With
+    the patched ``run_*_step`` callables those functions can't return a real
+    ``run_id`` against this test's session, and ``get_active_analysis`` would
+    404 because no Analysis row is seeded. Mirrors the helper in
+    ``tests/api/test_run_sam_sse.py``.
+
+    Note: only applied to endpoints that call the runs audit-log
+    (background / sam / domain_stats / domain_proximity). The thumbnails
+    endpoint deliberately does not, so do not wrap it.
+    """
+    with (
+        patch(
+            "flake_analysis.api.routes.run.get_active_analysis",
+            new=AsyncMock(return_value=SimpleNamespace(id=99)),
+        ),
+        patch(
+            "flake_analysis.api.routes.run.record_run_start",
+            new=AsyncMock(return_value=1),
+        ),
+        patch(
+            "flake_analysis.api.routes.run.record_run_end",
+            new=AsyncMock(return_value=None),
+        ),
+    ):
+        yield
 
 
 @pytest.mark.asyncio
@@ -167,19 +200,20 @@ async def test_run_background_emits_scan_run_event(
     app = _make_app()
     app.dependency_overrides[get_db_session] = _yield_pg_session
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://t"
-    ) as c:
-        r = await c.post(
-            f"/api/v1/projects/{PID}/scans/{SID}/run/background",
-            json={
-                "seed": 42,
-                "max_images": 10,
-                "gaussian_sigma": 1.5,
-                "method": "robust",
-            },
-        )
-        assert r.status_code == 200
+    with _runs_audit_patches():
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://t"
+        ) as c:
+            r = await c.post(
+                f"/api/v1/projects/{PID}/scans/{SID}/run/background",
+                json={
+                    "seed": 42,
+                    "max_images": 10,
+                    "gaussian_sigma": 1.5,
+                    "method": "robust",
+                },
+            )
+            assert r.status_code == 200
 
     stmt = (
         select(UsageEvent)
