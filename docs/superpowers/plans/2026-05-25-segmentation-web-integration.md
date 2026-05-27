@@ -1886,13 +1886,739 @@ decision doc에 D1 (lifecycle), D2 (AMI), D3 (spot policy), D4 (worker 격리), 
 
 **Plan complete and saved to** `docs/superpowers/plans/2026-05-25-segmentation-web-integration.md`.
 
-이 플랜은 **Phase 1-3 만 자동 실행 가능**하다 (subagent-driven-development 사용). Phase 4는 owner 승인 게이트가 박혀 있어 자동 dispatch 금지 — P4.0 task에서 owner와 직접 결정 후 P4.1+ 확장.
+이 플랜은 **Phase 1-3 + Phase 5 만 자동 실행 가능**하다 (subagent-driven-development 사용). Phase 4는 owner 승인 게이트가 박혀 있어 자동 dispatch 금지 — P4.0 task에서 owner와 직접 결정 후 P4.1+ 확장.
 
 **다음 단계 (PM):**
-1. Phase 1 → Phase 2 → Phase 3 순서로 subagent-driven-development 실행 (각 phase 끝에 acceptance gate)
-2. Phase 3 완료 시 1차 목표 GUI 업로드 e2e 재검증
-3. 그 후 P4.0 owner 승인 sweep
+1. Phase 0 (decision lock) — 이미 완료(2026-05-26 brainstorm). 이 plan에 결정 8개 명시화.
+2. Phase 1 → Phase 2 → Phase 5 → Phase 3 순서로 subagent-driven-development 실행 (각 phase 끝에 acceptance gate). Phase 5는 backend orchestrator(P5.1-P5.4)가 Phase 2의 `runs` wiring 이후 진입 가능; Phase 3 SAM 패널은 Phase 5의 멀티스텝 UI 위에 통합되거나 대체됨.
+3. Phase 5 완료 시 1차 목표 GUI 업로드 e2e + 풀 파이프라인 재검증
+4. 그 후 P4.0 owner 승인 sweep
 
-**Approach for Phase 1-3:**
+**Approach for Phase 1-3 + 5:**
 - **1. Subagent-Driven (recommended)** — fresh subagent per task + 두 단계 review (spec + quality)
 - **2. Inline Execution** — executing-plans skill, batch with checkpoints
+
+---
+
+# Phase 0 — Decision Lock (W13 brainstorm 흡수, 2026-05-26)
+
+> **Status: COMPLETE.** 본 plan은 1차 목표 도달 후 owner brainstorm(2026-05-26)으로 잠긴 8개 결정을 흡수한다. P1–P4의 디자인은 결정 변경 시 영향 받음 — 변경 발생 시 이 섹션을 source of truth로 갱신하고 영향 받는 task 재검토.
+
+**Goal:** W13 Compute Pipeline 마일스톤(=이 plan의 새 이름)의 8개 owner-locked 결정을 명시 기록.
+
+| # | 결정 영역 | 잠긴 값 | 영향 받는 Phase |
+|---|---|---|---|
+| 1 | 실행 UX | 원클릭 풀 파이프라인 `[▶ Run pipeline]` + 5스텝 진행 타임라인 | Phase 5 (신규), Phase 3 통합 |
+| 2 | 파라미터 입력 위치/시점 | 스캔당 1회, Compute Tab 진입 시 한 폼에 thumbnails/background/sam/stats/proximity 모두 | Phase 5 (param form) |
+| 3 | 재실행 모델 | 증분 + 분기 그래프 — Thumbnails 독립, Background → SAM → {Domain Stats, Domain Proximity} 병렬 가능 | Phase 5 (orchestrator), Phase 2 (steps_done cascade) |
+| 4 | GPU 자원 | 온디맨드 spot 런칭 (idle ~$0, cold start 3–5분 허용). always-on 또는 ASG는 v2. | Phase 4 (P4.0 결정 sweep, D2=B로 잠금) |
+| 5 | SAM 포함 여부 | 포함 — 엔진 포트(P1) + GPU 워커(P4) + UI(P3+P5) 한 마일스톤에 | 전체 |
+| 6 | Analysis 단위 | 스캔당 1 default analysis (v1). DB는 1:N 지원하지만 UI에 노출 안 함. analysis 자동 생성. | Phase 2 (orchestrator), Phase 5 |
+| 7 | 파라미터 영속 저장소 | 기존 `analyses.{amg,background,proximity}_params` JSONB 활용. thumbnails는 scan-level (analysis와 분리) — `scans.thumbnail_params` 추가 필요 시 P5에서 결정. | Phase 5 (P5.1 schema task) |
+| 8 | Background cascade | 자동 — params 변경 → `steps_done.{sam,domain_stats,domain_proximity}` 클리어 + 의존 `domains/flakes` 행 삭제. UI에 "Will rerun: SAM, Stats, Prox" 확인 도장. | Phase 2 (P2.6 steps_done writer), Phase 5 (UI) |
+
+**파생 결정**:
+- **W7 SKETCH 처리**: 본 plan이 W7을 superseded. P1.0이 헤더 라벨 작업.
+- **D1 (job queue)**: 결정 4와 5가 procrastinate (PG-backed) 잠금 — P4.2 implicit.
+- **D3 (orchestration)**: 결정 1+3이 hybrid 잠금 — `/run/pipeline` 신규 (P5.2) + 기존 per-step `/run/{step}` 유지(디버깅/단일 재실행). Phase 2의 4개 per-step 라우트는 살림.
+- **D5 (weights distribution)**: P4.0 sweep에서 결정. 본 plan은 S3 lazy download 권장 (cold start 허용 결정과 정합).
+
+**Phase Exit Criteria:** 본 섹션이 plan 본문에 추가됨. project-status.md §3.1, §3.2가 이 plan을 source of truth로 가리킴.
+
+---
+
+# Phase 5 — Pipeline UX (원클릭 풀 파이프라인 + 멀티스텝 UI)
+
+> **Status: READY (Phase 0 결정 잠금 후, Phase 2 acceptance gate 통과 후 진입).**
+
+**Phase Goal:** 사용자가 Compute Tab 진입 → 5스텝 파라미터 1폼 입력 → `[▶ Run pipeline]` 한 번 클릭 → thumbnails/background/sam/{stats,prox} 자동 체인 실행 + 5스텝 타임라인에 progress 표시. Background 파라미터 변경 시 cascade 도장 다이얼로그 노출.
+
+**Phase Owner:** api-developer (orchestrator + 멀티스텝 SSE), frontend-architect (param form + 타임라인 UI), db-specialist (P5.1 schema increment if needed)
+
+**Phase Exit Criteria:**
+- `POST /projects/{pid}/scans/{sid}/run/pipeline` 라우트 존재 — analysis 자동 생성 + 4개 step run_in_executor 직렬 + 의존 그래프 (Thumbnails 독립 / Background → SAM → {Stats, Prox} 병렬) 준수 + `runs` 행 4-5개 INSERT/UPDATE + steps_done 캐스케이드 enforce
+- 멀티스텝 SSE 이벤트 어휘 추가: `step_started`, `step_progress`, `step_completed`, `pipeline_done`, `pipeline_error` — 기존 `progress`/`done`/`error`는 per-step `/run/{step}` 라우트에서 그대로
+- `useStepProgress` 옆에 신규 `usePipelineProgress` 훅 — 5스텝 상태 머신 (`idle | running | done | error` × per-step pct)
+- ComputeTab 재설계 — 1) 파라미터 1폼 (collapsible per-step), 2) `[▶ Run pipeline]` 버튼, 3) 5스텝 타임라인 카드, 4) Background 변경 감지 시 confirm 다이얼로그
+- `tests/api/test_run_pipeline_sse.py` PG-marked, 4-step 시퀀스 + cascade 검증
+- `web/src/components/run/__tests__/PipelineProgress.test.tsx` 5-step 상태 전이 검증
+- 기존 4개 per-step 라우트 + `SamRunPanel` 손상 없음 (Phase 3 산출물 유지)
+
+---
+
+### Task P5.1: `scans.thumbnail_params` JSONB 추가 (옵션 — owner 결정)
+
+**Files:**
+- Modify (조건부): `src/flake_analysis/db/models/scan.py` (Scan ORM에 `thumbnail_params: JSONB nullable` 추가)
+- Create (조건부): `alembic/versions/0006_w13_thumbnail_params.py`
+- Modify (대안): `manifest.py` 또는 `scans` 행에 in-memory 디폴트로 처리 — alembic 회피
+
+**Owner suggestion:** PM이 Phase 0 결정 7의 sub-decision으로 owner 승인 받은 후 db-specialist 위임. 현재 잠긴 결정은 "기존 analyses 컬럼 활용" + "thumbnails는 analysis와 분리" 만이고 thumbnails 파라미터의 영속화 형태는 미결.
+
+- [ ] **Step 1: PM owner 미니 sweep** — 두 옵션 (A. `scans.thumbnail_params JSONB nullable` 추가, B. 영속화 안 하고 매 진입 시 디폴트 — quality=80, raw_ext=.png) 중 택일.
+
+- [ ] **Step 2A (옵션 A 선택 시): db-specialist에 위임 — Scan ORM + alembic 0006 + tests**
+
+- [ ] **Step 2B (옵션 B 선택 시): 본 task SKIP, P5.2의 폼이 client-side default 사용**
+
+- [ ] **Step 3: Commit (옵션 A 선택 시)**
+
+```bash
+git add src/flake_analysis/db/models/scan.py alembic/versions/0006_w13_thumbnail_params.py
+git commit -m "feat(db): add scans.thumbnail_params JSONB for W13 pipeline UX"
+```
+
+---
+
+### Task P5.2: `POST /run/pipeline` 백엔드 orchestrator
+
+**Files:**
+- Create: `src/flake_analysis/api/routes/run_pipeline.py`
+- Modify: `src/flake_analysis/api/main.py` (router include)
+- Modify: `src/flake_analysis/api/sse.py` (멀티스텝 이벤트 확장 — 신규 wrapper class `PipelineProgressBridge` 또는 새 이벤트 타입)
+- Modify: `src/flake_analysis/api/services/runs.py` (P2.4에서 만든 헬퍼 — 멀티 step 시퀀스 처리 추가)
+- Create: `tests/api/test_run_pipeline_sse.py`
+
+**Owner suggestion:** api-developer
+
+**Pre-read for the worker:**
+- `src/flake_analysis/api/routes/run.py` — 4 per-step 라우트의 lock + emit + ProgressBridge + run_in_executor 패턴 (orchestrator는 이를 4번 시퀀스화)
+- `src/flake_analysis/api/services/runs.py` (P2.4 산출물) — `record_run_start` / `record_run_end`
+- `src/flake_analysis/db/models/analysis.py` — `analyses.steps_done` JSONB, `Analysis` ORM
+- `docs/db-schema-v6.md` §10 Convention #4 (cascade 룰)
+- `src/flake_analysis/api/services/scans_service.py:62` — `require_editor_for_scan` 가드 (이 라우트에서 호출 필요)
+
+**Spec:**
+- 라우트: `POST /api/v1/projects/{project_id}/scans/{scan_id}/run/pipeline`
+- Body: `{ "thumbnails": ThumbnailsParams, "background": BackgroundParams, "sam": SamParams, "domain_stats": DomainStatsParams, "domain_proximity": DomainProximityParams }`. 모든 필드 옵션, 미지정 시 디폴트.
+- Body의 어느 step이라도 누락된 경우 schema default 사용. UI는 모두 채워서 보냄.
+- 가드: `require_editor_for_scan` (W11 패턴)
+- Lock: `acquire_scan_lock(scan_id)` — 전체 파이프라인 lifetime
+- Analysis 자동 처리: 결정 6에 따라 scan당 1 default analysis. 없으면 자동 생성 (model_id = `models` 테이블의 default SAM weight ID — Phase 4 P4.1에서 등록), 있으면 재사용. 이후 4 step에 동일 analysis_id 사용.
+- 실행 그래프 (결정 3):
+  - Thumbnails: 독립, 다른 step과 무관 (analysis 외부 — `runs` 행 X, `steps_done` X). 단, body에 `thumbnails` 있으면 직렬 첫 단계로 실행.
+  - Background → SAM (직렬). Background 파라미터가 기존 analyses.background_params과 다르면 cascade enforce: `steps_done.{sam, domain_stats, domain_proximity}` 클리어 + 의존 `domains/flakes` 행 삭제 (Convention #4).
+  - SAM 후 Domain Stats || Domain Proximity (병렬 가능, asyncio.gather).
+- SSE 이벤트 어휘:
+  - `event: step_started` data: `{step: "thumbnails", index: 0, total: 5}`
+  - `event: step_progress` data: `{step: "background", pct: 0.42, msg: "..."}`
+  - `event: step_completed` data: `{step: "sam", result: {...}}`
+  - `event: pipeline_done` data: `{steps: ["thumbnails", "background", ...], total_duration_s: ...}`
+  - `event: pipeline_error` data: `{step: "sam", error: {code, message, details}}`
+- `runs` 행: 4개 (background/sam/domain_stats/domain_proximity), thumbnails 제외. 각 step 시작 시 INSERT status='running', 종료 시 UPDATE status='succeeded'/'failed'.
+
+- [ ] **Step 1: failing test — minimal happy path**
+
+`tests/api/test_run_pipeline_sse.py`:
+
+```python
+"""Pipeline orchestrator SSE smoke (PG marked)."""
+import json
+import pytest
+from sqlalchemy import select
+from flake_analysis.db.models.analysis import Run, Analysis
+
+pytestmark = pytest.mark.pg
+
+async def test_pipeline_emits_step_events_and_writes_runs(
+    client_pg, active_scan, pg_session
+):
+    project_id = active_scan["project_id"]
+    scan_id = active_scan["scan_id"]
+
+    events: list[tuple[str, dict]] = []
+    async with client_pg.stream(
+        "POST",
+        f"/api/v1/projects/{project_id}/scans/{scan_id}/run/pipeline",
+        json={
+            "thumbnails": {"raw_ext": ".png", "quality": 80},
+            "background": {"seed": 0, "max_images": 2, "method": "median"},
+            "sam": {"weights_path": "/srv/sam/tiny.pt", "device": "cpu"},
+            "domain_stats": {"repr_mode": "median"},
+            "domain_proximity": {"r_max_px": 50.0, "min_area_px": 10},
+        },
+    ) as resp:
+        current_event = None
+        async for line in resp.aiter_lines():
+            if line.startswith("event: "):
+                current_event = line.removeprefix("event: ").strip()
+            elif line.startswith("data: ") and current_event:
+                events.append((current_event, json.loads(line.removeprefix("data: "))))
+                current_event = None
+
+    step_started = [e for e in events if e[0] == "step_started"]
+    assert [e[1]["step"] for e in step_started] == [
+        "thumbnails", "background", "sam", "domain_stats", "domain_proximity"
+    ]
+    assert any(e[0] == "pipeline_done" for e in events)
+
+    rows = (await pg_session.execute(
+        select(Run).join(Analysis).where(Analysis.scan_id == scan_id)
+    )).scalars().all()
+    assert {r.step for r in rows} == {"background", "sam", "domain_stats", "domain_proximity"}
+    assert all(r.status == "succeeded" for r in rows)
+```
+
+- [ ] **Step 2: FAIL 확인** — 라우트 부재로 404.
+
+- [ ] **Step 3: 멀티스텝 SSE wrapper 작성**
+
+`src/flake_analysis/api/sse.py` 끝에:
+
+```python
+class PipelineProgressBridge:
+    """Wraps a single ProgressBridge for multi-step pipelines.
+
+    Translates per-step ProgressBridge events into pipeline-level events:
+    step_started/step_progress/step_completed/pipeline_done/pipeline_error.
+    """
+
+    def __init__(self, total_steps: int):
+        self._inner = ProgressBridge()
+        self._total = total_steps
+
+    def step_started(self, step: str, index: int):
+        self._inner._enqueue({
+            "type": "step_started",
+            "step": step,
+            "index": index,
+            "total": self._total,
+        })
+
+    def step_progress(self, step: str, pct: float, msg: str):
+        self._inner._enqueue({"type": "step_progress", "step": step, "pct": pct, "msg": msg})
+
+    def step_completed(self, step: str, result: dict):
+        self._inner._enqueue({"type": "step_completed", "step": step, "result": result})
+
+    def pipeline_done(self, summary: dict):
+        self._inner._enqueue({"type": "pipeline_done", **summary})
+        self._inner.close()
+
+    def pipeline_error(self, step: str, code: str, message: str, details: dict | None = None):
+        self._inner._enqueue({
+            "type": "pipeline_error",
+            "step": step,
+            "error": {"code": code, "message": message, "details": details or {}},
+        })
+        self._inner.close()
+
+    def queue(self):
+        return self._inner
+```
+
+(`ProgressBridge`에 `_enqueue` 헬퍼가 없다면 `_q.put_nowait` 호출로 inline. P2.4의 SSE 헬퍼 구조에 맞춰 조정.)
+
+- [ ] **Step 4: orchestrator 라우트 작성**
+
+`src/flake_analysis/api/routes/run_pipeline.py`:
+
+```python
+"""POST /run/pipeline — full SAM pipeline orchestrator (W13)."""
+from __future__ import annotations
+import asyncio
+from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from flake_analysis.api.auth import User, get_current_user
+from flake_analysis.api.deps import get_db_session, get_manifest
+from flake_analysis.api.mutex import acquire_scan_lock
+from flake_analysis.api.services.scans_service import require_editor_for_scan
+from flake_analysis.api.services.analyses import get_or_create_default_analysis
+from flake_analysis.api.services.runs import record_run_start, record_run_end
+from flake_analysis.api.services.cascade import apply_background_cascade_if_needed
+from flake_analysis.api.sse import PipelineProgressBridge, sse_stream
+from flake_analysis.api.schemas.compute import (
+    ThumbnailsParams, BackgroundParams, SamParams,
+    DomainStatsParams, DomainProximityParams,
+)
+from flake_analysis.pipeline.thumbnails import run_thumbnails_step
+from flake_analysis.pipeline.background import run_background_step
+from flake_analysis.pipeline.sam import run_sam_step
+from flake_analysis.pipeline.domain_stats import run_domain_stats_step
+from flake_analysis.pipeline.domain_proximity import run_domain_proximity_step
+
+router = APIRouter(
+    prefix="/projects/{project_id}/scans/{scan_id}/run", tags=["run"]
+)
+
+
+class PipelineBody(BaseModel):
+    thumbnails: ThumbnailsParams = ThumbnailsParams()
+    background: BackgroundParams = BackgroundParams()
+    sam: SamParams
+    domain_stats: DomainStatsParams = DomainStatsParams()
+    domain_proximity: DomainProximityParams = DomainProximityParams()
+
+
+@router.post("/pipeline")
+async def run_pipeline(
+    project_id: str,
+    scan_id: int,
+    body: PipelineBody,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    scan = await require_editor_for_scan(session, scan_id=scan_id, user=user)
+    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    analysis = await get_or_create_default_analysis(session, scan_id=scan_id)
+    cascade_summary = await apply_background_cascade_if_needed(
+        session, analysis=analysis, new_background_params=body.background.model_dump()
+    )
+    await session.commit()
+
+    lock_cm = acquire_scan_lock(scan_id)
+    await lock_cm.__aenter__()
+
+    bridge = PipelineProgressBridge(total_steps=5)
+
+    async def driver():
+        loop = asyncio.get_running_loop()
+        try:
+            # Step 1: thumbnails (independent — no analysis row, no runs row)
+            bridge.step_started("thumbnails", 0)
+            t_result = await loop.run_in_executor(None, lambda: run_thumbnails_step(
+                analysis_folder=manifest.analysis_folder,
+                raw_images_dir=manifest.raw_images_dir,
+                **body.thumbnails.model_dump(),
+                progress_callback=lambda pct, msg: bridge.step_progress("thumbnails", pct, msg),
+            ))
+            bridge.step_completed("thumbnails", t_result)
+
+            # Step 2: background (with runs row + steps_done update)
+            bridge.step_started("background", 1)
+            run_id = await record_run_start(session, analysis_id=analysis.id, step="background")
+            await session.commit()
+            try:
+                b_result = await loop.run_in_executor(None, lambda: run_background_step(
+                    raw_images_dir=manifest.raw_images_dir,
+                    analysis_folder=manifest.analysis_folder,
+                    **body.background.model_dump(),
+                    progress_callback=lambda pct, msg: bridge.step_progress("background", pct, msg),
+                ))
+                await record_run_end(session, run_id=run_id, status="succeeded", metrics=b_result)
+                # mark steps_done.background = True
+                analysis.steps_done = {**analysis.steps_done, "background": True}
+                await session.commit()
+                bridge.step_completed("background", b_result)
+            except Exception as e:
+                await record_run_end(session, run_id=run_id, status="failed", error=str(e))
+                await session.commit()
+                raise
+
+            # Step 3: SAM (with runs row + steps_done update)
+            bridge.step_started("sam", 2)
+            run_id = await record_run_start(session, analysis_id=analysis.id, step="sam")
+            await session.commit()
+            try:
+                s_result = await loop.run_in_executor(None, lambda: run_sam_step(
+                    raw_images_dir=manifest.raw_images_dir,
+                    analysis_folder=manifest.analysis_folder,
+                    **body.sam.model_dump(),
+                    progress_callback=lambda pct, msg: bridge.step_progress("sam", pct, msg),
+                ))
+                await record_run_end(session, run_id=run_id, status="succeeded", metrics=s_result)
+                analysis.steps_done = {**analysis.steps_done, "sam": True}
+                await session.commit()
+                bridge.step_completed("sam", s_result)
+            except Exception as e:
+                await record_run_end(session, run_id=run_id, status="failed", error=str(e))
+                await session.commit()
+                raise
+
+            # Step 4 + 5: domain_stats || domain_proximity (parallel)
+            bridge.step_started("domain_stats", 3)
+            bridge.step_started("domain_proximity", 4)
+            stats_run = await record_run_start(session, analysis_id=analysis.id, step="domain_stats")
+            prox_run = await record_run_start(session, analysis_id=analysis.id, step="domain_proximity")
+            await session.commit()
+
+            async def _stats():
+                try:
+                    r = await loop.run_in_executor(None, lambda: run_domain_stats_step(
+                        raw_images_dir=manifest.raw_images_dir,
+                        annotations_path=manifest.annotations_path,
+                        analysis_folder=manifest.analysis_folder,
+                        **body.domain_stats.model_dump(),
+                        progress_callback=lambda p, m: bridge.step_progress("domain_stats", p, m),
+                    ))
+                    await record_run_end(session, run_id=stats_run, status="succeeded", metrics=r)
+                    bridge.step_completed("domain_stats", r)
+                    return r
+                except Exception as e:
+                    await record_run_end(session, run_id=stats_run, status="failed", error=str(e))
+                    raise
+
+            async def _prox():
+                try:
+                    r = await loop.run_in_executor(None, lambda: run_domain_proximity_step(
+                        annotations_path=manifest.annotations_path,
+                        analysis_folder=manifest.analysis_folder,
+                        **body.domain_proximity.model_dump(),
+                        progress_callback=lambda p, m: bridge.step_progress("domain_proximity", p, m),
+                    ))
+                    await record_run_end(session, run_id=prox_run, status="succeeded", metrics=r)
+                    bridge.step_completed("domain_proximity", r)
+                    return r
+                except Exception as e:
+                    await record_run_end(session, run_id=prox_run, status="failed", error=str(e))
+                    raise
+
+            await asyncio.gather(_stats(), _prox())
+            analysis.steps_done = {
+                **analysis.steps_done,
+                "domain_stats": True,
+                "domain_proximity": True,
+            }
+            await session.commit()
+
+            bridge.pipeline_done({"cascade": cascade_summary})
+        except Exception as e:
+            bridge.pipeline_error(
+                step=getattr(e, "step", "unknown"),
+                code=type(e).__name__,
+                message=str(e),
+            )
+        finally:
+            await lock_cm.__aexit__(None, None, None)
+
+    task = asyncio.create_task(driver())
+
+    async def generate():
+        try:
+            async for frame in sse_stream(bridge.queue()):
+                yield frame
+        finally:
+            await task
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+```
+
+> Note: `get_or_create_default_analysis` 와 `apply_background_cascade_if_needed` 헬퍼는 이 task의 sub-step 또는 별도 task에서 작성. 현재 plan에는 P5.2의 일부로 inline.
+
+- [ ] **Step 5: orchestrator helpers**
+
+Create `src/flake_analysis/api/services/analyses.py`:
+
+```python
+"""Default analysis lifecycle helpers (W13)."""
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from flake_analysis.db.models.analysis import Analysis
+
+DEFAULT_AMG_PARAMS = {
+    "points_per_side": 48, "points_per_batch": 64,
+    "pred_iou_thresh": 0.78, "stability_score_thresh": 0.88,
+    "box_nms_thresh": 0.6, "crop_n_layers": 1, "min_mask_region_area": 500,
+}
+
+async def get_or_create_default_analysis(session: AsyncSession, *, scan_id: int) -> Analysis:
+    existing = (await session.execute(
+        select(Analysis).where(Analysis.scan_id == scan_id).order_by(Analysis.created_at).limit(1)
+    )).scalar_one_or_none()
+    if existing is not None:
+        return existing
+    # default model_id resolution — Phase 4 P4.1 registers a default SAM weight
+    # in `models` table. Until then, raise.
+    from flake_analysis.db.models.model import Model  # adjust import
+    default_model = (await session.execute(
+        select(Model).where(Model.is_default.is_(True)).limit(1)
+    )).scalar_one_or_none()
+    if default_model is None:
+        raise RuntimeError("no default SAM model registered — see plan P4.1")
+    a = Analysis(
+        scan_id=scan_id,
+        model_id=default_model.id,
+        amg_params=DEFAULT_AMG_PARAMS,
+        link_distance_px=200.0,
+        min_area_px=10,
+        steps_done={},
+    )
+    session.add(a)
+    await session.flush()
+    return a
+```
+
+Create `src/flake_analysis/api/services/cascade.py`:
+
+```python
+"""Background re-run cascade (db-schema-v6.md §10 Convention #4)."""
+from sqlalchemy import delete
+from sqlalchemy.ext.asyncio import AsyncSession
+from flake_analysis.db.models.analysis import Analysis
+from flake_analysis.db.models.flake import Flake  # adjust
+from flake_analysis.db.models.domain import Domain  # adjust
+
+async def apply_background_cascade_if_needed(
+    session: AsyncSession, *, analysis: Analysis, new_background_params: dict
+) -> dict:
+    """Returns cascade summary (whether cascade fired, what was cleared)."""
+    if (analysis.background_params or {}) == new_background_params:
+        return {"fired": False}
+    analysis.background_params = new_background_params
+    analysis.steps_done = {
+        k: v for k, v in (analysis.steps_done or {}).items()
+        if k not in {"sam", "domain_stats", "domain_proximity"}
+    }
+    await session.execute(delete(Domain).where(Domain.analysis_id == analysis.id))
+    await session.execute(delete(Flake).where(Flake.analysis_id == analysis.id))
+    return {"fired": True, "cleared_steps": ["sam", "domain_stats", "domain_proximity"]}
+```
+
+- [ ] **Step 6: Wire router in main**
+
+`src/flake_analysis/api/main.py`:
+
+```python
+from flake_analysis.api.routes import run_pipeline
+app.include_router(run_pipeline.router, prefix="/api/v1")
+```
+
+- [ ] **Step 7: PASS 확인**
+
+```bash
+env SAA_DB_NAME=saa_test SAA_DB_USER=houkjang SAA_DB_HOST=127.0.0.1 \
+    uv run pytest tests/api/test_run_pipeline_sse.py -v -m pg
+```
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/flake_analysis/api/routes/run_pipeline.py \
+        src/flake_analysis/api/services/analyses.py \
+        src/flake_analysis/api/services/cascade.py \
+        src/flake_analysis/api/sse.py \
+        src/flake_analysis/api/main.py \
+        tests/api/test_run_pipeline_sse.py
+git commit -m "feat(api): POST /run/pipeline orchestrator with multi-step SSE + cascade"
+```
+
+---
+
+### Task P5.3: 프론트엔드 — `usePipelineProgress` 훅 + `PipelineParamsForm` + `PipelineTimeline`
+
+**Files:**
+- Create: `web/src/hooks/usePipelineProgress.ts`
+- Create: `web/src/components/run/PipelineParamsForm.tsx`
+- Create: `web/src/components/run/PipelineTimeline.tsx`
+- Create: `web/src/components/run/__tests__/usePipelineProgress.test.ts`
+- Create: `web/src/components/run/__tests__/PipelineTimeline.test.tsx`
+- Create: `web/src/components/run/__tests__/PipelineParamsForm.test.tsx`
+
+**Owner suggestion:** frontend-architect
+
+**Pre-read for the worker:**
+- `web/src/hooks/useStepProgress.ts` — 단일 step 상태 머신, 멀티스텝 훅이 모방할 패턴
+- `web/src/api/sseRun.ts` — SSE 호출 헬퍼 (P3.1 fix 후 정확한 URL)
+- `web/src/pages/ComputeTab.tsx` — 현재 4 StepCard 마운트 (P5.4에서 이 파일 재설계)
+- `web/src/components/StepCard.tsx` — 기존 단일 step 카드 (재사용 가능 부분 식별)
+- Phase 0 결정 1, 2, 8 (이 plan §Phase 0)
+
+**Spec:**
+- `usePipelineProgress(projectId, scanId)`:
+  - `start(body: PipelineBody): void`, `cancel(): void`
+  - `state: { phase: 'idle' | 'running' | 'done' | 'error', steps: Record<StepName, { status, pct, message, result }>, currentStep: StepName | null, error: ApiError | null }`
+  - SSE 이벤트 5종 처리 (step_started/progress/completed, pipeline_done/error)
+- `PipelineParamsForm`:
+  - 5 collapsible sections (thumbnails/background/sam/stats/proximity)
+  - Background 필드 변경 감지 시 `onBackgroundDirty()` 콜백 — 부모가 cascade confirm 다이얼로그 노출
+  - `[Save]` `[Save & Run]` 버튼 (Save는 P5.1 옵션 A 선택 시만 활성)
+- `PipelineTimeline`:
+  - 5 step row, 각 row에 status icon + pct bar + message
+  - `usePipelineProgress.state` props로 받음
+  - 도장: `currentStep` row 강조, completed row는 `✓`, errored row는 `✗`
+
+테스트:
+- `usePipelineProgress.test.ts` — mock SSE stream → 5스텝 상태 전이 + done/error 케이스
+- `PipelineTimeline.test.tsx` — RTL 5 row 렌더링 + status별 클래스
+- `PipelineParamsForm.test.tsx` — Background 변경 시 onBackgroundDirty 호출 검증
+
+- [ ] **Step 1: failing test — usePipelineProgress (mock fetch + ReadableStream)**
+
+(검증 가능한 mock SSE 패턴은 `web/src/hooks/__tests__/useStepProgress.test.ts` 참고 — 동일 mocking 전략.)
+
+- [ ] **Step 2: hook 구현**
+
+```typescript
+// web/src/hooks/usePipelineProgress.ts
+import { useState, useRef } from 'react'
+import { authedFetch } from '@/api/authedFetch'
+import { ApiError } from '@/api/selector'
+
+export type StepName = 'thumbnails' | 'background' | 'sam' | 'domain_stats' | 'domain_proximity'
+
+interface StepState { status: 'idle'|'running'|'done'|'error'; pct: number; message: string; result: unknown }
+
+export interface PipelineState {
+  phase: 'idle'|'running'|'done'|'error'
+  steps: Record<StepName, StepState>
+  currentStep: StepName | null
+  error: ApiError | null
+}
+
+const INITIAL: PipelineState = {
+  phase: 'idle',
+  steps: {
+    thumbnails: { status: 'idle', pct: 0, message: '', result: null },
+    background: { status: 'idle', pct: 0, message: '', result: null },
+    sam: { status: 'idle', pct: 0, message: '', result: null },
+    domain_stats: { status: 'idle', pct: 0, message: '', result: null },
+    domain_proximity: { status: 'idle', pct: 0, message: '', result: null },
+  },
+  currentStep: null,
+  error: null,
+}
+
+export function usePipelineProgress(projectId: string, scanId: number) {
+  const [state, setState] = useState<PipelineState>(INITIAL)
+  const abortRef = useRef<AbortController | null>(null)
+
+  const start = async (body: unknown) => {
+    setState({ ...INITIAL, phase: 'running' })
+    const ctl = new AbortController()
+    abortRef.current = ctl
+    const resp = await authedFetch(
+      `/api/v1/projects/${projectId}/scans/${scanId}/run/pipeline`,
+      { method: 'POST', body: JSON.stringify(body), signal: ctl.signal }
+    )
+    if (!resp.body) { setState(s => ({ ...s, phase: 'error' })); return }
+    const reader = resp.body.getReader()
+    const decoder = new TextDecoder()
+    let buf = ''
+    let currentEvent = ''
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buf += decoder.decode(value, { stream: true })
+      let idx
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim()
+        buf = buf.slice(idx + 1)
+        if (line.startsWith('event: ')) currentEvent = line.slice(7).trim()
+        else if (line.startsWith('data: ') && currentEvent) {
+          const data = JSON.parse(line.slice(6))
+          handle(currentEvent, data, setState)
+          currentEvent = ''
+        }
+      }
+    }
+  }
+
+  const cancel = () => abortRef.current?.abort()
+  return { state, start, cancel }
+}
+
+function handle(event: string, data: any, set: React.Dispatch<React.SetStateAction<PipelineState>>) {
+  set(s => {
+    const steps = { ...s.steps }
+    if (event === 'step_started') {
+      steps[data.step as StepName] = { ...steps[data.step as StepName], status: 'running' }
+      return { ...s, steps, currentStep: data.step }
+    }
+    if (event === 'step_progress') {
+      steps[data.step as StepName] = { ...steps[data.step as StepName], pct: data.pct, message: data.msg, status: 'running' }
+      return { ...s, steps }
+    }
+    if (event === 'step_completed') {
+      steps[data.step as StepName] = { status: 'done', pct: 1, message: '', result: data.result }
+      return { ...s, steps }
+    }
+    if (event === 'pipeline_done') return { ...s, phase: 'done', currentStep: null }
+    if (event === 'pipeline_error') {
+      const step = data.step as StepName
+      if (steps[step]) steps[step] = { ...steps[step], status: 'error', message: data.error.message }
+      return { ...s, phase: 'error', steps, error: data.error }
+    }
+    return s
+  })
+}
+```
+
+- [ ] **Step 3: PipelineParamsForm + PipelineTimeline 컴포넌트 작성**
+
+(완전한 코드는 frontend-architect가 figma/frontend-design 스킬로 디자인 시스템에 정합한 마크업 작성. 본 plan은 인터페이스 명세까지만.)
+
+- [ ] **Step 4: PASS 확인**
+
+```bash
+cd web && npm test -- --run src/hooks/__tests__/usePipelineProgress.test.ts
+cd web && npm test -- --run src/components/run/__tests__/PipelineTimeline.test.tsx
+cd web && npm test -- --run src/components/run/__tests__/PipelineParamsForm.test.tsx
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/src/hooks/usePipelineProgress.ts \
+        web/src/components/run/PipelineParamsForm.tsx \
+        web/src/components/run/PipelineTimeline.tsx \
+        web/src/hooks/__tests__/usePipelineProgress.test.ts \
+        web/src/components/run/__tests__/PipelineParamsForm.test.tsx \
+        web/src/components/run/__tests__/PipelineTimeline.test.tsx
+git commit -m "feat(web): pipeline progress hook + params form + timeline (W13)"
+```
+
+---
+
+### Task P5.4: ComputeTab 재설계 + cascade confirm 다이얼로그
+
+**Files:**
+- Modify: `web/src/pages/ComputeTab.tsx`
+- Create: `web/src/components/run/CascadeConfirmDialog.tsx`
+- Create: `web/src/pages/__tests__/ComputeTab.pipeline.test.tsx`
+
+**Owner suggestion:** frontend-architect
+
+**Spec:**
+- `ComputeTab` 진입 시 layout:
+  - Top: scan 헤더 (이미 있음)
+  - Mid: `<PipelineParamsForm>` (collapsible 5 sections)
+  - Below form: `[▶ Run pipeline]` 버튼 (`PipelineTimeline.phase === 'running'` 시 비활성)
+  - Below button: `<PipelineTimeline>` (idle 상태에선 5 row 회색, running 시 활성, done/error 시 결과 표시)
+  - Right rail or bottom: 기존 `<SamRunPanel>` (Phase 3 산출물) — 단일 SAM 재실행용으로 유지하되 Phase 5 통합 후 deprecation 후보 (별도 task)
+- Cascade dialog:
+  - Background 파라미터 dirty 시 `[Run pipeline]` 클릭 후 confirm 다이얼로그
+  - 메시지: "Background parameters changed. This will rerun: SAM, Domain Stats, Domain Proximity. Continue?"
+  - `[Cancel]` `[Run with cascade]`
+
+테스트:
+- `ComputeTab.pipeline.test.tsx` — RTL 인터랙션:
+  - 진입 시 5 step row 회색 idle
+  - `[Run pipeline]` 클릭 → mock fetch start
+  - Background dirty 시 confirm 다이얼로그 노출
+  - cascade confirm 후 timeline 활성화
+
+- [ ] **Step 1: failing test**
+- [ ] **Step 2: ComputeTab 재설계**
+- [ ] **Step 3: CascadeConfirmDialog 작성**
+- [ ] **Step 4: PASS 확인**
+
+```bash
+cd web && npm test -- --run src/pages/__tests__/ComputeTab.pipeline.test.tsx
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add web/src/pages/ComputeTab.tsx \
+        web/src/components/run/CascadeConfirmDialog.tsx \
+        web/src/pages/__tests__/ComputeTab.pipeline.test.tsx
+git commit -m "feat(web): ComputeTab pipeline UX with cascade confirm (W13)"
+```
+
+---
+
+### Task P5.5: Phase 5 acceptance gate
+
+**Files:**
+- Run: `bash scripts/dev/w10-acceptance.sh`
+
+**Owner suggestion:** PM (devops-engineer 위임)
+
+- [ ] **Step 1: 게이트 실행**
+
+Expected PASS — 4개 per-step 라우트 회귀 없음, 새 `/run/pipeline` PG-marked 테스트 PASS, 프론트 vitest + tsc + build green.
+
+- [ ] **Step 2: Phase 5 완료 보고 → owner P4.0 sweep 진입 가능

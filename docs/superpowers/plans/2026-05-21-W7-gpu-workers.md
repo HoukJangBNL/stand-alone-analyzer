@@ -1,8 +1,8 @@
 # W7 — GPU Worker Trigger (background → SAM → domain_stats → domain_proximity) Implementation Plan
 
-> **Status: SKETCH + DECISIONS-PENDING.** Captures the architecture options for moving heavy compute (especially SAM inference) off the FastAPI process and onto GPU workers, with `runs` table as the audit log. PM must resolve §"Decisions Pending" with the user before this plan becomes executable.
+> **Status: SUPERSEDED by `2026-05-25-segmentation-web-integration.md` (2026-05-25).** D1–D7 결정은 신규 플랜 Phase 4에 흡수됨. 이 문서는 감사 트레일 목적 보존. 신규 작업은 신규 플랜 참조.
 
-> **For agentic workers (after sign-off):** REQUIRED SUB-SKILL: superpowers:subagent-driven-development.
+> **For agentic workers:** Do not execute this file. See `docs/superpowers/plans/2026-05-25-segmentation-web-integration.md` instead.
 
 **Goal:** Replace the in-process `run_in_executor` pattern in `src/flake_analysis/api/routes/run.py` with a dispatch-and-poll model that pushes the four pipeline steps (`background`, `sam`, `domain_stats`, `domain_proximity`) onto GPU/CPU workers, tracks attempts in the `runs` table, and emits SSE progress to the SPA. Today: every step runs synchronously in the API container's thread pool; SAM has no implementation at all (no `pipeline/sam.py`, no route).
 
