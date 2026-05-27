@@ -436,9 +436,10 @@ def test_indexerror_surfaces_in_result(tmp_path):
     out_dir = tmp_path / "out"
 
     # We don't actually load weights — patch build_sam2 + AMG to force IndexError.
+    # Note: bs is a MagicMock by default so bs(...).load_state_dict(...) is auto-mocked;
+    # do NOT replace bs.return_value with a bare object() — that strips the load_state_dict attr.
     with patch("run_amg_v2_inference.build_sam2") as bs, \
          patch("run_amg_v2_inference.SAM2AutomaticMaskGenerator") as gen:
-        bs.return_value = object()
         gen.return_value.generate.side_effect = IndexError("synthetic")
 
         # We also need to skip torch.load — patch it.
