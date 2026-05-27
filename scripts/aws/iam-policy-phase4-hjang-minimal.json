@@ -1,0 +1,15 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SsmDbPassword",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:GetParameter",
+        "ssm:DescribeParameters"
+      ],
+      "Resource": "arn:aws:ssm:us-east-2:*:parameter/qpress-sam/*"
+    }
+  ]
+}
