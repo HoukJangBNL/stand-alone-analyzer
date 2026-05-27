@@ -45,6 +45,13 @@
 
 set -euo pipefail
 
+# --- Force IPv4 for apt --------------------------------------------------
+# Some AZs have flaky IPv6 egress to archive.ubuntu.com which causes apt-get
+# update to hang/timeout under `set -e`. Pinning apt to IPv4 makes bootstrap
+# deterministic across AZs. Must run BEFORE any apt-get / apt update call.
+mkdir -p /etc/apt/apt.conf.d
+echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
+
 # --- Configurable tunables ------------------------------------------------
 REPO_URL="${REPO_URL:-https://github.com/HoukJangBNL/stand-alone-analyzer.git}"
 REPO_REF="${REPO_REF:-main}"
