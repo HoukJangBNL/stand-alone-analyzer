@@ -40,3 +40,15 @@ def test_analysis_folder_rejects_non_positive_scan_id(tmp_path):
         analysis_folder(tmp_path, "p", 0)
     with pytest.raises(ValueError):
         analysis_folder(tmp_path, "p", -1)
+
+
+def test_sam_step_registered():
+    from flake_analysis.state.paths import PIPELINE_STEPS, SUBDIRS, ARTIFACTS
+    assert "sam" in PIPELINE_STEPS
+    assert SUBDIRS["sam"] == "07_sam"
+    assert ARTIFACTS["sam"] == ["per_image_results.json"]
+
+
+def test_step_dir_resolves_sam(tmp_path):
+    from flake_analysis.state.paths import step_dir
+    assert step_dir(tmp_path, "sam") == tmp_path / "07_sam"

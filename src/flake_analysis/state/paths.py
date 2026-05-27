@@ -21,6 +21,7 @@ from pathlib import Path
 PIPELINE_STEPS = (
     "background",
     "thumbnails",
+    "sam",
     "domain_stats",
     "selector",
     "clustering",
@@ -31,6 +32,7 @@ PIPELINE_STEPS = (
 SUBDIRS = {
     "background":       "01_background",
     "thumbnails":       "00_thumbnails",
+    "sam":              "07_sam",
     "domain_stats":     "02_domain_stats",
     "selector":         "03_selector",
     "clustering":       "04_clustering",
@@ -41,6 +43,7 @@ SUBDIRS = {
 ARTIFACTS = {
     "background": ["background.npy"],
     "thumbnails": ["index.json"],
+    "sam": ["per_image_results.json"],
     "domain_stats": ["stats.npz"],
     "selector": ["selection.parquet"],
     "clustering": ["seed_groups.json", "gmm_model.pkl", "assignments.parquet", "labels.json"],
