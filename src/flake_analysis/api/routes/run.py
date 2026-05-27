@@ -21,10 +21,10 @@ from flake_analysis.api.schemas.compute import (
     SamParams,
     ThumbnailsParams,
 )
+from flake_analysis.api.sse_listen import listen_for_run
 from flake_analysis.pipeline.background import run_background_step
 from flake_analysis.pipeline.domain_proximity import run_domain_proximity_step
 from flake_analysis.pipeline.domain_stats import run_domain_stats_step
-from flake_analysis.pipeline.sam import run_sam_step
 from flake_analysis.pipeline.thumbnails import run_thumbnails_step
 
 router = APIRouter(
@@ -283,6 +283,73 @@ async def run_domain_stats(
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+async def _ensure_gpu_worker() -> None:
+    """Boot a GPU worker EC2 instance if none is live (P4.4).
+
+    Module-level seam so tests can monkeypatch with a no-op. The
+    production implementation calls ``ensure_worker_running`` from
+    :mod:`flake_analysis.worker.launcher`, which checks the EC2 fleet
+    and (optionally) launches a single spot instance via the
+    ``qpress-sam-gpu-worker`` launch template.
+    """
+    from flake_analysis.worker.launcher import (
+        PgAdvisoryLock,
+        ensure_worker_running,
+    )
+
+    await ensure_worker_running(advisory_lock=PgAdvisoryLock())
+
+
+async def _defer_sam_job(
+    *,
+    run_id: int,
+    raw_images_dir,
+    analysis_folder,
+    weights_path,
+    device: str | None,
+) -> None:
+    """Push a SAM job onto the procrastinate ``gpu`` queue.
+
+    Before deferring, ensures a GPU worker exists (P4.4). If the fleet
+    is empty, this kicks off a spot launch via the
+    ``qpress-sam-gpu-worker`` launch template. The defer itself does not
+    wait for the worker to come online — the SSE stream stays open and
+    the worker drains the procrastinate queue once it boots (3-5 min
+    cold start).
+
+    Defined as a module-level seam so tests can monkeypatch this symbol
+    with a no-op rather than requiring an InMemoryConnector or real
+    queue. The real implementation imports the production app lazily so
+    test files that only patch ``_stream_sam_events`` don't pay the
+    psycopg-pool open cost.
+    """
+    await _ensure_gpu_worker()
+
+    # Importing the tasks module registers @app.task decorators on the
+    # production App. The connector pool is opened lazily by procrastinate
+    # the first time defer_async runs.
+    from flake_analysis.worker import tasks as _tasks  # noqa: F401
+    from flake_analysis.worker.app import app
+
+    await app.tasks["run_sam"].defer_async(
+        run_id=run_id,
+        raw_images_dir=str(raw_images_dir),
+        analysis_folder=str(analysis_folder),
+        weights_path=str(weights_path),
+        device=device,
+    )
+
+
+def _stream_sam_events(run_id: int):
+    """Yield decoded NOTIFY payloads from the worker's progress channel.
+
+    Module-level seam: tests patch this with a fake async iterator that
+    emits the canned ``progress``/``completed``/``error`` payloads they
+    want to assert on, without needing a live LISTEN/NOTIFY connection.
+    """
+    return listen_for_run(run_id)
+
+
 @router.post("/sam")
 async def run_sam(
     project_id: str,
@@ -291,18 +358,27 @@ async def run_sam(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Run SAM2 inference step with SSE progress."""
+    """Run SAM2 inference via the procrastinate ``gpu`` worker queue (P4.2).
+
+    Flow: acquire scan lock → emit usage → record_run_start → defer the
+    job → LISTEN on ``sam_progress:{run_id}`` → translate each payload
+    into the existing single-step SSE wire format (``progress`` / ``done``
+    / ``error``). Wire format is byte-identical to the in-process
+    predecessor so the frontend doesn't notice the swap.
+
+    The route never invokes ``flake_analysis.pipeline.sam.run_sam_step``
+    directly anymore — that runner now lives inside
+    :func:`flake_analysis.worker.tasks.run_sam`, which a GPU-resident
+    worker process drains. Failures inside the worker arrive as
+    ``error`` notifications and are translated to the same
+    ``pipeline_failed`` envelope shape.
+    """
     manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
 
     analysis = await get_active_analysis(scan_id, session)
     if analysis is None:
         raise HTTPException(status_code=404, detail="no analysis for scan")
 
-    # Acquire the per-scan lock synchronously so a contended request gets an
-    # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
-    # that opens and immediately errors. The lock must be held for the lifetime
-    # of the generator, so we enter the context manager manually here and exit
-    # it in the generator's finally block.
     lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
 
@@ -317,52 +393,90 @@ async def run_sam(
     )
     await session.commit()
 
-    run_id = await record_run_start(
-        session, analysis_id=analysis.id, step="sam"
-    )
+    run_id = await record_run_start(session, analysis_id=analysis.id, step="sam")
     await session.commit()
 
     bridge = ProgressBridge()
 
-    def call_wrapper():
-        return run_sam_step(
-            raw_images_dir=manifest.raw_images_dir,
-            analysis_folder=manifest.analysis_folder,
-            weights_path=params.weights_path,
-            device=params.device,
-            progress_callback=bridge.emit_progress,
-        )
+    async def driver():
+        """Defer the SAM job, listen for fan-out, translate to bridge events."""
+        try:
+            await _defer_sam_job(
+                run_id=run_id,
+                raw_images_dir=manifest.raw_images_dir,
+                analysis_folder=manifest.analysis_folder,
+                weights_path=params.weights_path,
+                device=params.device,
+            )
 
-    async def generate():
-        loop = asyncio.get_running_loop()
+            terminal_seen = False
+            async for payload in _stream_sam_events(run_id):
+                ptype = payload.get("type")
+                if ptype == "progress":
+                    bridge.emit_progress(
+                        float(payload.get("progress", 0.0)),
+                        str(payload.get("message", "")),
+                    )
+                elif ptype == "completed":
+                    result = payload.get("result", {}) or {}
+                    async with get_session_for_background() as bg:
+                        await record_run_end(
+                            bg,
+                            run_id=run_id,
+                            status="completed",
+                            metrics={
+                                "images": result.get("images"),
+                                "masks_total": result.get("masks_total"),
+                                "errors": result.get("errors"),
+                            },
+                        )
+                        await bg.commit()
+                    bridge.emit_done(result)
+                    terminal_seen = True
+                    break
+                elif ptype == "error":
+                    code = str(payload.get("code") or "pipeline_failed")
+                    message = str(payload.get("message") or "")
+                    async with get_session_for_background() as bg:
+                        await record_run_end(
+                            bg, run_id=run_id, status="failed", error=message
+                        )
+                        await bg.commit()
+                    bridge.emit_error(
+                        "pipeline_failed", message, {"exc_type": code}
+                    )
+                    terminal_seen = True
+                    break
 
-        async def run_pipeline():
-            try:
-                result = await loop.run_in_executor(None, call_wrapper)
+            if not terminal_seen:
+                # Listener exited without a terminal — treat as failure so the
+                # client doesn't hang and the runs row reflects the truth.
                 async with get_session_for_background() as bg:
                     await record_run_end(
                         bg,
                         run_id=run_id,
-                        status="completed",
-                        metrics={
-                            "images": result.get("images"),
-                            "masks_total": result.get("masks_total"),
-                            "errors": result.get("errors"),
-                        },
+                        status="failed",
+                        error="worker stream ended without terminal event",
                     )
                     await bg.commit()
-                bridge.emit_done(result)
-            except Exception as e:
-                async with get_session_for_background() as bg:
-                    await record_run_end(
-                        bg, run_id=run_id, status="failed", error=str(e)
-                    )
-                    await bg.commit()
-                bridge.emit_error("pipeline_failed", str(e), {"exc_type": type(e).__name__})
-            finally:
-                bridge.close()
+                bridge.emit_error(
+                    "pipeline_failed",
+                    "worker stream ended without terminal event",
+                    {"exc_type": "WorkerStreamClosed"},
+                )
+        except BaseException as e:  # noqa: BLE001
+            # Defer-side or listener-setup failures land here.
+            async with get_session_for_background() as bg:
+                await record_run_end(bg, run_id=run_id, status="failed", error=str(e))
+                await bg.commit()
+            bridge.emit_error(
+                "pipeline_failed", str(e), {"exc_type": type(e).__name__}
+            )
+        finally:
+            bridge.close()
 
-        task = asyncio.create_task(run_pipeline())
+    async def generate():
+        task = asyncio.create_task(driver())
         try:
             async for frame in sse_stream(bridge):
                 yield frame

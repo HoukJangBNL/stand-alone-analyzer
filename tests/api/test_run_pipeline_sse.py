@@ -10,13 +10,24 @@ All tests are PG-marked: they exercise the real Analysis/Run/Domain/Flake
 ORM via the per-test SAVEPOINT-rolled-back ``pg_session``. Step wrappers
 themselves (``run_thumbnails_step`` etc) are mocked to keep these tests
 focused on orchestration semantics, not pipeline numerics.
+
+P4.2.d swap (SAM step → procrastinate worker queue):
+    The CPU-step wrappers (thumbnails / background / domain_stats /
+    domain_proximity) still patch the runner symbols at
+    ``flake_analysis.api.routes.run_pipeline``. The SAM step now defers
+    to a worker via two seams that we patch instead:
+      - ``_defer_sam_job`` (no-op AsyncMock to skip the queue)
+      - ``_stream_sam_events`` (fake async iterator yielding the
+        ``progress``/``completed``/``error`` payloads the old in-process
+        mock would have produced via its progress_callback + return).
+    Wire format observable by the client is unchanged.
 """
 from __future__ import annotations
 
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -29,6 +40,22 @@ from flake_analysis.state.manifest import Manifest, save_manifest
 from flake_analysis.state.paths import analysis_folder
 
 pytestmark = pytest.mark.pg
+
+
+def _fake_sam_stream(payloads):
+    """Build a fake :func:`_stream_sam_events` substitute.
+
+    Returns a callable that, when invoked with ``run_id``, yields the
+    canned payloads. Mirrors the production seam's contract — the route
+    iterates the result with ``async for`` regardless of the underlying
+    transport (real LISTEN/NOTIFY in prod, this list in tests).
+    """
+
+    async def _gen(run_id):
+        for p in payloads:
+            yield p
+
+    return _gen
 
 
 def _make_app() -> FastAPI:
@@ -169,7 +196,6 @@ async def test_pipeline_streams_all_5_steps_and_writes_4_runs_rows(
 
     thumbs = _make_step_mock({"output_dir": "/tmp/thumbs", "n_images": 1, "n_skipped": 0, "n_failed": 0, "params": {}, "params_hash": None, "cache_dir": None})
     bg = _make_step_mock({"output_path": "/tmp/bg.npy", "shape": (256, 256, 3), "params": {}})
-    sam = _make_step_mock({"images": 1, "masks_total": 3, "errors": 0, "per_image": {}})
     stats = _make_step_mock({"output_path": "/tmp/stats.json", "num_flakes": 3, "params": {}})
     prox = _make_step_mock(
         {
@@ -182,9 +208,18 @@ async def test_pipeline_streams_all_5_steps_and_writes_4_runs_rows(
         }
     )
 
+    sam_payloads = [
+        {"type": "progress", "progress": 1.0, "message": "done"},
+        {
+            "type": "completed",
+            "result": {"images": 1, "masks_total": 3, "errors": 0, "per_image": {}},
+        },
+    ]
+
     with patch("flake_analysis.api.routes.run_pipeline.run_thumbnails_step", side_effect=thumbs), \
          patch("flake_analysis.api.routes.run_pipeline.run_background_step", side_effect=bg), \
-         patch("flake_analysis.api.routes.run_pipeline.run_sam_step", side_effect=sam), \
+         patch("flake_analysis.api.routes.run_pipeline._defer_sam_job", new=AsyncMock(return_value=None)), \
+         patch("flake_analysis.api.routes.run_pipeline._stream_sam_events", side_effect=_fake_sam_stream(sam_payloads)), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_stats_step", side_effect=stats), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_proximity_step", side_effect=prox):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -264,8 +299,9 @@ async def test_pipeline_emits_pipeline_error_on_step_failure(
     thumbs = _make_step_mock({"output_dir": "/tmp/t", "n_images": 0, "n_skipped": 0, "n_failed": 0, "params": {}, "params_hash": None, "cache_dir": None})
     bg = _make_step_mock({"output_path": "/tmp/bg.npy", "shape": (1, 1, 1), "params": {}})
 
-    def sam_fail(**kwargs):
-        raise RuntimeError("weights not found")
+    sam_error_payloads = [
+        {"type": "error", "code": "RuntimeError", "message": "weights not found"},
+    ]
 
     stats_called = {"n": 0}
     prox_called = {"n": 0}
@@ -287,7 +323,8 @@ async def test_pipeline_emits_pipeline_error_on_step_failure(
 
     with patch("flake_analysis.api.routes.run_pipeline.run_thumbnails_step", side_effect=thumbs), \
          patch("flake_analysis.api.routes.run_pipeline.run_background_step", side_effect=bg), \
-         patch("flake_analysis.api.routes.run_pipeline.run_sam_step", side_effect=sam_fail), \
+         patch("flake_analysis.api.routes.run_pipeline._defer_sam_job", new=AsyncMock(return_value=None)), \
+         patch("flake_analysis.api.routes.run_pipeline._stream_sam_events", side_effect=_fake_sam_stream(sam_error_payloads)), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_stats_step", side_effect=stats_impl), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_proximity_step", side_effect=prox_impl):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -377,21 +414,24 @@ async def test_pipeline_cascade_clears_steps_done(
 
     thumbs = _make_step_mock({"output_dir": "/tmp/t", "n_images": 0, "n_skipped": 0, "n_failed": 0, "params": {}, "params_hash": None, "cache_dir": None})
     bg = _make_step_mock({"output_path": "/tmp/bg.npy", "shape": (1, 1, 1), "params": {}})
-    sam = _make_step_mock({"images": 1, "masks_total": 0, "errors": 0, "per_image": {}})
     stats = _make_step_mock({"output_path": "/tmp/s.json", "num_flakes": 0, "params": {}})
     prox = _make_step_mock(
         {"distances_path": "/tmp/d", "flake_assignments_path": "/tmp/fa", "n_pairs": 0, "n_domains": 0, "n_flakes": 0, "params": {}}
     )
 
-    sam_calls = {"n": 0}
-
-    def sam_count(**kwargs):
-        sam_calls["n"] += 1
-        return sam(**kwargs)
+    sam_payloads = [
+        {"type": "progress", "progress": 1.0, "message": "done"},
+        {
+            "type": "completed",
+            "result": {"images": 1, "masks_total": 0, "errors": 0, "per_image": {}},
+        },
+    ]
+    defer_mock = AsyncMock(return_value=None)
 
     with patch("flake_analysis.api.routes.run_pipeline.run_thumbnails_step", side_effect=thumbs), \
          patch("flake_analysis.api.routes.run_pipeline.run_background_step", side_effect=bg), \
-         patch("flake_analysis.api.routes.run_pipeline.run_sam_step", side_effect=sam_count), \
+         patch("flake_analysis.api.routes.run_pipeline._defer_sam_job", new=defer_mock), \
+         patch("flake_analysis.api.routes.run_pipeline._stream_sam_events", side_effect=_fake_sam_stream(sam_payloads)), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_stats_step", side_effect=stats), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_proximity_step", side_effect=prox):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -403,8 +443,8 @@ async def test_pipeline_cascade_clears_steps_done(
     assert done[0]["cascade"]["fired"] is True
     assert "sam" in done[0]["cascade"]["cleared_steps"]
     assert "domain_stats" in done[0]["cascade"]["cleared_steps"]
-    # SAM was re-run after cascade.
-    assert sam_calls["n"] == 1
+    # SAM was re-run after cascade — defer was called exactly once.
+    assert defer_mock.call_count == 1
 
     # Assert post-run steps_done has all 4 marked True (background + sam + domain_stats + domain_proximity).
     refreshed = await pg_session.get(Analysis, pre_analysis_id)

@@ -1,0 +1,63 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "BudgetsManage",
+      "Effect": "Allow",
+      "Action": [
+        "budgets:ViewBudget",
+        "budgets:ModifyBudget",
+        "budgets:DescribeBudget",
+        "budgets:CreateNotification",
+        "budgets:UpdateNotification",
+        "budgets:DescribeBudgetActionsForBudget"
+      ],
+      "Resource": "arn:aws:budgets::*:budget/qpress-sam-*"
+    },
+    {
+      "Sid": "SnsBudgetTopic",
+      "Effect": "Allow",
+      "Action": [
+        "sns:CreateTopic",
+        "sns:SetTopicAttributes",
+        "sns:GetTopicAttributes",
+        "sns:Subscribe",
+        "sns:ListSubscriptionsByTopic",
+        "sns:ListTopics"
+      ],
+      "Resource": "arn:aws:sns:us-east-1:*:qpress-sam-budget-alerts"
+    },
+    {
+      "Sid": "CostAllocationTags",
+      "Effect": "Allow",
+      "Action": [
+        "ce:UpdateCostAllocationTagsStatus",
+        "ce:ListCostAllocationTags",
+        "ce:GetCostAndUsage"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "EventsForSpotInterrupt",
+      "Effect": "Allow",
+      "Action": [
+        "events:PutRule",
+        "events:PutTargets",
+        "events:DescribeRule",
+        "events:ListRules",
+        "events:ListTargetsByRule"
+      ],
+      "Resource": "arn:aws:events:us-east-2:*:rule/qpress-sam-*"
+    },
+    {
+      "Sid": "SsmDbPassword",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:GetParameter",
+        "ssm:DescribeParameters"
+      ],
+      "Resource": "arn:aws:ssm:us-east-2:*:parameter/qpress-sam/*"
+    }
+  ]
+}

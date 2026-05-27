@@ -1,4 +1,23 @@
 # tests/api/test_run_sam_sse.py
+"""SSE wire-format tests for POST /run/sam.
+
+P4.2.d swap: the route no longer calls ``run_sam_step`` in-process —
+it defers a procrastinate job and LISTENs on a per-run NOTIFY channel
+for progress/terminal payloads from the worker.
+
+Tests now patch two route-level seams:
+
+- ``flake_analysis.api.routes.run._defer_sam_job``: stub to a no-op so
+  no real queue is touched. Tests don't assert on the deferred args
+  here (the worker's own tests cover that).
+- ``flake_analysis.api.routes.run._stream_sam_events``: replace with a
+  fake async iterator that yields the canned payloads (``progress`` /
+  ``completed`` / ``error``) the wire-format test wants to assert on.
+
+The SSE wire format produced by the route is identical to the
+pre-P4.2.d in-process flow, so these tests still verify the same
+contract — just with a worker queue inserted in the middle.
+"""
 import pytest
 import json
 from contextlib import contextmanager
@@ -15,6 +34,21 @@ from flake_analysis.state.paths import analysis_folder
 
 # Test scan id used by tests that don't carry a real DB row.
 SID = 42
+
+
+def _fake_stream_factory(payloads):
+    """Return a callable that, when called with ``run_id``, yields ``payloads``.
+
+    Mirrors the :func:`flake_analysis.api.routes.run._stream_sam_events`
+    contract: takes a ``run_id`` (ignored by the fake) and returns an
+    async iterator of NOTIFY-shaped dicts.
+    """
+
+    async def _gen(run_id):
+        for p in payloads:
+            yield p
+
+    return _gen
 
 
 def _make_app() -> FastAPI:
@@ -108,21 +142,21 @@ async def test_run_sam_sse(tmp_path, monkeypatch, _client_app):
     """POST /run/sam streams progress and completes."""
     _setup_project(tmp_path, monkeypatch, pid="p_sam", sid=SID)
 
-    def mock_run_sam(**kwargs):
-        cb = kwargs.get("progress_callback")
-        if cb:
-            cb(0.5, "[1/2] image_a.png: 3 masks")
-            cb(1.0, "[2/2] image_b.png: 4 masks")
-        return {
-            "images": 2,
-            "masks_total": 7,
-            "errors": 0,
-            "per_image": {},
-        }
+    fake_payloads = [
+        {"type": "progress", "progress": 0.5, "message": "[1/2] image_a.png: 3 masks"},
+        {"type": "progress", "progress": 1.0, "message": "[2/2] image_b.png: 4 masks"},
+        {
+            "type": "completed",
+            "result": {"images": 2, "masks_total": 7, "errors": 0, "per_image": {}},
+        },
+    ]
 
     _stub_session_dep(_client_app)
     with _runs_audit_patches(), patch(
-        "flake_analysis.api.routes.run.run_sam_step", side_effect=mock_run_sam
+        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+    ), patch(
+        "flake_analysis.api.routes.run._stream_sam_events",
+        side_effect=_fake_stream_factory(fake_payloads),
     ):
         async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async with client.stream(
@@ -153,21 +187,21 @@ async def test_run_sam_sse_wire_format(tmp_path, monkeypatch, _client_app):
     """Raw response body contains 'event: progress' and 'event: done' framing."""
     _setup_project(tmp_path, monkeypatch, pid="p_sam_wire", sid=SID)
 
-    def mock_run_sam(**kwargs):
-        cb = kwargs.get("progress_callback")
-        if cb:
-            cb(0.5, "halfway")
-            cb(1.0, "done")
-        return {
-            "images": 2,
-            "masks_total": 7,
-            "errors": 0,
-            "per_image": {},
-        }
+    fake_payloads = [
+        {"type": "progress", "progress": 0.5, "message": "halfway"},
+        {"type": "progress", "progress": 1.0, "message": "done"},
+        {
+            "type": "completed",
+            "result": {"images": 2, "masks_total": 7, "errors": 0, "per_image": {}},
+        },
+    ]
 
     _stub_session_dep(_client_app)
     with _runs_audit_patches(), patch(
-        "flake_analysis.api.routes.run.run_sam_step", side_effect=mock_run_sam
+        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+    ), patch(
+        "flake_analysis.api.routes.run._stream_sam_events",
+        side_effect=_fake_stream_factory(fake_payloads),
     ):
         async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             resp = await client.post(
@@ -185,15 +219,22 @@ async def test_run_sam_sse_wire_format(tmp_path, monkeypatch, _client_app):
 
 @pytest.mark.asyncio
 async def test_run_sam_pipeline_error_emits_sse_error_event(tmp_path, monkeypatch, _client_app):
-    """A pipeline exception is delivered as an SSE 'error' event with the REST envelope shape."""
+    """A worker error notification is delivered as an SSE 'error' event with the REST envelope shape."""
     _setup_project(tmp_path, monkeypatch, pid="p_sam_err", sid=SID)
 
-    def mock_run_sam(**kwargs):
-        raise RuntimeError("weights not found")
+    # Simulate the worker emitting an 'error' notification (which the route
+    # translates into the same wire-format pipeline_failed envelope the
+    # in-process flow used to produce on uncaught exceptions).
+    fake_payloads = [
+        {"type": "error", "code": "RuntimeError", "message": "weights not found"},
+    ]
 
     _stub_session_dep(_client_app)
     with _runs_audit_patches(), patch(
-        "flake_analysis.api.routes.run.run_sam_step", side_effect=mock_run_sam
+        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+    ), patch(
+        "flake_analysis.api.routes.run._stream_sam_events",
+        side_effect=_fake_stream_factory(fake_payloads),
     ):
         async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async with client.stream(
@@ -264,18 +305,20 @@ async def test_run_sam_writes_runs_row(tmp_path, monkeypatch, pg_session, active
         "flake_analysis.api.routes.run.get_session_for_background", _bg_pg
     )
 
-    def mock_run_sam(**kwargs):
-        cb = kwargs.get("progress_callback")
-        if cb:
-            cb(1.0, "done")
-        return {
-            "images": 2,
-            "masks_total": 7,
-            "errors": 0,
-            "per_image": {},
-        }
+    fake_payloads = [
+        {"type": "progress", "progress": 1.0, "message": "done"},
+        {
+            "type": "completed",
+            "result": {"images": 2, "masks_total": 7, "errors": 0, "per_image": {}},
+        },
+    ]
 
-    with patch("flake_analysis.api.routes.run.run_sam_step", side_effect=mock_run_sam):
+    with patch(
+        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+    ), patch(
+        "flake_analysis.api.routes.run._stream_sam_events",
+        side_effect=_fake_stream_factory(fake_payloads),
+    ):
         async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as client:
             async with client.stream(
                 "POST",

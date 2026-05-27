@@ -47,11 +47,11 @@ from flake_analysis.api.services.cascade import apply_background_cascade_if_need
 from flake_analysis.api.services.runs import record_run_end, record_run_start
 from flake_analysis.api.services.usage import emit as usage_emit
 from flake_analysis.api.sse import PipelineProgressBridge, sse_stream
+from flake_analysis.api.sse_listen import listen_for_run
 from flake_analysis.db.models import Analysis
 from flake_analysis.pipeline.background import run_background_step
 from flake_analysis.pipeline.domain_proximity import run_domain_proximity_step
 from flake_analysis.pipeline.domain_stats import run_domain_stats_step
-from flake_analysis.pipeline.sam import run_sam_step
 from flake_analysis.pipeline.thumbnails import run_thumbnails_step
 
 
@@ -138,6 +138,62 @@ async def _mark_step_done(*, analysis_id: int, step: str) -> None:
             return
         a.steps_done = {**(a.steps_done or {}), step: True}
         await bg.commit()
+
+
+# ---------------------------------------------------------------------------
+# Worker-queue seams (P4.2.d). The SAM step is deferred to a procrastinate
+# worker on the ``gpu`` queue; CPU steps stay in-process per Phase 4 D5.
+# These are module-level functions so tests can monkeypatch them with
+# fakes that synthesise the worker→API NOTIFY stream without touching a
+# real queue.
+# ---------------------------------------------------------------------------
+
+
+async def _ensure_gpu_worker() -> None:
+    """Boot a GPU worker EC2 instance if none is live (P4.4).
+
+    Module-level seam — see ``flake_analysis.api.routes.run._ensure_gpu_worker``
+    for the full docstring. Defined locally so the pipeline route's
+    test fakes can patch it independently of the per-step route's.
+    """
+    from flake_analysis.worker.launcher import (
+        PgAdvisoryLock,
+        ensure_worker_running,
+    )
+
+    await ensure_worker_running(advisory_lock=PgAdvisoryLock())
+
+
+async def _defer_sam_job(
+    *,
+    run_id: int,
+    raw_images_dir,
+    analysis_folder,
+    weights_path,
+    device: str | None,
+) -> None:
+    """Push a SAM job onto the procrastinate ``gpu`` queue.
+
+    Before deferring, ensures a GPU worker exists (P4.4); see
+    :func:`flake_analysis.api.routes.run._defer_sam_job` for details.
+    """
+    await _ensure_gpu_worker()
+
+    from flake_analysis.worker import tasks as _tasks  # noqa: F401 — register tasks
+    from flake_analysis.worker.app import app
+
+    await app.tasks["run_sam"].defer_async(
+        run_id=run_id,
+        raw_images_dir=str(raw_images_dir),
+        analysis_folder=str(analysis_folder),
+        weights_path=str(weights_path),
+        device=device,
+    )
+
+
+def _stream_sam_events(run_id: int):
+    """Yield decoded NOTIFY payloads from the worker's progress channel."""
+    return listen_for_run(run_id)
 
 
 # ---------------------------------------------------------------------------
@@ -260,24 +316,88 @@ async def run_pipeline(
         )
 
     async def _run_sam():
-        def _call():
-            return run_sam_step(
-                raw_images_dir=manifest.raw_images_dir,
-                analysis_folder=manifest.analysis_folder,
-                weights_path=body.sam.weights_path,
-                device=body.sam.device,
-                progress_callback=lambda p, m: bridge.step_progress("sam", p, m),
-            )
+        """SAM step: defer to worker queue, listen for NOTIFY fan-out (P4.2).
 
-        return await _run_step_with_runs_row(
-            name="sam",
-            sync_callable=_call,
-            metrics_factory=lambda r: {
-                "images": r.get("images") if isinstance(r, dict) else None,
-                "masks_total": r.get("masks_total") if isinstance(r, dict) else None,
-                "errors": r.get("errors") if isinstance(r, dict) else None,
+        Mirrors :func:`_run_step_with_runs_row` for the CPU steps, but the
+        executor is replaced by:
+
+            defer_async(...) → async for payload in listen_for_run(run_id):
+
+        Translates each ``progress`` payload to ``bridge.step_progress``
+        (preserving the SSE wire format) and lands on a ``completed`` /
+        ``error`` terminal. ``error`` raises :class:`_StepFailure` so the
+        orchestrator's gather/sequence handles it identically to a CPU
+        step crashing in the executor.
+        """
+        bridge.step_started("sam", _STEP_INDEX["sam"])
+        await _emit_usage(user, step="sam", project_id=project_id, scan_id=scan_id)
+        run_id = await _start_run_row(analysis_id=analysis_id, step="sam")
+
+        await _defer_sam_job(
+            run_id=run_id,
+            raw_images_dir=manifest.raw_images_dir,
+            analysis_folder=manifest.analysis_folder,
+            weights_path=body.sam.weights_path,
+            device=body.sam.device,
+        )
+
+        terminal_result: dict | None = None
+        terminal_error: tuple[str, str] | None = None  # (code, message)
+        async for payload in _stream_sam_events(run_id):
+            ptype = payload.get("type")
+            if ptype == "progress":
+                bridge.step_progress(
+                    "sam",
+                    float(payload.get("progress", 0.0)),
+                    str(payload.get("message", "")),
+                )
+            elif ptype == "completed":
+                terminal_result = payload.get("result", {}) or {}
+                break
+            elif ptype == "error":
+                terminal_error = (
+                    str(payload.get("code") or "WorkerError"),
+                    str(payload.get("message") or ""),
+                )
+                break
+
+        if terminal_error is not None:
+            code, message = terminal_error
+            await _finalize_run_row(run_id=run_id, status="failed", error=message)
+            # _StepFailure carries the original exception class on .original;
+            # we don't have one here, so synthesise an exception whose class
+            # name matches ``code`` so the orchestrator's pipeline_error
+            # envelope surfaces the same exc_type/message shape as in-process
+            # failures used to. We can't mutate ``__class__.__name__`` on a
+            # built-in instance, so we dynamically create a subclass type.
+            synth_cls = type(code, (RuntimeError,), {})
+            raise _StepFailure("sam", synth_cls(message))
+
+        if terminal_result is None:
+            # Listener exited without a terminal — treat as worker stream
+            # closure failure so the pipeline doesn't hang.
+            msg = "worker stream ended without terminal event"
+            await _finalize_run_row(run_id=run_id, status="failed", error=msg)
+            raise _StepFailure("sam", RuntimeError(msg))
+
+        await _finalize_run_row(
+            run_id=run_id,
+            status="completed",
+            metrics={
+                "images": terminal_result.get("images")
+                if isinstance(terminal_result, dict)
+                else None,
+                "masks_total": terminal_result.get("masks_total")
+                if isinstance(terminal_result, dict)
+                else None,
+                "errors": terminal_result.get("errors")
+                if isinstance(terminal_result, dict)
+                else None,
             },
         )
+        await _mark_step_done(analysis_id=analysis_id, step="sam")
+        bridge.step_completed("sam", terminal_result)
+        return terminal_result
 
     async def _run_domain_stats():
         def _call():
