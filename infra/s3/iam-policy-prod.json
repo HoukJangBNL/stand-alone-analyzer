@@ -9,7 +9,8 @@
         "s3:PutObjectTagging",
         "s3:GetObject",
         "s3:HeadObject",
-        "s3:GetObjectAttributes"
+        "s3:GetObjectAttributes",
+        "s3:DeleteObject"
       ],
       "Resource": "arn:aws:s3:::qpress-uploads/prod/*"
     },
