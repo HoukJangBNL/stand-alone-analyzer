@@ -65,20 +65,43 @@ async def pg_session(pg_url: str) -> AsyncIterator[AsyncSession]:
 
 
 @pytest_asyncio.fixture()
-async def sample_analysis_factory(pg_session):
-    """Insert a Model + Scan + Analysis row and return the Analysis.
+async def sample_analysis_factory(pg_session, sample_user_factory):
+    """Insert a User + Project + Scan + Model + Analysis row and return
+    the Analysis.
+
+    No-arg call (`await sample_analysis_factory()`) auto-creates a fresh
+    User + Project so callers don't need to wire ownership manually.
+    Pass ``project=`` to scope the Analysis's Scan to an existing Project
+    (mirrors ``sample_scan_factory`` in tests/api/conftest.py).
+
+    W10-A made ``scans.project_id`` a NOT NULL FK→projects.id RESTRICT;
+    constructing a Scan without a project_id would raise IntegrityError.
+    See issue #172 (factory-level fix; gate fix #2 / commit fc173c4 only
+    patched two call sites at the test level).
 
     Uses ``flush`` + ``refresh`` instead of ``commit`` so the per-test
     rollback in ``pg_session`` still cleans up. ``Analysis.status`` is a
     GENERATED column populated via RETURNING on flush.
     """
-    from flake_analysis.db.models import Analysis, Model, Scan
+    from flake_analysis.db.models import Analysis, Model, Project, Scan
 
     counter = {"n": 0}
 
-    async def _make(steps_done: dict | None = None) -> "Analysis":
+    async def _make(
+        steps_done: dict | None = None,
+        *,
+        project: "Project | None" = None,
+    ) -> "Analysis":
         counter["n"] += 1
         suffix = counter["n"]
+        if project is None:
+            owner = await sample_user_factory()
+            project = Project(
+                name=f"test-project-{suffix}", owner_id=owner.id
+            )
+            pg_session.add(project)
+            await pg_session.flush()
+            await pg_session.refresh(project)
         m = Model(
             name=f"test-model-{suffix}",
             base_model="sam2",
@@ -86,8 +109,13 @@ async def sample_analysis_factory(pg_session):
         )
         pg_session.add(m)
         await pg_session.flush()
-        # `material` is now NOT NULL + FK→materials(name); use seeded "graphene".
-        s = Scan(name=f"test-scan-{suffix}", material="graphene")
+        # `material` is NOT NULL + FK→materials(name); use seeded "graphene".
+        # `project_id` is NOT NULL + FK→projects.id (W10-A).
+        s = Scan(
+            name=f"test-scan-{suffix}",
+            material="graphene",
+            project_id=project.id,
+        )
         pg_session.add(s)
         await pg_session.flush()
         a = Analysis(

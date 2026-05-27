@@ -6,12 +6,12 @@ domain_proximity) added in P2.6.
 
 NOTE on fixture choice: the P2.4 plan body referenced
 ``active_scan["analysis"]`` but the actual ``active_scan`` fixture
-(tests/api/conftest.py:83) returns the Scan ORM (not a dict), and
-``sample_analysis_factory`` in tests/db/conftest.py is stale wrt the
-W10 NOT NULL on ``scans.project_id``. So we build Model + Analysis
-inline on top of the API conftest's ``active_scan`` (which carries the
-required project linkage). Same pattern as
-tests/db/test_analysis_status_generated.py.
+(tests/api/conftest.py:83) returns the Scan ORM (not a dict). We build
+Model + Analysis inline on top of the API conftest's ``active_scan`` so
+this test exercises the same Scan that the route-layer fixtures use.
+(``sample_analysis_factory`` is now project-aware per issue #172, so
+either approach is FK-safe — this one keeps the W10 ownership story
+explicit.) Same pattern as tests/db/test_analysis_status_generated.py.
 """
 from __future__ import annotations
 
