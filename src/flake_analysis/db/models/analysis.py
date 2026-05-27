@@ -175,6 +175,10 @@ class Run(Base):
 
     __tablename__ = "runs"
     __table_args__ = (
+        # NB: CHECK enum is intentionally narrower than state.paths.PIPELINE_STEPS —
+        # thumbnails/selector/clustering/explorer are CPU-only steps that don't
+        # write `runs` rows yet. To wire any of those, extend this CHECK in a
+        # new alembic migration first.
         CheckConstraint(
             "step IN ('background', 'sam', 'domain_stats', 'domain_proximity')",
             name="runs_step_check",
