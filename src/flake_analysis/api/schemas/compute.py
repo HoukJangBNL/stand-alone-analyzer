@@ -67,3 +67,17 @@ class DomainProximitySummary(BaseModel):
     n_domains: int
     n_flakes: int
     params: dict
+
+
+class SamParams(BaseModel):
+    """POST /run/sam body."""
+    weights_path: str  # absolute path; Phase 4 will add S3 download path
+    device: str | None = None  # None = auto-detect
+
+
+class SamSummary(BaseModel):
+    """SAM step return dict shape (matches core.pipeline.sam.run_sam)."""
+    images: int
+    masks_total: int
+    errors: int
+    per_image: dict
