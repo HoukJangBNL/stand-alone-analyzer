@@ -283,6 +283,23 @@ async def run_domain_stats(
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+async def _ensure_gpu_worker() -> None:
+    """Boot a GPU worker EC2 instance if none is live (P4.4).
+
+    Module-level seam so tests can monkeypatch with a no-op. The
+    production implementation calls ``ensure_worker_running`` from
+    :mod:`flake_analysis.worker.launcher`, which checks the EC2 fleet
+    and (optionally) launches a single spot instance via the
+    ``qpress-sam-gpu-worker`` launch template.
+    """
+    from flake_analysis.worker.launcher import (
+        PgAdvisoryLock,
+        ensure_worker_running,
+    )
+
+    await ensure_worker_running(advisory_lock=PgAdvisoryLock())
+
+
 async def _defer_sam_job(
     *,
     run_id: int,
@@ -293,12 +310,21 @@ async def _defer_sam_job(
 ) -> None:
     """Push a SAM job onto the procrastinate ``gpu`` queue.
 
+    Before deferring, ensures a GPU worker exists (P4.4). If the fleet
+    is empty, this kicks off a spot launch via the
+    ``qpress-sam-gpu-worker`` launch template. The defer itself does not
+    wait for the worker to come online — the SSE stream stays open and
+    the worker drains the procrastinate queue once it boots (3-5 min
+    cold start).
+
     Defined as a module-level seam so tests can monkeypatch this symbol
     with a no-op rather than requiring an InMemoryConnector or real
     queue. The real implementation imports the production app lazily so
     test files that only patch ``_stream_sam_events`` don't pay the
     psycopg-pool open cost.
     """
+    await _ensure_gpu_worker()
+
     # Importing the tasks module registers @app.task decorators on the
     # production App. The connector pool is opened lazily by procrastinate
     # the first time defer_async runs.

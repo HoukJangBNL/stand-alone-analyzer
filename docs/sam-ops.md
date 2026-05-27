@@ -80,9 +80,10 @@ Budgets and Cost Explorer are us-east-1-only by API convention.
 | IAM inline policy         | `qpress-sam-gpu-s3`                   | global        | `s3:Get/PutObject` on `internal/sam/*`                   | `scripts/aws/sam-iam-bootstrap.sh` (P4.3) |
 | Security group            | `qpress-sam-gpu-sg`                   | us-east-2     | No ingress, HTTPS egress only (SSM-only access)          | `scripts/aws/sam-iam-bootstrap.sh` (P4.3) |
 | S3 prefix                 | `s3://qpress-uploads/internal/sam/`   | us-east-2     | LoRA source + merged weights + sha256 sidecars           | `scripts/aws/sam-stage-lora-to-s3.sh` (P4.3) |
-| Launch template           | `qpress-sam-gpu-worker`               | us-east-2     | Spot GPU worker template (g6e.xlarge, user-data)         | P4.4 (parallel agent)                     |
-| EventBridge rule          | `qpress-sam-spot-interrupt-rule`      | us-east-2     | Catches `EC2 Spot Instance Interruption Warning`         | P4.4 (parallel agent)                     |
-| SNS topic                 | `qpress-sam-spot-interrupt-notify`    | us-east-2     | Spot-interrupt audit fan-out                             | P4.4 (parallel agent)                     |
+| Launch template           | `qpress-sam-gpu-worker`               | us-east-2     | Spot GPU worker template (g6e.xlarge, user-data)         | `scripts/aws/sam-launch-template.sh` (P4.4) |
+| EventBridge rule          | `qpress-sam-spot-interrupt`           | us-east-2     | Catches `EC2 Spot Instance Interruption Warning`         | `scripts/aws/sam-eventbridge.sh` (P4.4 — owner action: IAM lacks Events:PutRule) |
+| SNS topic                 | `qpress-sam-spot-interrupt-notify`    | us-east-2     | Spot-interrupt audit fan-out                             | `scripts/aws/sam-eventbridge.sh` (P4.4 — owner action: IAM lacks SNS:CreateTopic) |
+| SSM Parameter Store       | `/qpress-sam/db_*`                    | us-east-2     | Worker DB connection (host/port/user/name + SecureString password) | owner action — populate before launch |
 | SNS topic                 | `qpress-sam-budget-alerts`            | us-east-1     | Cost-budget alarm fan-out (50/80/100% monthly + daily)   | `scripts/aws/sam-budget.sh` (P4.5)        |
 | AWS Budget                | `qpress-sam-monthly-budget`           | us-east-1     | $600/mo, 50/80/100% actual + 100% forecasted             | `scripts/aws/sam-budget.sh` (P4.5)        |
 | AWS Budget                | `qpress-sam-daily-budget`             | us-east-1     | $20/day, 100% actual                                     | `scripts/aws/sam-budget.sh` (P4.5)        |
@@ -208,10 +209,15 @@ job flow looks like this:
 2. **Enqueue** — API calls `procrastinate.app.tasks.run_sam.defer(...)` which
    inserts a row in `procrastinate_jobs` (PG-backed queue, no Redis).
 3. **Scaler** — `ensure_worker_running()` (P4.4 helper in
-   `src/flake_analysis/api/services/sam_worker.py`) checks if any EC2 instance
+   `src/flake_analysis/worker/launcher.py`) checks if any EC2 instance
    tagged `Project=qpress-sam,Role=worker` is in `running` or `pending` state
-   in us-east-2. If not, it calls `RunInstances` against the
-   `qpress-sam-gpu-worker` launch template.
+   in us-east-2. A PG advisory lock (`pg_try_advisory_lock(0xCAFE0044)`)
+   serialises concurrent boot-window calls so two parallel SAM defers
+   never spawn two instances. If no live worker exists, it calls
+   `RunInstances` against the `qpress-sam-gpu-worker` launch template.
+   `InsufficientInstanceCapacity` surfaces as a typed
+   `GpuCapacityUnavailable` error → the API translates to a
+   `pipeline_error` SSE envelope.
 4. **Cold start** — the new instance boots (~3–5 min including CUDA + weights
    download from S3). `cloud-init` runs `sam-gpu-bootstrap.sh` if needed
    (idempotent stamps in `/opt/sam/state/` skip already-completed steps).
@@ -248,18 +254,21 @@ the last 90 days) but AWS can still reclaim capacity. The behavior chain:
    `http://169.254.169.254/latest/meta-data/spot/instance-action` starts
    returning a JSON body with `action: terminate` and the deadline.
 2. **EventBridge** — AWS publishes a `EC2 Spot Instance Interruption Warning`
-   event to the default event bus. Our rule
-   `qpress-sam-spot-interrupt-rule` (P4.4) matches it, scoped to instances
-   with tag `Project=qpress-sam`, and fans out to SNS topic
+   event to the default event bus. Rule `qpress-sam-spot-interrupt` (P4.4,
+   created by `scripts/aws/sam-eventbridge.sh`) matches every spot-interrupt
+   event with an `instance-id` and fans out to SNS topic
    `qpress-sam-spot-interrupt-notify`. **This SNS topic is for audit only**
-   — no email subscription, just a CloudWatch dashboard / log store target.
-3. **In-instance handler** — a small daemon on the worker
-   (`/opt/sam/spot-handler.py`, P4.4) polls IMDS every 5 s. On notice it:
-   - sends `SIGTERM` to the procrastinate worker
-   - the worker's signal handler runs the current job's `record_run_end`
-     with `status='failed'`, `error='spot_interrupted'`
-   - flushes any open DB sessions
-   - exits cleanly so EBS doesn't go corrupt
+   — no email subscription by default; owner can subscribe later.
+3. **In-instance handler** — a tiny shell script
+   (`/usr/local/sbin/flake-analysis-spot-monitor.sh`, P4.4) is invoked by
+   the systemd timer `flake-analysis-spot-monitor.timer` every 5s. It uses
+   IMDSv2 (token + GET) to check
+   `http://169.254.169.254/latest/meta-data/spot/instance-action`. On a
+   non-404 status it:
+   - calls `systemctl kill -s SIGTERM flake-analysis-worker.service`
+   - the procrastinate worker's signal handler runs the current job's
+     `record_run_end` with `status='failed'`, `error='spot_interrupted'`
+   - flushes any open DB sessions and exits cleanly
 4. **API-side re-enqueue** — when the API observes a row update with
    `status='failed' AND error='spot_interrupted'`, it re-enqueues the same
    job exactly **once**. A second spot interrupt with the same job_id flips

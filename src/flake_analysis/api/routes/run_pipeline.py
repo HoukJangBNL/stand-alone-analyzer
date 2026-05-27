@@ -149,6 +149,21 @@ async def _mark_step_done(*, analysis_id: int, step: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _ensure_gpu_worker() -> None:
+    """Boot a GPU worker EC2 instance if none is live (P4.4).
+
+    Module-level seam — see ``flake_analysis.api.routes.run._ensure_gpu_worker``
+    for the full docstring. Defined locally so the pipeline route's
+    test fakes can patch it independently of the per-step route's.
+    """
+    from flake_analysis.worker.launcher import (
+        PgAdvisoryLock,
+        ensure_worker_running,
+    )
+
+    await ensure_worker_running(advisory_lock=PgAdvisoryLock())
+
+
 async def _defer_sam_job(
     *,
     run_id: int,
@@ -157,7 +172,13 @@ async def _defer_sam_job(
     weights_path,
     device: str | None,
 ) -> None:
-    """Push a SAM job onto the procrastinate ``gpu`` queue."""
+    """Push a SAM job onto the procrastinate ``gpu`` queue.
+
+    Before deferring, ensures a GPU worker exists (P4.4); see
+    :func:`flake_analysis.api.routes.run._defer_sam_job` for details.
+    """
+    await _ensure_gpu_worker()
+
     from flake_analysis.worker import tasks as _tasks  # noqa: F401 — register tasks
     from flake_analysis.worker.app import app
 
