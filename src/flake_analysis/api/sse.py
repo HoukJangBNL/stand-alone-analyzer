@@ -92,8 +92,99 @@ SSE_HEARTBEAT_FRAME: str = ": heartbeat\n\n"
 """SSE comment line. EventSource clients ignore lines starting with ':' per WHATWG."""
 
 
+class PipelineProgressBridge:
+    """Multi-step variant of :class:`ProgressBridge` for the W13 pipeline orchestrator.
+
+    Emits a wider event vocabulary distinct from the per-step routes so the
+    React frontend can drive a 5-step indicator from a single SSE stream:
+
+    * ``step_started``  — non-terminal: ``{step, index, total}``
+    * ``step_progress`` — non-terminal: ``{step, pct, msg}``
+    * ``step_completed``— non-terminal: ``{step, result}``
+    * ``pipeline_done`` — terminal: ``{cascade, ...}`` then sentinel
+    * ``pipeline_error``— terminal: ``{step, error: {code, message, details, request_id}}`` then sentinel
+
+    Drop-vs-priority semantics mirror :class:`ProgressBridge`: progress events
+    are silently dropped when the consumer falls behind, terminal events are
+    guaranteed to be delivered. Construct only inside a running event loop;
+    step-emitter methods may be called from sync executor threads (the
+    progress shim closes over the bridge), so all enqueues hop through
+    ``loop.call_soon_threadsafe``.
+
+    The ``_queue`` attribute is exposed for :func:`sse_stream` (which reads
+    it directly) — keeping the same contract as :class:`ProgressBridge`.
+    """
+
+    def __init__(self):
+        self._queue: asyncio.Queue[dict | None] = asyncio.Queue(maxsize=128)
+        self._loop = asyncio.get_running_loop()
+        self._dropped_progress = 0
+
+    def _put_progress(self, event: dict) -> None:
+        try:
+            self._queue.put_nowait(event)
+        except asyncio.QueueFull:
+            self._dropped_progress += 1
+
+    def _put_terminal(self, event: dict | None) -> None:
+        try:
+            self._queue.put_nowait(event)
+        except asyncio.QueueFull:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            self._queue.put_nowait(event)
+
+    def step_started(self, step: str, index: int, total: int = 5) -> None:
+        event = {"type": "step_started", "step": step, "index": index, "total": total}
+        self._loop.call_soon_threadsafe(self._put_progress, event)
+
+    def step_progress(self, step: str, pct: float, msg: str) -> None:
+        event = {"type": "step_progress", "step": step, "pct": pct, "msg": msg}
+        self._loop.call_soon_threadsafe(self._put_progress, event)
+
+    def step_completed(self, step: str, result: dict) -> None:
+        event = {"type": "step_completed", "step": step, "result": result}
+        self._loop.call_soon_threadsafe(self._put_progress, event)
+
+    def pipeline_done(self, summary: dict) -> None:
+        """Terminal. Enqueues ``pipeline_done`` and the sentinel."""
+        event = {"type": "pipeline_done", **summary}
+        self._loop.call_soon_threadsafe(self._put_terminal, event)
+        self.close()
+
+    def pipeline_error(
+        self,
+        step: str,
+        code: str,
+        message: str,
+        details: dict | None = None,
+    ) -> None:
+        """Terminal. Mirrors :meth:`ProgressBridge.emit_error` envelope shape."""
+        from flake_analysis.api.logging_ctx import get_request_id
+
+        request_id = get_request_id() or ""
+        event = {
+            "type": "pipeline_error",
+            "step": step,
+            "error": {
+                "code": code,
+                "message": message,
+                "details": details or {},
+                "request_id": request_id,
+            },
+        }
+        self._loop.call_soon_threadsafe(self._put_terminal, event)
+        self.close()
+
+    def close(self) -> None:
+        """Signal end of stream. Guaranteed delivery."""
+        self._loop.call_soon_threadsafe(self._put_terminal, None)
+
+
 async def sse_stream(
-    bridge: "ProgressBridge",
+    bridge: "ProgressBridge | PipelineProgressBridge",
     heartbeat_seconds: float | None = None,
 ) -> AsyncGenerator[str, None]:
     """Drain a ProgressBridge into SSE wire frames, injecting heartbeats while idle.
