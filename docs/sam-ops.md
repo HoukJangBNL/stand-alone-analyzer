@@ -1656,3 +1656,154 @@ re-baking the AMI. Owner sign-off needed only for the LT new-version
 **FAIL — environment defect, not algorithmic.** The merged_m3 routing claim
 from #209 remains unverified at 8-GPU scale. v4 cannot proceed against
 `ami-0b7ec5ff47a1eff11` without one of the §17.1.5 mitigations.
+
+## 17.2 #211 v4 attempt — 2026-05-28 (FAIL: done-stamp invalidation triggered git safe.directory abort)
+
+**Outcome:** v4 launched LT v16 (which adds `rm -f env.done repo.done` at
+the top of userdata to force re-run of the post-`d68a9a0`/`196824a` env-file
+write and post-fix `git pull`). Userdata aborted at **step 4 (clone repo)**
+because the AMI's pre-baked `/opt/sam/stand-alone-analyzer/.git` directory
+is owned by `ubuntu` while userdata runs as **root** — `git fetch` failed
+with `fatal: detected dubious ownership in repository` and `set -euo
+pipefail` bailed the script. The env step (6) never executed → stale
+unquoted env file on disk → same `password authentication failed` chain
+the patch was meant to eliminate. Aborted per brief's hard rule. **No SAM
+job ran.** Cost: **~$2.91** of the $9 cap (cumulative across v3+v4: $3.83).
+
+### 17.2.1 Run summary
+
+| Field | Value |
+|---|---|
+| Branch | `feat/migration-cutover` HEAD `fab270c` (this fix) |
+| LT | `lt-09d01bf17ff7bed30` v16 (on-demand, gzip user-data, ami-0b7ec5ff47a1eff11) |
+| Instance | `i-0e87a9d79f7e17642` — `g6e.48xlarge` on-demand in `us-east-2c` (172.31.34.175) |
+| AZ override | LT pins `subnet-0fe8558512beea68a` (us-east-2a) → InsufficientCapacity in 2a → re-launched into `subnet-09f76839fd0c109a9` (us-east-2c) via `--network-interfaces SubnetId=...` (same as v3) |
+| Spot price | n/a — on-demand at $15.07/hr |
+| Wall billed | 11 m 35 s (launch → terminate) |
+| Cost | **~$2.91** (11.583 min × $15.07/hr) |
+| Verdict | **FAIL** — patch regression, environment still wrong |
+
+### 17.2.2 Boot timeline (T0–T4 + Δ)
+
+Userdata never reached the "done" marker — the table truncates at the
+abort point. v4 ran until step 4 of 8.
+
+| Marker | Absolute UTC | Δ from prior |
+|---|---|---|
+| **T0** launch (run-instances response) | `2026-05-28T17:26:22Z` | — |
+| **T1** state→running | `2026-05-28T17:27:00Z` | +38 s |
+| **T2** SSM Online | `2026-05-28T17:27:27Z` | +27 s after T1 |
+| **T3** user-data start (script header marker) | `2026-05-28T17:27:40Z` | +13 s after T2 |
+| **T4** user-data done | **never reached** — script exited at step 4 | — |
+| Userdata abort (step 4 git fetch) | `2026-05-28T~17:27:40-50Z` | within seconds of T3 (cache-hit step 1-3 on AMI) |
+| Worker `activating (auto-restart)` loop | observed `17:37:34Z` | service was AMI-enabled, restart-on-failure |
+| Terminate API call | `2026-05-28T17:37:57Z` | T0 + 11m35s |
+
+**Total wall: 11 m 35 s.** Worth noting that the boot itself (T0 → T3) was
+**78 s — slightly faster than v3's 92 s** because subnet-09f76839fd0c109a9
+is the same one v3 ended up in. The abort was post-T3, not in the boot.
+
+### 17.2.3 Routing log — not exercised
+
+No SAM job was deferred (worker never opened a procrastinate App due to
+DB pool timeout). Cannot confirm or refute the merged_m3 routing on this
+attempt either.
+
+### 17.2.4 Root cause — git safe.directory + done-stamp removal
+
+The patch in `fab270c` (`fix(aws): invalidate stale done_stamps in worker
+userdata`) removed `env.done` and `repo.done`, expecting steps 4 (repo)
+and 6 (env file) to re-run cleanly. They didn't:
+
+```
+[4/8] clone repo + submodule
+fatal: detected dubious ownership in repository at '/opt/sam/stand-alone-analyzer'
+To add an exception for this directory, call:
+    git config --global --add safe.directory /opt/sam/stand-alone-analyzer
+```
+
+The mismatch:
+- AMI bake: `chown -R ubuntu:ubuntu /opt/sam` ran at the end of the
+  bake's repo step, so `/opt/sam/stand-alone-analyzer/.git` is `ubuntu`-owned
+  on disk (verified post-mortem: `drwxr-xr-x 9 ubuntu ubuntu`).
+- Userdata: runs as **root** (cloud-init `scripts_user`). When `repo.done`
+  is removed, the `git fetch` / `git checkout` calls happen in the
+  ubuntu-owned `.git` dir from the root EUID — git ≥ 2.35.2 refuses with
+  `dubious ownership`.
+- `set -euo pipefail` propagates the non-zero exit. Userdata aborts.
+  Steps 5-8 (deps, weights, m3-assets, symlinks, merged-m3, **env**,
+  systemd) all skip.
+- `flake-analysis-worker.service` was **already enabled + started by the
+  AMI**. It reads the AMI-baked stale env file (still unquoted — step 6
+  never ran), times out the psycopg pool after 30 s, exits 1, systemd
+  retries every 30 s. Same failure mode as v3, different cause.
+
+§17.1.5 option 2 ("patch userdata to bust the done-stamps") **needed two
+mitigations, not one**: the stamp-bust *and* a way to make subsequent
+git ops survive the EUID/ownership mismatch.
+
+### 17.2.5 Fix path — three options, owner gate required
+
+For v5 (a future attempt), three feasible paths to make the patch in
+`fab270c` actually work end-to-end:
+
+1. **Add `git config --global --add safe.directory "${REPO_DIR}"`**
+   immediately before the `done_stamp repo` block (or globally at script
+   top after `mkdir -p ${WORK_ROOT}`). Single line, no behavioral
+   change to other steps. **Recommended.** Marginal risk: the repo-
+   owner mismatch is itself a smell — it persists because the AMI's
+   final `chown -R ubuntu:ubuntu` flips ownership after the AMI's own
+   userdata-time clone — but ratifying it via `safe.directory` is the
+   minimum-blast-radius fix.
+
+2. **Run the git ops as `ubuntu`** (`sudo -u ubuntu -H git fetch ...`).
+   Cleaner conceptually but requires re-tooling the `pushd`/`popd`/
+   `popd` logic and would also need `sudo -u ubuntu` for the
+   subsequent `submodule update`. Bigger diff.
+
+3. **Recursively `chown root:root /opt/sam` at the top of userdata**,
+   then have step 4 run as root. Most invasive — would also need step
+   5 (uv sync as `${RUN_USER}`) to re-chown back, and breaks the AMI's
+   uv-cache reuse if uv writes to `~ubuntu/.cache/uv`. Not recommended.
+
+**Recommendation: option 1** as a follow-up to `fab270c`. Single edit:
+```bash
+git config --global --add safe.directory "${REPO_DIR}"
+```
+inserted before `if ! done_stamp repo;` block. Then publish LT v17 and
+retry. Does not need owner approval beyond the LT new-version (no cost,
+reversible).
+
+The AMI re-bake (Task **#220**) supersedes both options 1+2: a fresh
+AMI baked from `feat/migration-cutover` HEAD would carry the post-
+`d68a9a0`/`196824a` source AND a clean, ubuntu-owned-from-the-start
+checkout, eliminating the EUID issue at the source. **AMI re-bake
+follow-up is tracked in #220.**
+
+### 17.2.6 Cleanup performed
+
+- Instance `i-0e87a9d79f7e17642` — `terminate-instances` issued at
+  `2026-05-28T17:37:57Z`. State `shutting-down` confirmed.
+  `describe-instances` filter for live g6e.48xlarge returned `[]` after
+  termination. No orphans.
+- LT v16 left in place (the patch in `fab270c` is correct as far as it
+  goes — it just needs option 1 above on top to clear the next layer of
+  AMI/EUID coupling). Not deleted.
+- 100-image S3 staging at `s3://qpress-uploads/internal/sam/scan6-100/`
+  — **left in place** for v5 (or post-AMI-rebake re-run). 271 MiB,
+  100 PNG, server-side copy from `scan6-3648/` — no PM-side egress.
+- No SG / RDS / IAM / Secrets writes. RDS SG ingress unchanged.
+- No new artifacts on the bastion.
+
+### 17.2.7 Verdict
+
+**FAIL — environment defect (different layer than v3).** v3 caught the
+AMI baked-source problem; v4 caught the AMI baked-ownership problem. The
+merged_m3 routing claim from #209 remains unverified at 8-GPU scale
+through three attempts now. Cumulative spend across v2+v3+v4:
+**~$3.83** of the $9 hard cap.
+
+**Path forward**: AMI re-bake (#220) is the canonical fix and would
+unblock all three issues at once (env-file quoting, sslmode, repo
+ownership). Until then, LT v17 with `safe.directory` config + the v16
+done-stamp invalidation is the minimum-cost workaround.
