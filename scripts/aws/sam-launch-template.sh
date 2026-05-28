@@ -53,22 +53,28 @@ if [[ ! -f "${USERDATA_PATH}" ]]; then
   exit 2
 fi
 
-# --- 1. Resolve AMI (latest Ubuntu 22.04 amd64) --------------------------
-echo "[resolve] latest Ubuntu 22.04 amd64 AMI in ${AWS_REGION}"
-IMAGE_ID=$(aws ec2 describe-images \
-  --region "${AWS_REGION}" \
-  --owners 099720109477 \
-  --filters \
-    'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*' \
-    'Name=state,Values=available' \
-    'Name=architecture,Values=x86_64' \
-  --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
-  --output text)
-if [[ -z "${IMAGE_ID}" || "${IMAGE_ID}" == "None" ]]; then
-  echo "ERROR: failed to resolve Ubuntu 22.04 AMI" >&2
-  exit 1
+# --- 1. Resolve AMI (latest Ubuntu 22.04 amd64, or use override) ---------
+if [[ -n "${IMAGE_ID_OVERRIDE:-}" ]]; then
+  IMAGE_ID="${IMAGE_ID_OVERRIDE}"
+  echo "[override] IMAGE_ID_OVERRIDE set — skipping describe-images lookup"
+  echo "AMI: ${IMAGE_ID} (override)"
+else
+  echo "[resolve] latest Ubuntu 22.04 amd64 AMI in ${AWS_REGION}"
+  IMAGE_ID=$(aws ec2 describe-images \
+    --region "${AWS_REGION}" \
+    --owners 099720109477 \
+    --filters \
+      'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*' \
+      'Name=state,Values=available' \
+      'Name=architecture,Values=x86_64' \
+    --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+    --output text)
+  if [[ -z "${IMAGE_ID}" || "${IMAGE_ID}" == "None" ]]; then
+    echo "ERROR: failed to resolve Ubuntu 22.04 AMI" >&2
+    exit 1
+  fi
+  echo "AMI: ${IMAGE_ID}"
 fi
-echo "AMI: ${IMAGE_ID}"
 
 # --- 2. Resolve security group -------------------------------------------
 SG_ID=$(aws ec2 describe-security-groups \
