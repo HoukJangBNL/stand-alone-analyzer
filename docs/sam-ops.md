@@ -1113,3 +1113,195 @@ the import. Whether `run_amg_v2` works end-to-end depends on the
 `args.json` `model_dir` rewrite called out in §14.5, not on package
 availability.
 
+---
+
+## 15. 8-GPU Measurement Run — 2026-05-28 (M3-track, PARTIAL — spot reclaim)
+
+**Outcome:** 3648-image full run on the M3 (SAM2.1 + LoRA, un-merged) bundle
+made it to **1975 / 3648 images (54.1%)** before AWS reclaimed the spot
+instance (`instance-terminated-no-capacity` in `us-east-2b`). Smoke run
+(10 images) passed cleanly after fixing two AMI gaps (vendor base-ckpt
+symlink, missing `peft` pip dep). Bottleneck diagnosed live during the
+run: GPUs sustained at sm%≈94–98, mem%≈92–98 with `pviol`=100% at
+320–340 W on each L40S — the 3× per-card slowdown vs the documented
+single-GPU `merged.pt` baseline (3.98 s/img) is structural, not a
+plumbing bug. **No `per_image_results.json` was written** (vendor
+postprocess never reached); per-image mask totals are not recoverable
+beyond folder counts.
+
+### 15.1 Run summary
+
+| Field | Value |
+|---|---|
+| Plan | (in-flight; no plan doc — spot from prior agent context) |
+| Branch | `feat/migration-cutover` (HEAD `09fdb29` at run start) |
+| Instance | `i-00d21b6b6cfd9cd48` — `g6e.48xlarge` spot in `us-east-2b` (sir `sir-4wwqg8vg`) |
+| Spot price (last quote) | `$3.956 / hr` (max bid `$30.13`) |
+| Launch | `2026-05-28T11:57:38Z` |
+| Smoke deferred | `2026-05-28T~12:20Z` (procrastinate `JOB_ID=9`, `RUN_ID=99099`, 10 images) |
+| Smoke succeeded | passed in `~95 s` after fixing 2 AMI gaps (see §15.3) |
+| Full deferred | `2026-05-28T~12:27Z` (procrastinate `JOB_ID=10`, `RUN_ID=99100`, 3648 images) |
+| Full started | `12:27:46Z` |
+| Full effective end | `13:17:49Z` (worker SIGTERM by spot-monitor; never reached `succeeded`) |
+| Spot interruption notice | `13:17:42Z` (IMDS `spot/instance-action` showed terminate at `13:19:42Z`) |
+| AWS terminate event | `13:19:45Z` (`Service initiated`, reason `instance-terminated-no-capacity`) |
+| Wall billed | `~82 min` (launch → terminate) |
+| Job 10 wall before SIGTERM | `~50.05 min` |
+| Images completed | `1975 / 3648` (54.1%) — measured by last `[N/3648]` log line + persisted mask folders (2003) |
+| Cost | **≈ $5.47** (82/60 × $3.956 + small EBS) — under the owner's `$9` hard cap |
+| GPUs | 8 × NVIDIA L40S, all 8 active throughout run (verified via `nvidia-smi dmon`) |
+| Worker | `python -m flake_analysis.worker --queue gpu --concurrency 1`, M3 path |
+
+### 15.2 Throughput & speedup (partial-run derivation)
+
+From the journal `[N/3648]` log markers + 50.05 min wall before SIGTERM:
+
+- **Aggregate throughput:** 1975 images / 50.05 min = **39.5 img/min** = **1.521 s/img** (job-level)
+- **Per-card throughput:** 1.521 s/img × 8 cards in parallel = **~12.16 s/card-img**
+- **Single-GPU baseline (documented):** 3.98 s/img on `merged.pt` / `g6e.xlarge`
+- **Multi-GPU speedup:** 3.98 / 1.521 = **2.62× over single-GPU** (vs the 8× ideal)
+- **Per-card slowdown vs baseline:** 12.16 / 3.98 = **3.06× slower per card**
+
+Interpretation: the 8-way fan-out is real (we observed all 8 L40S
+sustained at 94–98% sm utilization — see §15.4); the wall-clock
+speedup is only 2.62× because each card is doing ~3× more work per
+forward than the `merged.pt` single-GPU path. Diagnosis in §15.4.
+
+### 15.3 Smoke gaps fixed before the full run
+
+The instance had been pre-launched by an earlier agent and was idle on
+arrival. Two AMI / bootstrap gaps surfaced on smoke runs and were
+patched in-place to unblock the measurement:
+
+1. **Missing vendor base-ckpt path.** Vendor `build_sam2_finetuned`
+   hardcodes `/home2/qpress/qpress/models/sam2.1/sam2.1_hiera_l.pt` (a
+   prod-host path baked into `args.json`'s `model_dir`). On the AWS
+   AMI the base ckpt sits at `/opt/sam/m3/sam2.1/`. Fix: symlink
+   `/home2/qpress/qpress/models/sam2.1/{sam2.1_hiera_l.pt,configs}` →
+   `/opt/sam/m3/sam2.1/`. This is **the same `args.json` `model_dir`
+   issue called out in §14.5** — but resolved at the filesystem
+   layer, not at call-site. For a permanent fix the AMI bootstrap
+   (or `run_multi_process` shim) should rewrite the path properly.
+
+2. **Missing `peft` pip dep.** Smoke #2 failed with
+   `ModuleNotFoundError: No module named 'peft'`. The LoRA loader path
+   in vendor `lora.apply_lora_to_sam2_components` requires `peft`.
+   Fix: `uv pip install --python /opt/sam/stand-alone-analyzer/.venv/bin/python peft`
+   — added 15 packages including `peft==0.19.1`, `transformers==5.9.0`,
+   `accelerate==1.13.0`. **The AMI image baking should add `peft` to
+   `requirements-inference.txt`** (it's not in the current pinset; the
+   merged `merged.pt` path doesn't need it, but the M3 LoRA path
+   does).
+
+Both fixes are runtime-only on this terminated instance — they do
+not survive into a fresh AMI launch. Future M3 measurement runs
+must re-apply them, or the AMI must be rebuilt.
+
+### 15.4 Bottleneck diagnostic (live, during the run)
+
+Captured ~t+18 min into job 10 via `nvidia-smi dmon -s pucvmet -d 1 -c 15`
+plus `/proc` introspection of the running multi-GPU pool:
+
+| Signal | Observation | Conclusion |
+|---|---|---|
+| GPU sm% | 94–98% sustained on all 8 cards | not pipeline-stalled |
+| GPU mem% | 92–98% sustained | memory-bandwidth bound |
+| `pviol` | =100% (always) | **power-throttled at 350 W TDP**, drawing 320–340 W steady |
+| PCIe rxpci | 7–24 MB/s | **not host↔device transfer bound** |
+| PCIe txpci | 2–6 MB/s | (same — PCIe is idle relative to L40S 64 GB/s capacity) |
+| CPU | ~8 procs × 150% on 192 vCPUs | trivial — host is not the constraint |
+| RAM | 1.5 TB available, no swap | trivial |
+| `args.json` | `lora_image_encoder_rank=16`, `lora_memory_attention_rank=32`, `lora_memory_encoder_rank=32`, `lora_train_decoder=true`, `lora_apply_memory=false` | **LoRA adapters are NOT merged into base** — every forward applies them at runtime |
+
+**Conclusion:** the per-card 3× slowdown is structural to the M3 bundle,
+not a multi-GPU plumbing artifact. Multi-GPU scaling itself is fine:
+all 8 L40S are saturated and at the power-cap simultaneously, so we
+*are* getting 8× parallelism on top of a per-image workload that is
+itself ~3× heavier than the merged.pt baseline. The wall-clock
+speedup ratio (2.62×) ≈ 8 / 3.
+
+**Recommendations:**
+
+1. **For productionization (recommended path):** merge the M3 LoRA
+   adapters into a single state-dict (the `merged.pt` shape that the
+   single-GPU path already consumes), eliminating the runtime adapter
+   overhead. This recovers per-card throughput to the 3.98 s/img
+   baseline → projected full-run wall on 8 cards ≈ 30 min for 3648
+   images at $4/hr ≈ $2.
+
+2. **If the un-merged M3 layout is intentional** (e.g. for ongoing LoRA
+   training or A/B configurability): record ~1.5 s/img job-aggregate
+   on 8× L40S as the M3 baseline and budget runs against that. A full
+   3648 run on g6e.48xlarge then costs ≈ $6 + bootstrap → ~$8–9 per
+   pass.
+
+This is the same finding as §13's `merged.pt` shape question, but
+inverted: §13 broke because vendor required the LoRA-mount layout;
+§15 ran but slow because vendor-loaded LoRA at runtime instead of
+merging. A single decision — *which artifact format do we want
+canonical?* — closes both.
+
+### 15.5 Why the run was cut short — spot capacity, not budget
+
+This was **not** a budget cutoff. AWS reclaimed the instance:
+
+```
+SpotInstanceRequests[0]:
+  State: closed
+  Status.Code: instance-terminated-no-capacity
+  Status.Message: Your Spot instance was terminated because there is
+                  no Spot capacity available that matches your request.
+```
+
+Sequence:
+
+```
+13:17:42Z   IMDS spot/instance-action: {"action":"terminate","time":"2026-05-28T13:19:42Z"}
+13:17:49Z   flake-analysis-spot-monitor.service stops worker (cleanly via SIGTERM)
+13:18:05Z   systemd auto-restarts worker; worker starts, immediately gets stopped again
+13:19:42Z   AWS-scheduled terminate window
+13:19:45Z   EC2 state → shutting-down (Service initiated)
+```
+
+The `flake-analysis-spot-monitor` polls `/latest/meta-data/spot/instance-action`
+every 6 s; it caught the notice and gracefully stopped the worker
+~2 min before AWS yanked the host. Working as designed — the
+ungraceful loss is upstream (no spot capacity in `us-east-2b`).
+
+Side note: `flake-analysis-idle-shutdown.service` was also failing
+every 6 s with `unexpected EOF while looking for matching ')'` —
+the env-file rewrite earlier in the session (to inject the rotated
+RDS password) used a value containing a literal `(` character that
+shell-sourcing chokes on. The idle-shutdown unit isn't what stopped
+the run, but the env file should be re-quoted on a future bootstrap.
+
+### 15.6 What to do next time
+
+- **Rebuild AMI** to bake in `peft` + the `/home2/qpress/qpress/models/sam2.1/`
+  symlink (or, better, rewrite vendor's `args.json.model_dir` at build time
+  so no symlink is needed). §14.5 already flagged the path issue.
+- **Choose a canonical model artifact format.** Either re-merge M3 LoRA into
+  a single `merged.pt`-shaped file, or commit to the un-merged layout and
+  document the ~1.5 s/img-aggregate baseline. Both close §13 and §15
+  simultaneously.
+- **Try a different AZ** — `us-east-2b` had no g6e.48xlarge spot capacity.
+  `us-east-2a` worked in §13 (briefly). The launch template currently
+  pins AZ; consider a multi-AZ spot fleet so a single AZ outage does not
+  reclaim the whole run.
+- **Worker env file quoting** — the password injection produced a value
+  with unescaped `(` that breaks shell sourcing for sibling units. Either
+  base64-encode the password in the env file and decode in the worker
+  entry-point, or quote-escape on write. Filed for the next devops pass.
+
+### 15.7 Cleanup performed
+
+- Instance `i-00d21b6b6cfd9cd48` — terminated by AWS at 13:19:45Z (no manual
+  terminate needed; verified `State.Name=shutting-down`, reason
+  `Service initiated (instance-terminated-no-capacity)`).
+- S3 staging at `s3://qpress-uploads/internal/sam/scan6-3648/` (3648 PNG,
+  9.7 GB) — **left in place** for the next M3 measurement attempt
+  (server-side copy from `dev/scans/6/images/`, no PM egress).
+- No new commits to AWS infra, IAM, SG, or launch template — the runtime
+  fixes (symlink, peft install) live only on the terminated instance and
+  are described in §15.3 for the AMI rebuild.
+
