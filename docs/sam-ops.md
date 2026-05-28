@@ -1478,3 +1478,24 @@ respective code paths.
   on the LoRA-applied path).
 
 
+## 17. Launch Template v15 — env-file quoting + sslmode=require
+
+Root cause (#217 diagnosis): #211 v2 attempt hit `password authentication
+failed` + spurious `no pg_hba.conf` errors because (a) libpq silently fell
+back to non-SSL against `rds.force_ssl=1`, and (b) the rotated RDS master
+password contains a literal `(` which was mangled by an unquoted
+`SAA_DB_PASSWORD=${VAR}` write into the systemd EnvironmentFile.
+
+Fixes shipped (both on `feat/migration-cutover`):
+- `196824a` — force `sslmode=require` (psycopg) / `ssl=require` (asyncpg)
+  on every DB connection site.
+- `d68a9a0` — quote all 5 `SAA_DB_*` writes in
+  `scripts/aws/sam-gpu-worker-userdata.sh` so future SSM rotations cannot
+  reintroduce the same shell-mangling bug.
+
+Launch Template: `lt-09d01bf17ff7bed30` v15 (on-demand g6e.48xlarge,
+no `InstanceMarketOptions`, gzip-base64 user-data from the patched
+script). Built from scratch (not `--source-version`) per the v13
+silent-spot-merge lesson. SG/IAM/AMI/Subnet match v14 exactly.
+
+Pending: re-run #211 against LT v15 (separate dispatch).
