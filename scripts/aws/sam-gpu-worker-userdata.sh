@@ -366,11 +366,11 @@ if ! done_stamp env; then
 
   umask 077
   cat > "${ENV_FILE}" <<EOF
-SAA_DB_HOST=${DB_HOST}
-SAA_DB_PORT=${DB_PORT}
-SAA_DB_USER=${DB_USER}
-SAA_DB_NAME=${DB_NAME}
-SAA_DB_PASSWORD=${DB_PASSWORD}
+SAA_DB_HOST="${DB_HOST}"
+SAA_DB_PORT="${DB_PORT}"
+SAA_DB_USER="${DB_USER}"
+SAA_DB_NAME="${DB_NAME}"
+SAA_DB_PASSWORD="${DB_PASSWORD}"
 EOF
   chmod 0600 "${ENV_FILE}"
   chown root:root "${ENV_FILE}"
