@@ -12,6 +12,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { PipelineState } from '@/hooks/usePipelineProgress'
 import { ComputeTab } from '@/pages/ComputeTab'
 
@@ -59,16 +60,25 @@ vi.mock('@/components/upload/UploadModal', () => ({
   UploadModal: () => null,
 }))
 
+// GpuPoolBadge mounts a TanStack Query that fires a fetch on mount; stub it
+// out — this suite is scoped to pipeline behaviour, not the GPU badge.
+vi.mock('@/components/run/GpuPoolBadge', () => ({
+  GpuPoolBadge: () => <div data-testid="gpu-pool-badge-stub" />,
+}))
+
 function renderTab() {
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   return render(
-    <MemoryRouter initialEntries={['/projects/local/scans/11/compute']}>
-      <Routes>
-        <Route
-          path="/projects/:projectId/scans/:scanId/compute"
-          element={<ComputeTab />}
-        />
-      </Routes>
-    </MemoryRouter>
+    <QueryClientProvider client={qc}>
+      <MemoryRouter initialEntries={['/projects/local/scans/11/compute']}>
+        <Routes>
+          <Route
+            path="/projects/:projectId/scans/:scanId/compute"
+            element={<ComputeTab />}
+          />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>
   )
 }
 

@@ -6,6 +6,7 @@ import { UploadModal } from '@/components/upload/UploadModal'
 import { PipelineParamsForm } from '@/components/run/PipelineParamsForm'
 import { PipelineTimeline } from '@/components/run/PipelineTimeline'
 import { CascadeConfirmDialog } from '@/components/run/CascadeConfirmDialog'
+import { GpuPoolBadge } from '@/components/run/GpuPoolBadge'
 import {
   usePipelineProgress,
   type PipelineBody,
@@ -60,9 +61,12 @@ export function ComputeTab() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2>Compute Tab</h2>
-        <button data-testid="compute-tab-new-scan" onClick={() => setShowUpload(true)}>
-          + New scan
-        </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <GpuPoolBadge />
+          <button data-testid="compute-tab-new-scan" onClick={() => setShowUpload(true)}>
+            + New scan
+          </button>
+        </div>
       </div>
 
       <UploadModal projectId={pid} open={showUpload} onClose={() => setShowUpload(false)} />
