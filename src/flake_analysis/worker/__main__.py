@@ -74,11 +74,12 @@ async def _amain(argv: Sequence[str]) -> None:
         args.concurrency,
         args.name,
     )
-    await app.run_worker_async(
-        queues=args.queues,
-        concurrency=args.concurrency,
-        name=args.name,
-    )
+    async with app.open_async():
+        await app.run_worker_async(
+            queues=args.queues,
+            concurrency=args.concurrency,
+            name=args.name,
+        )
 
 
 def main(argv: Sequence[str] | None = None) -> None:

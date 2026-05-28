@@ -15,9 +15,16 @@ These tests:
 """
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, patch
 
 import pytest
+
+
+@asynccontextmanager
+async def _noop_open_async(*_args, **_kwargs):
+    """Stand-in for ``app.open_async()`` that skips the real PG pool."""
+    yield None
 
 
 @pytest.mark.asyncio
@@ -26,6 +33,9 @@ async def test_main_invokes_run_worker_with_default_queue():
     from flake_analysis.worker.__main__ import _amain
 
     with patch(
+        "flake_analysis.worker.__main__.app.open_async",
+        new=_noop_open_async,
+    ), patch(
         "flake_analysis.worker.__main__.app.run_worker_async",
         new=AsyncMock(return_value=None),
     ) as mock:
@@ -43,6 +53,9 @@ async def test_main_passes_queue_filter():
     from flake_analysis.worker.__main__ import _amain
 
     with patch(
+        "flake_analysis.worker.__main__.app.open_async",
+        new=_noop_open_async,
+    ), patch(
         "flake_analysis.worker.__main__.app.run_worker_async",
         new=AsyncMock(return_value=None),
     ) as mock:
@@ -58,6 +71,9 @@ async def test_main_supports_multiple_queues_and_concurrency():
     from flake_analysis.worker.__main__ import _amain
 
     with patch(
+        "flake_analysis.worker.__main__.app.open_async",
+        new=_noop_open_async,
+    ), patch(
         "flake_analysis.worker.__main__.app.run_worker_async",
         new=AsyncMock(return_value=None),
     ) as mock:
@@ -74,6 +90,9 @@ async def test_main_passes_worker_name():
     from flake_analysis.worker.__main__ import _amain
 
     with patch(
+        "flake_analysis.worker.__main__.app.open_async",
+        new=_noop_open_async,
+    ), patch(
         "flake_analysis.worker.__main__.app.run_worker_async",
         new=AsyncMock(return_value=None),
     ) as mock:
