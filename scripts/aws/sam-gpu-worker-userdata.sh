@@ -1,47 +1,6 @@
 #!/usr/bin/env bash
 # sam-gpu-worker-userdata.sh — Production GPU worker user-data (P4.4).
-#
-# Distinct from sam-gpu-bootstrap.sh:
-#   - bootstrap: builds + uploads merged.pt to S3 (one-time, owner-driven)
-#   - worker:    downloads merged.pt from S3 + runs the procrastinate worker
-#                that drains the `gpu` queue. Self-terminates after 10 min idle.
-#
-# Runs as user-data on a stock Ubuntu 22.04 amd64 g6e.xlarge spot launched
-# by the qpress-sam-gpu-worker launch template.
-#
-# === What success looks like ============================================
-#   1. CUDA 12.4 + Python 3.11 + uv installed.
-#   2. Repo cloned at REPO_REF; submodule init.
-#   3. uv sync --frozen + SAM2 inference deps installed.
-#   4. merged.pt fetched from S3 with SHA256 verified, cached at
-#      /opt/sam/weights/merged.pt.
-#   5. systemd unit flake-analysis-worker.service running
-#      `python -m flake_analysis.worker --queue gpu --concurrency 1`.
-#   6. systemd timer flake-analysis-spot-monitor.timer polls IMDS every 5s
-#      for spot-interrupt notice; on detection, SIGTERM the worker.
-#   7. systemd timer flake-analysis-idle-shutdown.timer checks every 60s
-#      whether the worker is idle for >10 min; if so, self-terminate.
-#   8. /var/log/sam-gpu-worker-userdata.log captures every step.
-# =========================================================================
-#
-# Tunables (override at launch-template-version creation time via env):
-#   REPO_URL        Git URL (default: HoukJangBNL fork)
-#   REPO_REF        SHA the launch template was built against (default: main)
-#   S3_BUCKET       Bucket holding merged weights (default: qpress-uploads)
-#   S3_MERGED_PFX   Prefix where merged weights live (default: internal/sam/)
-#   AWS_REGION      Region (default: us-east-2)
-#   PY_VERSION      Python series (default: 3.11)
-#   IDLE_TIMEOUT_S  Idle seconds before self-terminate (default: 600 = 10 min)
-#
-# DB credentials: pulled from SSM Parameter Store at boot:
-#   /qpress-sam/db_host        (String)
-#   /qpress-sam/db_port        (String)
-#   /qpress-sam/db_user        (String)
-#   /qpress-sam/db_name        (String)
-#   /qpress-sam/db_password    (SecureString)
-#
-# Owner must populate these BEFORE the launch template will produce a
-# working worker. See docs/sam-ops.md §3.
+# Full doc + tunables: docs/sam-ops.md §3 / "M3 Asset Bootstrap".
 
 set -euo pipefail
 
@@ -57,6 +16,7 @@ REPO_URL="${REPO_URL:-https://github.com/HoukJangBNL/stand-alone-analyzer.git}"
 REPO_REF="${REPO_REF:-main}"
 S3_BUCKET="${S3_BUCKET:-qpress-uploads}"
 S3_MERGED_PFX="${S3_MERGED_PFX:-internal/sam/}"
+S3_M3_PFX="${S3_M3_PFX:-internal/sam/m3/}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 PY_VERSION="${PY_VERSION:-3.11}"
 IDLE_TIMEOUT_S="${IDLE_TIMEOUT_S:-600}"
@@ -65,6 +25,7 @@ IDLE_TIMEOUT_S="${IDLE_TIMEOUT_S:-600}"
 LOG_FILE="/var/log/sam-gpu-worker-userdata.log"
 WORK_ROOT="/opt/sam"
 WEIGHTS_DIR="${WORK_ROOT}/weights"
+M3_DIR="${WORK_ROOT}/m3"
 REPO_DIR="${WORK_ROOT}/stand-alone-analyzer"
 STATE_DIR="${WORK_ROOT}/state"
 RUN_USER="ubuntu"
@@ -232,6 +193,40 @@ if ! done_stamp weights; then
   stamp weights
 fi
 
+# --- Step 5b: download M3 4-asset bundle from S3 -------------------------
+# The vendor multi-GPU path (run_amg_v2.run_multi_process) needs the full
+# 4-asset bundle, not the single-file merged.pt. Layout under ${M3_DIR}:
+#   sam2.1/sam2.1_hiera_l.pt          (~898 MB, base SAM2.1 ckpt)
+#   sam2.1/configs/sam2.1_hiera_l.yaml (~3.8 KB)
+#   sam2_lora/best_model.pth          (~962 MB, LoRA weights)
+#   sam2_lora/args.json               (~1.5 KB, LoRA hyperparams)
+# `aws s3 sync` is natively idempotent (compares size + mtime), so reboots
+# / re-runs skip already-present files. M3 is additive — single-GPU
+# merged.pt path above is untouched.
+mkdir -p "${M3_DIR}"
+chown -R "${RUN_USER}:${RUN_USER}" "${M3_DIR}"
+
+if ! done_stamp m3-assets; then
+  echo "[6b/8] sync M3 4-asset bundle from s3://${S3_BUCKET}/${S3_M3_PFX}"
+  aws s3 sync "s3://${S3_BUCKET}/${S3_M3_PFX}" "${M3_DIR}/" \
+    --region "${AWS_REGION}" \
+    --no-progress
+  # Sanity: all 4 expected files present.
+  for f in \
+    "${M3_DIR}/sam2.1/sam2.1_hiera_l.pt" \
+    "${M3_DIR}/sam2.1/configs/sam2.1_hiera_l.yaml" \
+    "${M3_DIR}/sam2_lora/best_model.pth" \
+    "${M3_DIR}/sam2_lora/args.json"; do
+    if [[ ! -s "${f}" ]]; then
+      echo "FATAL: M3 asset missing or empty: ${f}" >&2
+      exit 1
+    fi
+  done
+  ls -la "${M3_DIR}/sam2.1/" "${M3_DIR}/sam2.1/configs/" "${M3_DIR}/sam2_lora/"
+  du -sh "${M3_DIR}"
+  stamp m3-assets
+fi
+
 # --- Step 6: pull DB creds from SSM + write env file ---------------------
 # Worker reads SAA_DB_* from /etc/flake-analysis-worker.env via
 # EnvironmentFile= in the systemd unit. SSM SecureString for password
@@ -284,6 +279,7 @@ Group=${RUN_USER}
 WorkingDirectory=${REPO_DIR}
 EnvironmentFile=${ENV_FILE}
 Environment=SAM_WEIGHTS_PATH=${MERGED_PT}
+Environment=SAM_M3_DIR=${M3_DIR}
 ExecStart=/usr/local/bin/uv run python -m flake_analysis.worker --queue gpu --concurrency 1 --name %H
 Restart=on-failure
 RestartSec=10

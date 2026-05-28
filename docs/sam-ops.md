@@ -937,3 +937,179 @@ Single-GPU path on `g6e.xlarge` (the documented 3.98 s/img baseline) was apparen
 - S3 staging at `s3://qpress-uploads/internal/sam/measure-input-scan6/` (3648 PNG, 10.32 GB) deleted.
 - Two worker-runtime fix commits cherry-picked onto `feat/migration-cutover`: `d5d9783` (procrastinate App pool open), `00b997f` (psycopg pool kwargs=). These were on `worktree-agent-a7087c671a2ac8601` only — without them the worker on this branch would not even start.
 
+---
+
+## 14. M3 Asset Bootstrap — vendor 4-asset bundle (a-track, 2026-05-28)
+
+Recovers the 8-GPU measurement path from §13 by giving the vendor
+`run_amg_v2.run_multi_process` the 4-asset layout it expects. The
+single-file `merged.pt` flow (§3) is **untouched** — M3 is additive.
+`SAM_M3_DIR` and `SAM_WEIGHTS_PATH` are both exported on the worker;
+algo-engineer chooses which the multi-GPU code path consumes.
+
+### 14.1 S3 layout
+
+Prefix: `s3://qpress-uploads/internal/sam/m3/` (mirrors the
+`sam/measure-input-scan6/` precedent — same IAM coverage, no new policy
+needed).
+
+| Object | Size | Purpose |
+|---|---:|---|
+| `sam2.1/sam2.1_hiera_l.pt` | 856.5 MiB | Base SAM2.1 hiera-large checkpoint |
+| `sam2.1/configs/sam2.1_hiera_l.yaml` | 3.7 KiB | SAM2 model config (vendor `args.json` references it via `model_dir`) |
+| `sam2_lora/best_model.pth` | 917.6 MiB | LoRA adapter weights |
+| `sam2_lora/args.json` | 1.5 KiB | LoRA hyperparams + paths |
+
+Total ~1.8 GiB.
+
+### 14.2 Lazy-DL behavior on workers
+
+Added to `scripts/aws/sam-gpu-worker-userdata.sh` (Step 5b, runs after the
+merged.pt fetch and before SSM env wiring). Behavior:
+
+- `aws s3 sync s3://${S3_BUCKET}/${S3_M3_PFX} ${M3_DIR}/` lands the bundle
+  at `/opt/sam/m3/` (default — overridable via `S3_M3_PFX` env on the
+  launch template).
+- `aws s3 sync` is natively idempotent — reboots / re-runs skip files
+  whose size+mtime match S3.
+- Boot fails fast (`exit 1`) if any of the 4 expected files is missing
+  or zero bytes after the sync.
+- Stamp file: `/opt/sam/state/m3-assets.done` — once present, the step
+  is skipped on subsequent boots of the same root volume.
+- Worker systemd unit gets `Environment=SAM_M3_DIR=/opt/sam/m3` so the
+  Python code can locate the bundle without re-deriving paths.
+
+Layout the worker exposes:
+
+```
+/opt/sam/m3/
+├── sam2.1/
+│   ├── sam2.1_hiera_l.pt
+│   └── configs/
+│       └── sam2.1_hiera_l.yaml
+└── sam2_lora/
+    ├── args.json
+    └── best_model.pth
+```
+
+IAM: existing `qpress-sam-gpu-role` inline policy `qpress-sam-gpu-s3`
+already grants `s3:GetObject` + `s3:ListBucket` on `internal/sam/*` —
+no policy update required.
+
+### 14.3 Refresh from prod (owner / DevOps procedure)
+
+When the prod LoRA / base ckpt rotates and the M3 bundle on S3 needs a
+refresh. Run from owner's laptop (Mac with `sshpass` + `aws-cli` v2).
+**SSH password is in-memory only** — never write it to a file or commit
+log. Pass it via `$SSHPASS` and let `sshpass -e` read from env:
+
+```bash
+# 1. Stage locally (4 files, ~1.7 GiB on disk).
+mkdir -p /tmp/m3-stage/sam2.1/configs /tmp/m3-stage/sam2_lora
+
+export SSHPASS='<owner-supplied; do not echo to logs>'
+SSHPASS="$SSHPASS" sshpass -e scp \
+  flake_identifier:/home2/qpress/qpress/models/sam2.1/sam2.1_hiera_l.pt \
+  /tmp/m3-stage/sam2.1/sam2.1_hiera_l.pt
+SSHPASS="$SSHPASS" sshpass -e scp \
+  flake_identifier:/home2/qpress/qpress/models/sam2.1/configs/sam2.1_hiera_l.yaml \
+  /tmp/m3-stage/sam2.1/configs/sam2.1_hiera_l.yaml
+SSHPASS="$SSHPASS" sshpass -e scp \
+  flake_identifier:/home2/qpress/qpress/models/sam2_lora/best_model.pth \
+  /tmp/m3-stage/sam2_lora/best_model.pth
+SSHPASS="$SSHPASS" sshpass -e scp \
+  flake_identifier:/home2/qpress/qpress/models/sam2_lora/args.json \
+  /tmp/m3-stage/sam2_lora/args.json
+unset SSHPASS
+
+# 2. Verify totals (~1.7 GiB).
+du -sh /tmp/m3-stage
+
+# 3. Push to S3 (sync handles per-file ETag check).
+aws s3 sync /tmp/m3-stage/ s3://qpress-uploads/internal/sam/m3/ \
+  --profile qpress --region us-east-2
+
+# 4. Confirm.
+aws s3 ls s3://qpress-uploads/internal/sam/m3/ --recursive --human-readable \
+  --profile qpress --region us-east-2
+
+# 5. Clean up local stage (these files are large).
+rm -rf /tmp/m3-stage/
+```
+
+`flake_identifier` is the `~/.ssh/config` alias (`hal.cfn.bnl.gov`,
+user `qpress`). Existing workers will pick up the refreshed assets on
+their **next boot** because the lazy-DL step compares S3 size+mtime —
+running workers continue serving from the previous on-disk copy until
+they recycle.
+
+### 14.4 Launch template version provenance
+
+| LT version | AMI | Change |
+|---|---|---|
+| v9 | `ami-0b7ec5ff47a1eff11` | g6e.48xlarge default, single-GPU merged.pt only |
+| v10 | `ami-0b7ec5ff47a1eff11` | + M3 4-asset bundle download to `/opt/sam/m3/` |
+
+v10 is the new `$Default`. AMI is unchanged — the M3 step lives
+entirely in user-data, no AMI rebuild required. Front-matter comments
+in the user-data script were trimmed to stay under the EC2 16 KiB
+user-data cap; the operational documentation those comments held now
+lives in this section and §3 of this doc.
+
+### 14.5 Verification trace (2026-05-28)
+
+Test instance `i-0512afdef17f1c9cf` (g6e.xlarge spot, us-east-2b — 48xlarge
+capacity unavailable across all 3 AZs at the time of bootstrap; the M3
+download step is identical regardless of instance type so the smaller
+GPU served the verification). Tagged `Purpose=m3-bootstrap-verify`.
+Terminated immediately after verification.
+
+`ls -la /opt/sam/m3/sam2.1/`:
+
+```
+drwxr-xr-x 3 root root      4096 May 28 10:34 .
+drwxr-xr-x 4 ubuntu ubuntu  4096 May 28 10:34 ..
+drwxr-xr-x 2 root root      4096 May 28 10:34 configs
+-rw-r--r-- 1 root root 898083611 May 28 10:30 sam2.1_hiera_l.pt
+```
+
+`du -sh /opt/sam/m3/` → `1.8G`.
+
+`head /opt/sam/m3/sam2_lora/args.json` (first lines, schema check):
+
+```
+{
+  "dataset_root": "/home2/mhussain/projects/BNL/CFN/QPressSeg/datasets/Real",
+  "dataset_type": "real",
+  "target_size": 1024,
+  "index_workers": 24,
+  ...
+  "model_dir": "/home2/qpress/qpress/models/sam2.1/",
+```
+
+> Note: `args.json` still encodes the **prod** `model_dir` path
+> (`/home2/qpress/...`). On the AWS worker the actual base ckpt sits at
+> `/opt/sam/m3/sam2.1/`. The vendor multi-GPU loader either needs an
+> override at call-site or a path-rewrite shim — that's an algo-engineer
+> decision, not a bootstrap concern.
+
+### 14.6 sam2 Python package state on the AMI (for algo-engineer)
+
+Confirmed at verification time on the v10 launch template:
+
+- `sam2` IS importable from the worker venv — `python -c "import sam2"`
+  resolves to `/opt/sam/stand-alone-analyzer/.venv/lib/python3.11/site-packages/sam2/__init__.py`.
+- `pip list` does **not** show `sam2` as a registered distribution —
+  it's installed as an unregistered site-package, presumably by the
+  `requirements-inference.txt` install step against the
+  `vendor/QPress-SAM-Flake` submodule (Step 5 of the user-data).
+- `vendor/QPress-SAM-Flake/` is fully present at
+  `/opt/sam/stand-alone-analyzer/vendor/QPress-SAM-Flake/` so the
+  vendor `run_amg_v2.run_multi_process` import path is reachable.
+
+Implication: algo-engineer does **not** need to ship a separate sam2
+repo or pip-install at boot — the existing user-data already provides
+the import. Whether `run_amg_v2` works end-to-end depends on the
+`args.json` `model_dir` rewrite called out in §14.5, not on package
+availability.
+
