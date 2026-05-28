@@ -1277,9 +1277,23 @@ the run, but the env file should be re-quoted on a future bootstrap.
 
 ### 15.6 What to do next time
 
-- **Rebuild AMI** to bake in `peft` + the `/home2/qpress/qpress/models/sam2.1/`
-  symlink (or, better, rewrite vendor's `args.json.model_dir` at build time
-  so no symlink is needed). §14.5 already flagged the path issue.
+- ~~**Rebuild AMI** to bake in `peft` + the `/home2/qpress/qpress/models/sam2.1/`
+  symlink~~ — **patched in `scripts/aws/sam-gpu-worker-userdata.sh` at
+  commit `d320029`**. The userdata Step 5 now
+  installs `peft>=0.8.0,<0.20` after the vendor `requirements-inference.txt`
+  install (vendor file's top-comment intentionally excludes peft for the
+  merged.pt path; the dep belongs at runtime, not in the vendor pinset).
+  A new Step 5c materializes prod-path symlinks under
+  `/home2/qpress/qpress/models/{sam2.1,sam2_lora}/` pointing at
+  `${M3_DIR}` — required because vendor `run_multi_process` uses
+  `mp.get_context("spawn").Pool` (vendor `run_amg_v2.py:1113`) and the
+  spawn workers re-import `run_amg_v2` in fresh interpreters that never
+  see our parent-process monkeypatch on `load_training_args`. They read
+  the raw absolute paths from `args.json` — symlinks are the lowest-blast
+  way to satisfy them without touching the on-disk asset bundle. **Open
+  follow-up: rewrite `args.json.model_dir` at AMI/asset bake time so the
+  symlink layer is not load-bearing — separate task.** §14.5 path issue
+  remains the canonical permanent fix.
 - **Choose a canonical model artifact format.** Either re-merge M3 LoRA into
   a single `merged.pt`-shaped file, or commit to the un-merged layout and
   document the ~1.5 s/img-aggregate baseline. Both close §13 and §15
@@ -1287,7 +1301,7 @@ the run, but the env file should be re-quoted on a future bootstrap.
 - **Try a different AZ** — `us-east-2b` had no g6e.48xlarge spot capacity.
   `us-east-2a` worked in §13 (briefly). The launch template currently
   pins AZ; consider a multi-AZ spot fleet so a single AZ outage does not
-  reclaim the whole run.
+  reclaim the whole run. **Open follow-up — separate task.**
 - **Worker env file quoting** — the password injection produced a value
   with unescaped `(` that breaks shell sourcing for sibling units. Either
   base64-encode the password in the env file and decode in the worker
