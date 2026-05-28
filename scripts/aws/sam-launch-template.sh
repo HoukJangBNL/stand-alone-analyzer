@@ -110,7 +110,10 @@ fi
 echo "Subnet: ${SUBNET_ID}"
 
 # --- 4. Encode user-data -------------------------------------------------
-USERDATA_B64=$(base64 < "${USERDATA_PATH}" | tr -d '\n')
+# UserData hard limit is 16 KB base64-encoded at the AWS API. cloud-init
+# transparently decompresses gzip-magic'd payloads, so we compress before
+# base64. Without this, anything > ~12 KB raw fails publish.
+USERDATA_B64=$(gzip -c "${USERDATA_PATH}" | base64 | tr -d '\n')
 
 # --- 5. Build LaunchTemplateData JSON ------------------------------------
 TPL_DATA_JSON=$(cat <<EOF
