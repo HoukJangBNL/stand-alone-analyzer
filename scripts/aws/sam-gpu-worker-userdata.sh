@@ -17,6 +17,7 @@ REPO_REF="${REPO_REF:-main}"
 S3_BUCKET="${S3_BUCKET:-qpress-uploads}"
 S3_MERGED_PFX="${S3_MERGED_PFX:-internal/sam/}"
 S3_M3_PFX="${S3_M3_PFX:-internal/sam/m3/}"
+S3_MERGED_M3_PFX="${S3_MERGED_M3_PFX:-internal/sam/merged_m3/}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 PY_VERSION="${PY_VERSION:-3.11}"
 IDLE_TIMEOUT_S="${IDLE_TIMEOUT_S:-600}"
@@ -30,6 +31,7 @@ REPO_DIR="${WORK_ROOT}/stand-alone-analyzer"
 STATE_DIR="${WORK_ROOT}/state"
 RUN_USER="ubuntu"
 MERGED_PT="${WEIGHTS_DIR}/merged.pt"
+MERGED_M3_PT="${WEIGHTS_DIR}/merged_m3.pt"
 ENV_FILE="/etc/flake-analysis-worker.env"
 
 # --- Tee everything to log + console -------------------------------------
@@ -38,6 +40,8 @@ exec > >(tee -a "${LOG_FILE}") 2>&1
 echo "=== sam-gpu-worker-userdata start: $(date -u +%FT%TZ) ==="
 echo "REPO=${REPO_URL}@${REPO_REF}"
 echo "S3=s3://${S3_BUCKET}/${S3_MERGED_PFX}"
+echo "S3_M3=s3://${S3_BUCKET}/${S3_M3_PFX}"
+echo "S3_MERGED_M3=s3://${S3_BUCKET}/${S3_MERGED_M3_PFX}"
 echo "REGION=${AWS_REGION} IDLE_TIMEOUT_S=${IDLE_TIMEOUT_S}"
 
 # --- Helper: idempotency stamps ------------------------------------------
@@ -282,6 +286,62 @@ if ! done_stamp m3-prod-symlinks; then
   stamp m3-prod-symlinks
 fi
 
+# --- Step 5d: download merged_m3.<sha8>.pt from S3 (soft-miss OK) --------
+# Producer: scripts/aws/sam-build-merged-m3.sh (docs/sam-ops.md §16). The
+# multi-GPU dual-mode pipeline (#209) prefers this single-file artifact via
+# SAM_MERGED_M3_PATH so vendor `build_sam2(...)` can load it directly,
+# skipping the per-forward-pass LoRA application that bottlenecked the
+# 2026-05-28 8-GPU run (12.16 s/card-img vs 3.98 s/img baseline; §15).
+#
+# Soft-miss is intentional: if no merged_m3 has been published yet, the
+# worker falls back to the M3 4-asset LoRA-runtime path (steps 5b + 5c).
+# This step ONLY hard-fails on SHA256 corruption, mirroring step 5's
+# refusal-to-serve policy for any artifact that IS present.
+if ! done_stamp merged-m3-weights; then
+  echo "[6d/8] discover + download merged_m3.<sha8>.pt from S3 (soft-miss OK)"
+  LATEST_M3_KEY=$(aws s3api list-objects-v2 \
+    --region "${AWS_REGION}" \
+    --bucket "${S3_BUCKET}" \
+    --prefix "${S3_MERGED_M3_PFX}sam2.1_hiera_large.merged_m3." \
+    --query 'sort_by(Contents, &LastModified)[?ends_with(Key, `.pt`)] | [-1].Key' \
+    --output text)
+  if [[ -z "${LATEST_M3_KEY}" || "${LATEST_M3_KEY}" == "None" ]]; then
+    echo "no merged_m3 found in s3://${S3_BUCKET}/${S3_MERGED_M3_PFX} — worker will use LoRA-runtime path"
+    stamp merged-m3-skipped
+  else
+    echo "Latest merged_m3: s3://${S3_BUCKET}/${LATEST_M3_KEY}"
+
+    # Fetch the .sha256 sidecar first.
+    M3_SHA_KEY="${LATEST_M3_KEY}.sha256"
+    EXPECTED_M3_SHA=$(aws s3 cp "s3://${S3_BUCKET}/${M3_SHA_KEY}" - \
+      --region "${AWS_REGION}" \
+      --no-progress \
+      | awk '{print $1}')
+    if [[ -z "${EXPECTED_M3_SHA}" ]]; then
+      echo "FATAL: sidecar ${M3_SHA_KEY} is empty or missing" >&2
+      exit 1
+    fi
+    echo "Expected SHA256: ${EXPECTED_M3_SHA}"
+
+    # Download merged_m3.pt.
+    aws s3 cp "s3://${S3_BUCKET}/${LATEST_M3_KEY}" "${MERGED_M3_PT}" \
+      --region "${AWS_REGION}" \
+      --no-progress
+    ls -lh "${MERGED_M3_PT}"
+
+    # Verify SHA256 BEFORE we mark the stamp.
+    ACTUAL_M3_SHA=$(sha256sum "${MERGED_M3_PT}" | awk '{print $1}')
+    echo "Actual SHA256:   ${ACTUAL_M3_SHA}"
+    if [[ "${ACTUAL_M3_SHA}" != "${EXPECTED_M3_SHA}" ]]; then
+      echo "FATAL: SHA256 mismatch on merged_m3.pt — refusing to serve" >&2
+      rm -f "${MERGED_M3_PT}"
+      exit 1
+    fi
+    echo "${LATEST_M3_KEY}" > "${STATE_DIR}/active_merged_m3_key"
+    stamp merged-m3-weights
+  fi
+fi
+
 # --- Step 6: pull DB creds from SSM + write env file ---------------------
 # Worker reads SAA_DB_* from /etc/flake-analysis-worker.env via
 # EnvironmentFile= in the systemd unit. SSM SecureString for password
@@ -335,6 +395,7 @@ WorkingDirectory=${REPO_DIR}
 EnvironmentFile=${ENV_FILE}
 Environment=SAM_WEIGHTS_PATH=${MERGED_PT}
 Environment=SAM_M3_DIR=${M3_DIR}
+Environment=SAM_MERGED_M3_PATH=${MERGED_M3_PT}
 ExecStart=/usr/local/bin/uv run python -m flake_analysis.worker --queue gpu --concurrency 1 --name %H
 Restart=on-failure
 RestartSec=10

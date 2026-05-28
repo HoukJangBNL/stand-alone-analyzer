@@ -1427,17 +1427,51 @@ via `vendor/QPress-SAM-Flake`. The legacy `--config rank_alpha.json` path
 still works — existing P1.5/P1.6 callers (`run_amg_v2_inference.infer`)
 are unaffected.
 
-### 16.6 Follow-ups (PM-tracked)
+### 16.6 Worker discovery (Step 5d, #210)
+
+`sam-gpu-worker-userdata.sh` now has a Step 5d (between the M3 4-asset
+prod-path symlinks and the SSM env-file write) that mirrors Step 5's
+discovery idiom against `${S3_MERGED_M3_PFX}` (default
+`internal/sam/merged_m3/`):
+
+1. List `s3api list-objects-v2 --prefix
+   internal/sam/merged_m3/sam2.1_hiera_large.merged_m3.` and pick the
+   most-recently-uploaded `.pt` via the same JMESPath used by Step 5.
+2. **Soft-miss** — if no merged_m3 exists yet, log a notice, stamp
+   `merged-m3-skipped`, and skip download. The worker falls back to the
+   LoRA-runtime path via the M3 4-asset bundle (Step 5b/5c). Boot does
+   NOT fail.
+3. **Hard-fail on corruption** — if a key is present, fetch the
+   `.sha256` sidecar, download the `.pt` to `${WEIGHTS_DIR}/merged_m3.pt`,
+   and verify SHA256. Mismatch → `rm -f` and exit 1, mirroring Step 5's
+   refusal-to-serve policy.
+4. On success, write the resolved key to
+   `${STATE_DIR}/active_merged_m3_key` and stamp `merged-m3-weights`
+   (separate from Step 5's `weights` stamp — the two artifacts live and
+   age independently).
+
+The systemd worker unit (Step 7a) exposes `SAM_MERGED_M3_PATH=${MERGED_M3_PT}`
+alongside the existing `SAM_WEIGHTS_PATH` and `SAM_M3_DIR`. The dual-mode
+pipeline code (#209) reads `SAM_MERGED_M3_PATH` to decide between
+`build_sam2(...)` (fast path) and `build_sam2_finetuned(...)` (LoRA-runtime
+fallback). If Step 5d soft-missed, the env var still points at a path
+that doesn't exist on disk — the consumer side checks `os.path.exists`
+before preferring it, so the fallback is graceful.
+
+Steps 5 (single-GPU `merged.pt` discovery) and 5b/5c (M3 bundle + vendor
+prod-path symlinks) are unchanged and remain authoritative for their
+respective code paths.
+
+### 16.7 Follow-ups (PM-tracked)
 
 - **#209** — rewire `_run_sam_multi_gpu` to prefer the merged_m3 artifact
   via the existing single-GPU `build_sam2(...)` loader. Until #209 lands,
   the multi-GPU path still goes through `build_sam2_finetuned` and the
   runtime LoRA application (i.e. uploading merged_m3 alone does not
   change worker behaviour).
-- **#210** — patch `sam-gpu-worker-userdata.sh` step 5 to also discover
-  `internal/sam/merged_m3/sam2.1_hiera_large.merged_m3.<sha8>.pt`
-  alongside the existing `merged.pt` flow, so a fresh AMI boot pulls the
-  merged_m3 weight without manual `aws s3 cp`.
+- **#210** — landed (this section §16.6). Userdata Step 5d discovers
+  `internal/sam/merged_m3/sam2.1_hiera_large.merged_m3.<sha8>.pt` and
+  exposes `SAM_MERGED_M3_PATH` to the worker service.
 - **#211** — once #209 + #210 are in, re-run the 8-GPU full-set
   measurement (3648 PNG) on the merged_m3 path. Target trajectory ~30 min
   on g6e.48xlarge if scaling recovers (vs the failed ~90 min trajectory
