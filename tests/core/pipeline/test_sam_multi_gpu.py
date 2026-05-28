@@ -356,3 +356,395 @@ def test_run_sam_multi_gpu_patches_vendor_load_training_args(tmp_path, monkeypat
     # After the run, the vendor module's ``load_training_args`` must be
     # restored to the original (no leaked monkeypatch across calls).
     assert fake_vendor.load_training_args is not sam_mod._patched_load_training_args
+
+
+# ---------------------------------------------------------------------------
+# merged_m3 dual-mode routing (#209)
+# ---------------------------------------------------------------------------
+#
+# When ``SAM_MERGED_M3_PATH`` env var is set AND points at a non-empty
+# file, the multi-GPU dispatch should prefer vendor's single-``.pt`` build
+# path (``build_sam2_from_yaml`` via ``use_original_sam2=True``) over the
+# LoRA-runtime path (``build_sam2_finetuned``). The merged_m3 artifact has
+# LoRA already folded into the base weights, so per-forward LoRA
+# application is unnecessary — recovering the ~3× per-card slowdown
+# documented in docs/sam-ops.md §15.
+#
+# Discovery rules:
+#   - env var unset           → LoRA-runtime (existing behavior)
+#   - env var set, file 0 B   → LoRA-runtime (corrupted artifact)
+#   - env var set, missing    → LoRA-runtime (soft-miss, cluster booted
+#                                              before merged_m3 published)
+#   - env var set, file >0 B  → merged_m3 (preferred)
+
+
+def _make_fake_merged_m3(tmp_path: Path) -> Path:
+    """Create a non-empty fake merged_m3.pt and return its path."""
+    pt = tmp_path / "merged_m3.pt"
+    pt.write_bytes(b"\x80\x02" + b"\x00" * 64)  # any non-empty payload
+    return pt
+
+
+def test_resolve_merged_m3_path_returns_none_when_env_unset(tmp_path, monkeypatch):
+    """Discovery returns None when ``SAM_MERGED_M3_PATH`` is unset → caller
+    falls back to LoRA-runtime."""
+    monkeypatch.delenv("SAM_MERGED_M3_PATH", raising=False)
+    assert sam_mod._resolve_merged_m3_path() is None
+
+
+def test_resolve_merged_m3_path_returns_none_when_file_missing(tmp_path, monkeypatch):
+    """Discovery returns None when env var is set but the file does not
+    exist on disk (soft-miss is normal — cluster may boot before
+    merged_m3 has been published to S3)."""
+    monkeypatch.setenv("SAM_MERGED_M3_PATH", str(tmp_path / "nonexistent.pt"))
+    assert sam_mod._resolve_merged_m3_path() is None
+
+
+def test_resolve_merged_m3_path_returns_none_when_file_empty(tmp_path, monkeypatch):
+    """A 0-byte file is treated as missing — defensive against partial
+    downloads or other corruption modes that the userdata SHA256 check
+    might miss in edge cases."""
+    empty = tmp_path / "merged_m3.pt"
+    empty.write_bytes(b"")
+    monkeypatch.setenv("SAM_MERGED_M3_PATH", str(empty))
+    assert sam_mod._resolve_merged_m3_path() is None
+
+
+def test_resolve_merged_m3_path_returns_path_when_file_present(tmp_path, monkeypatch):
+    """Happy path: env var set + non-empty file → returns the Path."""
+    pt = _make_fake_merged_m3(tmp_path)
+    monkeypatch.setenv("SAM_MERGED_M3_PATH", str(pt))
+    out = sam_mod._resolve_merged_m3_path()
+    assert out == pt
+    assert out.is_file()
+
+
+def test_run_sam_multi_gpu_routes_through_merged_m3_when_env_set(
+    tmp_path, monkeypatch
+):
+    """When ``SAM_MERGED_M3_PATH`` is set + file present, the config
+    pickled to vendor ``run_multi_process`` must select the
+    single-``.pt`` build path (``use_original_sam2=True``) and point
+    ``checkpoint`` at the merged_m3 file. The LoRA-runtime keys
+    (``ckpt_dir`` / ``ckpt_file``) must be inert under this routing."""
+    fake_root = tmp_path / "sam_m3"
+    (fake_root / "sam2_lora").mkdir(parents=True)
+    (fake_root / "sam2.1" / "configs").mkdir(parents=True)
+    monkeypatch.setattr(sam_mod, "M3_ROOT", fake_root, raising=True)
+    (fake_root / "sam2_lora" / "args.json").write_text(
+        (FIXTURES / "sam_m3_args.json").read_text()
+    )
+    # Materialise the yaml the merged_m3 path will reference (we use the
+    # M3 bundle's yaml since the userdata only fetches the .pt — the
+    # co-located yaml in S3 is informational; the bundle yaml is the
+    # source of truth on the worker).
+    yaml_path = fake_root / "sam2.1" / "configs" / "sam2.1_hiera_l.yaml"
+    yaml_path.write_text("# stub yaml\n")
+
+    merged_m3 = _make_fake_merged_m3(tmp_path)
+    monkeypatch.setenv("SAM_MERGED_M3_PATH", str(merged_m3))
+
+    images_dir = tmp_path / "imgs"
+    images_dir.mkdir()
+    (images_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    monkeypatch.setattr(sam_mod, "_safe_ensure_sam2_importable", MagicMock())
+    monkeypatch.setattr(
+        sam_mod, "_resolve_sam2_repo", lambda: fake_root / "sam2_repo_stub"
+    )
+    fake_vendor = MagicMock()
+    fake_vendor.load_training_args = MagicMock(name="orig_loader")
+    monkeypatch.setattr(sam_mod, "_vendor_amg_module", lambda: fake_vendor)
+
+    captured: dict = {}
+
+    def fake_run_multi_process(images, output_dir, config, num_gpus):
+        captured["config"] = dict(config)
+        return []
+
+    monkeypatch.setattr(sam_mod, "_vendor_run_multi_process", fake_run_multi_process)
+
+    sam_mod._run_sam_multi_gpu(
+        images_dir=images_dir,
+        weights_path=fake_root / "sam2_lora" / "best_model.pth",
+        out_dir=out_dir,
+        n_gpus=8,
+        progress_callback=None,
+    )
+
+    cfg = captured["config"]
+    # Routing flag flipped so vendor worker_process_images dispatches to
+    # build_sam2_from_yaml (single-.pt path).
+    assert cfg["use_original_sam2"] is True, (
+        "merged_m3 must route through vendor's single-.pt build path"
+    )
+    # Single-.pt path reads config_yaml + checkpoint.
+    assert cfg["checkpoint"] == str(merged_m3)
+    assert cfg["config_yaml"] == str(yaml_path)
+
+
+def test_run_sam_multi_gpu_routes_through_lora_when_env_unset(tmp_path, monkeypatch):
+    """When ``SAM_MERGED_M3_PATH`` is unset, fallback to the existing
+    LoRA-runtime path (use_original_sam2=False, ckpt_dir + ckpt_file
+    populated, checkpoint/config_yaml left as None)."""
+    fake_root = tmp_path / "sam_m3"
+    (fake_root / "sam2_lora").mkdir(parents=True)
+    (fake_root / "sam2.1" / "configs").mkdir(parents=True)
+    monkeypatch.setattr(sam_mod, "M3_ROOT", fake_root, raising=True)
+    (fake_root / "sam2_lora" / "args.json").write_text(
+        (FIXTURES / "sam_m3_args.json").read_text()
+    )
+    monkeypatch.delenv("SAM_MERGED_M3_PATH", raising=False)
+
+    images_dir = tmp_path / "imgs"
+    images_dir.mkdir()
+    (images_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    monkeypatch.setattr(sam_mod, "_safe_ensure_sam2_importable", MagicMock())
+    monkeypatch.setattr(
+        sam_mod, "_resolve_sam2_repo", lambda: fake_root / "sam2_repo_stub"
+    )
+    fake_vendor = MagicMock()
+    fake_vendor.load_training_args = MagicMock(name="orig_loader")
+    monkeypatch.setattr(sam_mod, "_vendor_amg_module", lambda: fake_vendor)
+
+    captured: dict = {}
+
+    def fake_run_multi_process(images, output_dir, config, num_gpus):
+        captured["config"] = dict(config)
+        return []
+
+    monkeypatch.setattr(sam_mod, "_vendor_run_multi_process", fake_run_multi_process)
+
+    sam_mod._run_sam_multi_gpu(
+        images_dir=images_dir,
+        weights_path=fake_root / "sam2_lora" / "best_model.pth",
+        out_dir=out_dir,
+        n_gpus=8,
+        progress_callback=None,
+    )
+
+    cfg = captured["config"]
+    # LoRA-runtime baseline preserved.
+    assert cfg["use_original_sam2"] is False
+    assert cfg["ckpt_dir"] == str(fake_root / "sam2_lora")
+    assert cfg["ckpt_file"] == "best_model.pth"
+
+
+def test_run_sam_multi_gpu_falls_back_when_merged_m3_file_missing(
+    tmp_path, monkeypatch
+):
+    """``SAM_MERGED_M3_PATH`` set but file does not exist on disk →
+    LoRA-runtime fallback. This is the soft-miss path the userdata
+    explicitly leaves room for (S3 has no merged_m3 yet)."""
+    fake_root = tmp_path / "sam_m3"
+    (fake_root / "sam2_lora").mkdir(parents=True)
+    (fake_root / "sam2.1" / "configs").mkdir(parents=True)
+    monkeypatch.setattr(sam_mod, "M3_ROOT", fake_root, raising=True)
+    (fake_root / "sam2_lora" / "args.json").write_text(
+        (FIXTURES / "sam_m3_args.json").read_text()
+    )
+    # Point at a path that does not exist.
+    monkeypatch.setenv("SAM_MERGED_M3_PATH", str(tmp_path / "absent.pt"))
+
+    images_dir = tmp_path / "imgs"
+    images_dir.mkdir()
+    (images_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    monkeypatch.setattr(sam_mod, "_safe_ensure_sam2_importable", MagicMock())
+    monkeypatch.setattr(
+        sam_mod, "_resolve_sam2_repo", lambda: fake_root / "sam2_repo_stub"
+    )
+    fake_vendor = MagicMock()
+    fake_vendor.load_training_args = MagicMock(name="orig_loader")
+    monkeypatch.setattr(sam_mod, "_vendor_amg_module", lambda: fake_vendor)
+
+    captured: dict = {}
+
+    def fake_run_multi_process(images, output_dir, config, num_gpus):
+        captured["config"] = dict(config)
+        return []
+
+    monkeypatch.setattr(sam_mod, "_vendor_run_multi_process", fake_run_multi_process)
+
+    sam_mod._run_sam_multi_gpu(
+        images_dir=images_dir,
+        weights_path=fake_root / "sam2_lora" / "best_model.pth",
+        out_dir=out_dir,
+        n_gpus=8,
+        progress_callback=None,
+    )
+
+    # Fallback kicked in.
+    assert captured["config"]["use_original_sam2"] is False
+    assert captured["config"]["ckpt_dir"] == str(fake_root / "sam2_lora")
+
+
+def test_run_sam_multi_gpu_logs_routing_choice_to_progress_callback(
+    tmp_path, monkeypatch
+):
+    """The dual-mode routing decision must surface in the
+    ``progress_callback`` stream so #211 re-measurement can verify the
+    new path is being taken from the worker logs alone (since vendor's
+    ``mp.spawn`` workers re-import in fresh interpreters and don't see
+    parent-process state, the parent-side log + the config dict pickled
+    to the workers is the auditable record)."""
+    fake_root = tmp_path / "sam_m3"
+    (fake_root / "sam2_lora").mkdir(parents=True)
+    (fake_root / "sam2.1" / "configs").mkdir(parents=True)
+    monkeypatch.setattr(sam_mod, "M3_ROOT", fake_root, raising=True)
+    (fake_root / "sam2_lora" / "args.json").write_text(
+        (FIXTURES / "sam_m3_args.json").read_text()
+    )
+    yaml_path = fake_root / "sam2.1" / "configs" / "sam2.1_hiera_l.yaml"
+    yaml_path.write_text("# stub yaml\n")
+    merged_m3 = _make_fake_merged_m3(tmp_path)
+    monkeypatch.setenv("SAM_MERGED_M3_PATH", str(merged_m3))
+
+    images_dir = tmp_path / "imgs"
+    images_dir.mkdir()
+    (images_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    monkeypatch.setattr(sam_mod, "_safe_ensure_sam2_importable", MagicMock())
+    monkeypatch.setattr(
+        sam_mod, "_resolve_sam2_repo", lambda: fake_root / "sam2_repo_stub"
+    )
+    fake_vendor = MagicMock()
+    fake_vendor.load_training_args = MagicMock(name="orig_loader")
+    monkeypatch.setattr(sam_mod, "_vendor_amg_module", lambda: fake_vendor)
+    monkeypatch.setattr(
+        sam_mod, "_vendor_run_multi_process", lambda *a, **kw: []
+    )
+
+    messages: list[str] = []
+
+    def cb(pct: float, msg: str) -> None:
+        messages.append(msg)
+
+    sam_mod._run_sam_multi_gpu(
+        images_dir=images_dir,
+        weights_path=fake_root / "sam2_lora" / "best_model.pth",
+        out_dir=out_dir,
+        n_gpus=8,
+        progress_callback=cb,
+    )
+
+    # At least one message must mention the chosen routing + the merged_m3
+    # basename (auditable from logs).
+    routing_msgs = [m for m in messages if "merged_m3" in m]
+    assert routing_msgs, f"expected merged_m3 routing log; got {messages}"
+    assert "merged_m3.pt" in routing_msgs[0]
+
+
+def test_run_sam_multi_gpu_logs_lora_runtime_fallback_to_progress_callback(
+    tmp_path, monkeypatch
+):
+    """Symmetric to the merged_m3 logging test: the LoRA-runtime fallback
+    must also be auditable in the progress_callback stream so a
+    re-measurement can prove which path was taken without trawling
+    nvidia-smi."""
+    fake_root = tmp_path / "sam_m3"
+    (fake_root / "sam2_lora").mkdir(parents=True)
+    (fake_root / "sam2.1" / "configs").mkdir(parents=True)
+    monkeypatch.setattr(sam_mod, "M3_ROOT", fake_root, raising=True)
+    (fake_root / "sam2_lora" / "args.json").write_text(
+        (FIXTURES / "sam_m3_args.json").read_text()
+    )
+    monkeypatch.delenv("SAM_MERGED_M3_PATH", raising=False)
+
+    images_dir = tmp_path / "imgs"
+    images_dir.mkdir()
+    (images_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    monkeypatch.setattr(sam_mod, "_safe_ensure_sam2_importable", MagicMock())
+    monkeypatch.setattr(
+        sam_mod, "_resolve_sam2_repo", lambda: fake_root / "sam2_repo_stub"
+    )
+    fake_vendor = MagicMock()
+    fake_vendor.load_training_args = MagicMock(name="orig_loader")
+    monkeypatch.setattr(sam_mod, "_vendor_amg_module", lambda: fake_vendor)
+    monkeypatch.setattr(
+        sam_mod, "_vendor_run_multi_process", lambda *a, **kw: []
+    )
+
+    messages: list[str] = []
+    sam_mod._run_sam_multi_gpu(
+        images_dir=images_dir,
+        weights_path=fake_root / "sam2_lora" / "best_model.pth",
+        out_dir=out_dir,
+        n_gpus=8,
+        progress_callback=lambda pct, msg: messages.append(msg),
+    )
+
+    routing_msgs = [m for m in messages if "lora-runtime" in m]
+    assert routing_msgs, f"expected lora-runtime routing log; got {messages}"
+
+
+def test_run_sam_multi_gpu_config_dict_is_pickle_safe(tmp_path, monkeypatch):
+    """Vendor ``run_multi_process`` uses ``mp.get_context("spawn").Pool``
+    which pickles the config dict to each worker. The routing decision
+    therefore lives in the dict (not in module-level state or
+    monkeypatches) so it survives spawn re-import. This test asserts the
+    config dict round-trips through ``pickle`` cleanly with the
+    merged_m3 keys set."""
+    import pickle
+
+    fake_root = tmp_path / "sam_m3"
+    (fake_root / "sam2_lora").mkdir(parents=True)
+    (fake_root / "sam2.1" / "configs").mkdir(parents=True)
+    monkeypatch.setattr(sam_mod, "M3_ROOT", fake_root, raising=True)
+    (fake_root / "sam2_lora" / "args.json").write_text(
+        (FIXTURES / "sam_m3_args.json").read_text()
+    )
+    yaml_path = fake_root / "sam2.1" / "configs" / "sam2.1_hiera_l.yaml"
+    yaml_path.write_text("# stub yaml\n")
+    merged_m3 = _make_fake_merged_m3(tmp_path)
+    monkeypatch.setenv("SAM_MERGED_M3_PATH", str(merged_m3))
+
+    images_dir = tmp_path / "imgs"
+    images_dir.mkdir()
+    (images_dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    monkeypatch.setattr(sam_mod, "_safe_ensure_sam2_importable", MagicMock())
+    monkeypatch.setattr(
+        sam_mod, "_resolve_sam2_repo", lambda: fake_root / "sam2_repo_stub"
+    )
+    fake_vendor = MagicMock()
+    fake_vendor.load_training_args = MagicMock(name="orig_loader")
+    monkeypatch.setattr(sam_mod, "_vendor_amg_module", lambda: fake_vendor)
+
+    captured_cfg: dict = {}
+
+    def fake_run_multi_process(images, output_dir, config, num_gpus):
+        # Round-trip through pickle to simulate spawn-pool serialisation.
+        captured_cfg["original"] = config
+        captured_cfg["roundtrip"] = pickle.loads(pickle.dumps(config))
+        return []
+
+    monkeypatch.setattr(sam_mod, "_vendor_run_multi_process", fake_run_multi_process)
+
+    sam_mod._run_sam_multi_gpu(
+        images_dir=images_dir,
+        weights_path=fake_root / "sam2_lora" / "best_model.pth",
+        out_dir=out_dir,
+        n_gpus=8,
+        progress_callback=None,
+    )
+
+    # Identical after round-trip → spawn workers see the same routing decision.
+    assert captured_cfg["roundtrip"] == captured_cfg["original"]
+    # Spot-check the routing keys made it.
+    assert captured_cfg["roundtrip"]["use_original_sam2"] is True
+    assert captured_cfg["roundtrip"]["checkpoint"] == str(merged_m3)

@@ -3,13 +3,44 @@
 
 Hardware-gated multi-GPU branch: when ``torch.cuda.device_count() >= 2``,
 delegate to vendor ``run_amg_v2.run_multi_process`` (spawn pool, GPU pin,
-per-image ordering — see vendor lines 1069–1149) using the **M3 asset
-bundle** laid out under ``M3_ROOT`` (default ``/opt/sam/m3``):
+per-image ordering — see vendor lines 1069–1149).
 
-    /opt/sam/m3/sam2.1/sam2.1_hiera_l.pt           # base SAM2.1 ckpt
-    /opt/sam/m3/sam2.1/configs/sam2.1_hiera_l.yaml # config
-    /opt/sam/m3/sam2_lora/best_model.pth           # LoRA fine-tune
-    /opt/sam/m3/sam2_lora/args.json                # LoRA hyperparams
+The multi-GPU branch is **dual-mode** (#209, see docs/sam-ops.md §15/§16):
+
+* **merged_m3 (preferred)** — when ``SAM_MERGED_M3_PATH`` env var is set
+  and points at a non-empty ``.pt`` file, we route the spawn workers
+  through vendor ``build_sam2_from_yaml`` (``use_original_sam2=True``)
+  with the merged_m3 ``.pt`` as ``checkpoint`` and the M3 bundle's
+  ``sam2.1_hiera_l.yaml`` as ``config_yaml``. The merged_m3 artifact has
+  LoRA folded into the base weights, so each forward pass skips the
+  per-call adapter math. This recovers the ~3.06× per-card slowdown
+  documented in §15 (12.16 s/card-img on un-merged M3 vs 3.98 s/img
+  baseline on the single-GPU ``merged.pt`` path).
+* **lora-runtime (fallback)** — when ``SAM_MERGED_M3_PATH`` is unset
+  OR points at a missing/empty file, we route through vendor
+  ``build_sam2_finetuned`` (``use_original_sam2=False``) which loads
+  the base SAM2.1 ckpt + applies LoRA at runtime from the M3 4-asset
+  bundle under ``M3_ROOT`` (default ``/opt/sam/m3``):
+
+      /opt/sam/m3/sam2.1/sam2.1_hiera_l.pt           # base SAM2.1 ckpt
+      /opt/sam/m3/sam2.1/configs/sam2.1_hiera_l.yaml # config
+      /opt/sam/m3/sam2_lora/best_model.pth           # LoRA fine-tune
+      /opt/sam/m3/sam2_lora/args.json                # LoRA hyperparams
+
+  This path is the existing behaviour and remains the source of
+  correctness truth until the merged_m3 build (§16) has parity-checked
+  outputs in production.
+
+**Spawn-worker survival.** Vendor ``run_multi_process`` calls
+``mp.get_context("spawn").Pool`` (vendor line 1113) — workers re-import
+``run_amg_v2`` in fresh interpreters and do NOT see parent-process
+monkeypatches. The routing decision therefore lives in the **config
+dict** that vendor pickles to each worker (vendor passes ``config`` into
+``worker_process_images`` which reads ``config["use_original_sam2"]``
+at vendor line 990). Because the dict round-trips through pickle, the
+merged_m3 vs lora-runtime choice survives spawn re-import deterministically
+without env-var tricks inside the worker. The env var
+``SAM_MERGED_M3_PATH`` is read once in the parent before fanning out.
 
 Single-GPU / no-CUDA hosts continue through ``_vendor_infer`` (the
 ``run_amg_v2_inference.infer`` ``state["model_config"]`` shortcut at
@@ -27,7 +58,12 @@ Two vendor side effects are neutralised in our adapter so we can call
    start of every multi-GPU run with ``_patched_load_training_args``,
    which rewrites ``model_dir`` / ``checkpoint`` / ``config`` to the
    M3-local equivalents *in memory* (the on-disk file is never
-   touched).
+   touched). Note: this only affects the parent — spawn workers
+   re-import vendor and use ``args.json`` raw, but the prod-path
+   symlinks installed by ``sam-gpu-worker-userdata.sh`` step 5c
+   resolve those raw paths to the M3 layout. Under the merged_m3
+   path this monkeypatch is inert (vendor never calls
+   ``load_training_args`` when ``use_original_sam2=True``).
 """
 from __future__ import annotations
 
@@ -177,6 +213,35 @@ def _patched_load_training_args(ckpt_dir: Path) -> dict:
     return _load_and_patch_args(Path(ckpt_dir))
 
 
+def _resolve_merged_m3_path() -> Optional[Path]:
+    """Discover the pre-merged M3 artifact (#209, docs/sam-ops.md §16).
+
+    Returns the absolute path to ``merged_m3.pt`` iff:
+        1. ``SAM_MERGED_M3_PATH`` env var is set (populated by
+           ``sam-gpu-worker-userdata.sh`` step 5d), AND
+        2. The path resolves to an existing file, AND
+        3. The file is non-empty (defensive against partial downloads
+           the userdata SHA256 check did not catch).
+
+    Returns ``None`` on any miss → caller falls back to the LoRA-runtime
+    path. Soft-miss is **expected** when a worker boots before the
+    merged_m3 has been published to S3; the userdata script is
+    deliberately tolerant of an empty ``${S3_MERGED_M3_PFX}`` listing.
+    """
+    raw = os.environ.get("SAM_MERGED_M3_PATH")
+    if not raw:
+        return None
+    path = Path(raw)
+    try:
+        if not path.is_file():
+            return None
+        if path.stat().st_size <= 0:
+            return None
+    except OSError:
+        return None
+    return path
+
+
 def _build_vendor_config() -> dict[str, Any]:
     """Construct the config dict consumed by vendor
     ``worker_process_images`` (vendor lines 988–1053) for the M3 asset
@@ -233,15 +298,34 @@ def _run_sam_multi_gpu(
     n_gpus: int,
     progress_callback: Optional[ProgressCallback],
 ) -> dict:
-    """Multi-GPU branch — delegate to vendor ``run_multi_process`` using
-    the M3 asset bundle.
+    """Multi-GPU branch — delegate to vendor ``run_multi_process``.
+
+    **Dual-mode routing** (#209, docs/sam-ops.md §15/§16):
+
+    * If ``SAM_MERGED_M3_PATH`` resolves (via :func:`_resolve_merged_m3_path`)
+      we flip ``config["use_original_sam2"]=True`` and point
+      ``checkpoint`` at the pre-merged ``.pt`` + ``config_yaml`` at the
+      M3 bundle's ``sam2.1_hiera_l.yaml``. Vendor
+      ``worker_process_images`` (line 990) then dispatches to
+      ``build_sam2_from_yaml`` — the LoRA-folded single-``.pt`` path
+      that produced the 3.98 s/img baseline.
+    * Otherwise we keep ``use_original_sam2=False`` and route through
+      ``build_sam2_finetuned`` (LoRA-applied-at-runtime, the existing
+      M3 4-asset path).
+
+    The routing decision lives in the config dict and is therefore
+    pickle-safe across vendor's ``mp.spawn`` workers. The routing
+    choice is logged to ``progress_callback`` so #211 re-measurement
+    can confirm the new path is being taken without scraping
+    nvidia-smi.
 
     Returns the same summary shape as the single-GPU path:
         {"images", "masks_total", "errors", "per_image": {filename: {n_masks, error}}}
 
     ``weights_path`` is accepted for signature symmetry with the
     single-GPU path but is ignored here — multi-GPU resolves the
-    LoRA + base ckpt via ``M3_ROOT``.
+    LoRA + base ckpt via ``M3_ROOT`` (or the merged_m3 ``.pt`` via
+    env var).
     """
     images = _list_images(images_dir)
     total = len(images)
@@ -263,6 +347,11 @@ def _run_sam_multi_gpu(
     # Monkeypatch vendor binding so build_sam2_finetuned sees rewritten
     # paths instead of the raw prod absolutes baked into args.json. We
     # patch the attribute on the vendor module (NOT the on-disk file).
+    # Note: under the merged_m3 routing this patch is inert (vendor only
+    # calls ``load_training_args`` from inside ``build_sam2_finetuned``);
+    # we still install it because the patch is cheap and we want the
+    # parent-side fallback to work even if ``_resolve_merged_m3_path``
+    # is wrong about the artifact's validity at process-start time.
     _vendor_amg = _vendor_amg_module()
     original_loader = _vendor_amg.load_training_args
     _vendor_amg.load_training_args = _patched_load_training_args
@@ -270,6 +359,35 @@ def _run_sam_multi_gpu(
         config = _build_vendor_config()
         # Ensure sam2_repo is present in the dict regardless of probe outcome.
         config["sam2_repo"] = str(sam2_repo)
+
+        # Dual-mode override: prefer merged_m3 single-.pt path when the
+        # artifact is on disk. The decision is encoded in the config
+        # dict so it pickles cleanly to vendor's spawn workers.
+        merged_m3 = _resolve_merged_m3_path()
+        if merged_m3 is not None:
+            yaml_path = M3_ROOT / "sam2.1" / "configs" / "sam2.1_hiera_l.yaml"
+            config["use_original_sam2"] = True
+            config["config_yaml"] = str(yaml_path)
+            config["checkpoint"] = str(merged_m3)
+            if progress_callback is not None:
+                size_mb = merged_m3.stat().st_size / (1024 * 1024)
+                progress_callback(
+                    0.0,
+                    f"routing: merged_m3 ({merged_m3.name}, {size_mb:.0f} MiB) "
+                    f"→ build_sam2_from_yaml (LoRA pre-merged)",
+                )
+        else:
+            # LoRA-runtime fallback log mirrors the merged_m3 log so a
+            # re-measurement can grep either string and know which path
+            # was taken.
+            if progress_callback is not None:
+                ckpt_basename = config["ckpt_file"]
+                progress_callback(
+                    0.0,
+                    f"routing: lora-runtime ({ckpt_basename} from "
+                    f"{Path(config['ckpt_dir']).name}) "
+                    f"→ build_sam2_finetuned (LoRA applied per forward)",
+                )
 
         vendor_results = _vendor_run_multi_process(
             images, out_dir, config, n_gpus
