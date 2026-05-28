@@ -1499,3 +1499,160 @@ script). Built from scratch (not `--source-version`) per the v13
 silent-spot-merge lesson. SG/IAM/AMI/Subnet match v14 exactly.
 
 Pending: re-run #211 against LT v15 (separate dispatch).
+
+## 17.1 #211 v3 attempt — 2026-05-28 (FAIL: AMI baked stale env, RDS auth re-blocker)
+
+**Outcome:** v3 launch from LT v15 booted cleanly in **~92 s** (faster than the v2
+~1m54s baseline because the AMI's idempotent `done_stamp` markers short-circuited
+all 8 userdata steps), but the worker hit the **same** `password authentication
+failed` + `no pg_hba.conf entry for host..., no encryption` errors that #217's
+fix-pair (`196824a` sslmode=require + `d68a9a0` env-file quoting) was supposed to
+resolve. Aborted per the brief's hard rule ("if RDS auth still fails — ABORT, do
+NOT loop"). **No SAM job ran.** Cost: **$0.92** of the $9 cap.
+
+### 17.1.1 Run summary
+
+| Field | Value |
+|---|---|
+| Branch | `feat/migration-cutover` HEAD `37ebd35` |
+| LT | `lt-09d01bf17ff7bed30` v15 (on-demand, gzip user-data, ami-0b7ec5ff47a1eff11) |
+| Instance | `i-03c0ed2aafd915079` — `g6e.48xlarge` on-demand in `us-east-2c` (172.31.43.70) |
+| AZ override | LT pins `subnet-0fe8558512beea68a` (us-east-2a) → InsufficientCapacity in 2a → re-launched into `subnet-09f76839fd0c109a9` (us-east-2c) via `--network-interfaces SubnetId=...` |
+| Spot price | n/a — on-demand at $15.07/hr |
+| Wall billed | 3m40s (launch → terminate) |
+| Cost | **$0.92** (3m40s × $15.07/hr) |
+| Verdict | **FAIL** — environment defect, not measurement run |
+
+### 17.1.2 Boot timeline (T0–T4 + Δ)
+
+Faster than v2 dispatch-6 (~1m54s) because the AMI was pre-warmed and all 8
+`done_stamp`-gated steps short-circuited.
+
+| Marker | Absolute UTC | Δ from prior |
+|---|---|---|
+| **T0** launch (run-instances response) | `2026-05-28T16:56:50Z` | — |
+| **T1** state→running | `2026-05-28T16:57:30Z` | +40 s |
+| **T3** user-data start (cloud-init init-local) | `2026-05-28T16:57:43Z` | +13 s after T1 |
+| **T2** SSM Online | `2026-05-28T16:58:07Z` | +24 s after T3 |
+| **T4** user-data done (`=== sam-gpu-worker-userdata done: ...Z ===` marker, cloud-init finished) | `2026-05-28T16:58:22Z` | +15 s after T2 |
+| Worker `active (running)` | `2026-05-28T16:57:47Z` | (parallel to user-data — service was already enabled by AMI) |
+| First DB auth failure in journal | `2026-05-28T16:58:37Z` | +15 s after T4 |
+| Terminate API call | `2026-05-28T17:00:30Z` | +2m08s after T4 |
+
+**Total boot (T0 → T4): 1 m 32 s** — vs the v2 ~1m54s baseline that's a 22 s
+improvement, attributable entirely to AMI cache hits on apt/cuda/python/uv/
+repo/deps/weights/m3-assets/m3-prod-symlinks/merged-m3-weights done-stamps.
+
+T2 < T3 by 8 s **arithmetically** because SSM Online and user-data start are
+independent paths from launch — SSM agent is started by the AMI's init system
+directly, while user-data is part of cloud-init's init-local stage. The two
+serialize differently. Real "user-data started" timestamp here is T3 from
+cloud-init's own log header; T2 just gates when *we* could *observe* the box.
+
+### 17.1.3 Root cause — AMI bakes a pre-`d68a9a0` env file
+
+Worker journal shows back-to-back failures:
+
+```
+psycopg.pool error connecting in 'pool-1': connection failed:
+  connection to server at "172.31.36.17", port 5432 failed:
+  FATAL: password authentication failed for user "houk"
+  connection to server at "172.31.36.17", port 5432 failed:
+  FATAL: no pg_hba.conf entry for host "172.31.43.70", user "houk",
+         database "qpress", no encryption
+```
+
+Two distinct symptoms in one error chain:
+
+1. **"password authentication failed"** — the env file on disk has
+   `SAA_DB_PASSWORD=>7F)Bzvy<fmuFkpQnm!7tR6#oVZ.` (no quotes). Bash sources it
+   via systemd `EnvironmentFile=`, hits the unescaped `(` and silently fails
+   with `syntax error near unexpected token ')'`. Result: worker process
+   inherits `SAA_DB_PASSWORD=""` (length zero), libpq sends an empty password,
+   RDS returns auth failure.
+
+2. **"no pg_hba.conf entry ... no encryption"** — the `, no encryption` suffix
+   is libpq's signal that the TCP attempt was non-SSL. With `rds.force_ssl=1`,
+   RDS rejects the unencrypted attempt with the classic `pg_hba` red-herring.
+   This is the symptom commit `196824a` (sslmode=require) was supposed to
+   eliminate.
+
+**Why the fixes weren't applied — same root for both:** the AMI
+`ami-0b7ec5ff47a1eff11` was baked **before** commits `196824a`/`d68a9a0`
+landed. Userdata uses `done_stamp` idempotency markers under
+`/var/lib/sam-gpu-bootstrap/*.done`. On first boot of a fresh instance from
+this AMI, `done_stamp env` is **already present** (from the AMI bake), so the
+env-file rewrite step at userdata line 349 (`if ! done_stamp env; then ...`)
+**short-circuits** and the *baked-in* unquoted env file from the pre-fix era
+remains on disk. Same story for the deployed Python source: the AMI's
+`/opt/sam/stand-alone-analyzer/` checkout is at a pre-`196824a` commit
+because `done_stamp repo` short-circuits the `git clone` step too.
+
+Verification (from the failed instance via SSM):
+
+```
+$ sudo cat /etc/flake-analysis-worker.env
+SAA_DB_PASSWORD=>7F)Bzvy<fmuFkpQnm!7tR6#oVZ.    # ← unquoted
+$ sudo bash -c 'source /etc/flake-analysis-worker.env; echo len=${#SAA_DB_PASSWORD}'
+len=0                                              # ← shell-source mangles to empty
+$ grep -nE SAA_DB_PASSWORD /opt/sam/stand-alone-analyzer/scripts/aws/sam-gpu-worker-userdata.sh
+273:SAA_DB_PASSWORD=${DB_PASSWORD}              # ← AMI's repo copy: pre-d68a9a0
+$ # whereas the LT v15 user-data blob (decoded) is correct:
+$ grep -nE SAA_DB_PASSWORD /tmp/lt15_userdata.sh
+373:SAA_DB_PASSWORD="${DB_PASSWORD}"             # ← LT v15: post-d68a9a0
+```
+
+The line-number drift (273 vs 373) is itself the smoking gun: the in-AMI
+script is **531 lines shorter** than the post-`d320029`/`cfe1a98` version
+that LT v15 ships. The AMI was baked at a much earlier commit.
+
+### 17.1.4 Routing log — not exercised
+
+The merged_m3 routing fix (#209, commit `947cc3d`, log line
+`"routing: merged_m3 (...)"`) was **not exercised** because no SAM job was
+deferred. Cannot confirm or refute the merged_m3 routing on this attempt.
+
+### 17.1.5 Fix path — needs AMI rebuild OR done-stamp invalidation
+
+The #217 diagnosis was correct in identifying the bugs, but the fixes only
+land on instances launched from a **freshly-baked AMI** that includes the
+post-`d68a9a0` script + post-`196824a` Python source. Three options for v4:
+
+1. **Rebuild the AMI** with the current `feat/migration-cutover` HEAD baked
+   in. Highest fidelity. Owner-gated since AMI cost/lifecycle is in scope.
+
+2. **Patch userdata to bust the done-stamps for `repo` and `env`** on every
+   boot. Cheapest. Low blast radius — the done-stamp mechanism is *for*
+   exactly this scenario. Concrete edit: under `if ! done_stamp env;` and
+   `if ! done_stamp repo;`, also `rm -f "${STATE_DIR}/env.done" "${STATE_DIR}/repo.done"`
+   at the top of userdata (or invert the gate to "if not bootstrap-fresh-marker").
+   Risk: each boot re-clones the repo and re-writes the env, adding ~20 s.
+   Acceptable.
+
+3. **Pin LT v15 to a clean AMI** (e.g., the original `ami-0b7ec5ff47a1eff11`
+   *before* the SAM bake), so userdata runs end-to-end. Defeats the purpose
+   of pre-baking — boot would jump from ~1m32s back to ~10–15min.
+
+**Recommendation: option 2 + an LT v16.** Surgical, fast, doesn't require
+re-baking the AMI. Owner sign-off needed only for the LT new-version
+(no-cost, reversible). File as a follow-up to this entry.
+
+### 17.1.6 Cleanup performed
+
+- Instance `i-03c0ed2aafd915079` — `terminate-instances` issued at
+  `2026-05-28T17:00:30Z` (compute billing stops at this API call regardless
+  of when state reaches `terminated`). State observed `shutting-down` for
+  several minutes after — normal for g6e.48xlarge (192-vCPU host teardown).
+- 100-image S3 staging at `s3://qpress-uploads/internal/sam/scan6-100/`
+  (100 PNG, 271 MiB) — **left in place** for the v4 attempt. Server-side
+  copied from `scan6-3648/` so no PM-side egress.
+- No SG / RDS / IAM / LT changes. SG `sg-0e57146d5b6d42452` ingress to RDS
+  unchanged (per #217 the rule was already correct — the failure is upstream
+  of network reachability).
+- No new artifacts on the bastion.
+
+### 17.1.7 Verdict
+
+**FAIL — environment defect, not algorithmic.** The merged_m3 routing claim
+from #209 remains unverified at 8-GPU scale. v4 cannot proceed against
+`ami-0b7ec5ff47a1eff11` without one of the §17.1.5 mitigations.
