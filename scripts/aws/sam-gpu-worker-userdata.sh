@@ -134,6 +134,20 @@ if ! done_stamp deps; then
       --index-strategy unsafe-best-match \
       --extra-index-url https://download.pytorch.org/whl/cu124 \
       -r vendor/QPress-SAM-Flake/requirements-inference.txt
+  # M3 multi-GPU path needs `peft` (vendor `lora.apply_lora_to_sam2_components`
+  # → `from peft import LoraConfig, get_peft_model` at lora.py:11). The vendor
+  # `requirements-inference.txt` intentionally excludes peft (its top comment:
+  # "peft / bitsandbytes intentionally excluded — merged weights are used") —
+  # i.e. peft is out of scope for the merged.pt single-GPU path. Installing
+  # it here scopes the dep to the AMI/runtime where the M3 finetuned path is
+  # exercised, without contradicting vendor's design boundary. See
+  # docs/sam-ops.md §15.3 (item 2) and §15.6 (item 1) for the missing-dep
+  # failure mode that motivated this.
+  sudo -u "${RUN_USER}" -H \
+    env PATH="/usr/local/bin:/usr/bin:/bin" \
+    /usr/local/bin/uv pip install \
+      --python "${REPO_DIR}/.venv/bin/python" \
+      "peft>=0.8.0,<0.20"
   popd > /dev/null
   stamp deps
 fi
@@ -225,6 +239,47 @@ if ! done_stamp m3-assets; then
   ls -la "${M3_DIR}/sam2.1/" "${M3_DIR}/sam2.1/configs/" "${M3_DIR}/sam2_lora/"
   du -sh "${M3_DIR}"
   stamp m3-assets
+fi
+
+# --- Step 5c: vendor base-ckpt prod-path symlinks ------------------------
+# The M3 LoRA bundle's `args.json` was saved on the trainer host with
+# absolute paths baked in:
+#   model_dir   = "/home2/qpress/qpress/models/"
+#   checkpoint  = "/home2/qpress/qpress/models/sam2.1/sam2.1_hiera_l.pt"
+#   config      = "/home2/qpress/qpress/models/sam2.1/configs/sam2.1_hiera_l.yaml"
+# (see tests/fixtures/sam_m3_args.json). Vendor `build_sam2_finetuned`
+# (vendor/QPress-SAM-Flake/run_amg_v2.py:539) reads `train_args["checkpoint"]`
+# verbatim and `Path(...).exists()`-checks it before calling `build_sam2`.
+#
+# Our adapter `_load_and_patch_args` (src/flake_analysis/core/pipeline/sam.py:153)
+# rewrites those paths in memory via a monkeypatch on
+# `run_amg_v2.load_training_args`. **However**, vendor `run_multi_process`
+# (run_amg_v2.py:1113) uses `mp.get_context("spawn").Pool` — spawn workers
+# re-import `run_amg_v2` in fresh interpreters and never see the parent's
+# monkeypatch. They call the unpatched `load_training_args` and read the
+# raw prod paths. Hence the filesystem symlinks: the only way to satisfy
+# the spawn-worker subprocesses without touching `args.json` on disk or
+# rewriting vendor.
+#
+# See docs/sam-ops.md §15.3 (item 1) and §15.6 (item 2). Permanent fix
+# (rewrite vendor's `args.json` model_dir at AMI/asset bake time, or have
+# the worker entry-point materialize a patched args.json in a per-run
+# scratch dir) is filed for a separate task.
+if ! done_stamp m3-prod-symlinks; then
+  echo "[6c/8] create vendor prod-path symlinks for spawn workers"
+  PROD_MODELS_ROOT="/home2/qpress/qpress/models"
+  mkdir -p "${PROD_MODELS_ROOT}/sam2.1"
+  ln -sfn "${M3_DIR}/sam2.1/sam2.1_hiera_l.pt" \
+    "${PROD_MODELS_ROOT}/sam2.1/sam2.1_hiera_l.pt"
+  ln -sfn "${M3_DIR}/sam2.1/configs" \
+    "${PROD_MODELS_ROOT}/sam2.1/configs"
+  ln -sfn "${M3_DIR}/sam2_lora" \
+    "${PROD_MODELS_ROOT}/sam2_lora"
+  # Sanity: the file the spawn worker will stat() must resolve.
+  test -f "${PROD_MODELS_ROOT}/sam2.1/sam2.1_hiera_l.pt"
+  test -d "${PROD_MODELS_ROOT}/sam2.1/configs"
+  ls -la "${PROD_MODELS_ROOT}/sam2.1/" "${PROD_MODELS_ROOT}/sam2_lora/" || true
+  stamp m3-prod-symlinks
 fi
 
 # --- Step 6: pull DB creds from SSM + write env file ---------------------
