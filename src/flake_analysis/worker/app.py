@@ -24,21 +24,24 @@ from flake_analysis.db.url import DbSettings
 def _connector_kwargs() -> dict:
     """Build psycopg connection kwargs from SAA_DB_* env.
 
-    psycopg accepts ``host/port/user/password/dbname`` as keyword args, so
-    we pass them straight through rather than building a DSN string. This
-    sidesteps any percent-escape edge cases in passwords.
+    procrastinate's PsycopgConnector forwards ``**kwargs`` directly to
+    ``psycopg_pool.AsyncConnectionPool``, which does NOT accept
+    ``host/port/user/...`` as top-level args — those must be wrapped in
+    a ``kwargs={...}`` dict that the pool then forwards to ``connect()``.
+    Passing them as a dict (rather than a DSN string) sidesteps any
+    percent-escape edge cases in passwords.
     """
     s = DbSettings()
-    kwargs: dict = {
+    conn_params: dict = {
         "host": s.db_host,
         "port": s.db_port,
         "dbname": s.db_name,
     }
     if s.db_user:
-        kwargs["user"] = s.db_user
+        conn_params["user"] = s.db_user
     if s.db_password:
-        kwargs["password"] = s.db_password
-    return kwargs
+        conn_params["password"] = s.db_password
+    return {"kwargs": conn_params}
 
 
 # Module-level App. Importing this module does NOT open the pool — that
