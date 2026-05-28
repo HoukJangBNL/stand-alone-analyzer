@@ -1807,3 +1807,46 @@ through three attempts now. Cumulative spend across v2+v3+v4:
 unblock all three issues at once (env-file quoting, sslmode, repo
 ownership). Until then, LT v17 with `safe.directory` config + the v16
 done-stamp invalidation is the minimum-cost workaround.
+
+## 17.3 AMI bake builder — `sam-bake-ami.sh` (#222)
+
+RCA #221 found that `ami-0b7ec5ff47a1eff11` was hand-baked with no script
+in repo. `scripts/aws/sam-bake-ami.sh` (+ `sam-bake-ami-provision.sh`)
+captures the bake as a reviewable, idempotent, self-validating builder.
+
+### 17.3.1 Flags
+- `--ref <git-ref>` — override default `feat/migration-cutover` HEAD.
+- `--skip-validation` — skip post-bake t3.small validation (NOT recommended).
+- `--keep-builder` — on bake failure, keep builder for forensics.
+- `--dry-run` — resolve all inputs, print plan, exit 0 (no AWS writes).
+
+### 17.3.2 What the script guarantees (RCA #221 BLOCKER fixes)
+- §1 Repo state — `/opt/sam/stand-alone-analyzer/` cloned as root, `.git`
+  root-owned, `safe.directory` baked into root global gitconfig.
+- §3 State stamps — `/opt/sam/state/` scrubbed before snapshot. NO baked
+  `done_stamp`s. Userdata creates them on first real boot.
+- §4 Env file — `/etc/flake-analysis-worker.env` NOT created at bake.
+  Userdata writes from SSM on first boot.
+- §7 peft — installed at bake (`uv pip install "peft>=0.8.0,<0.20"`).
+- Manifest — `/etc/flake-analysis-bootstrap-info.json` records baked SHAs +
+  peft/torch/CUDA/driver versions. AMI tagged
+  `Project=qpress-sam, Phase=P4.4, BakedFrom=<sha8>, BakedAt=<iso>,
+  Builder=sam-bake-ami.sh, RCAFix=#221, Status=ready|validation-failed`.
+
+### 17.3.3 Validation contract
+After AMI=available, the script launches a t3.small from the new AMI and
+asserts via SSM:
+- manifest exists + non-empty + has `baked_from_sha`/`peft_version`/`torch_version`
+- no `*.done` stamps under `/opt/sam/state/`
+- no `/etc/flake-analysis-worker.env`
+- `/opt/sam/stand-alone-analyzer/.git` is root-owned
+- `python -c "import peft"` succeeds
+
+If any check fails, the AMI is preserved (NOT deregistered) but tagged
+`Status=validation-failed`; the script exits non-zero. Validator instance
+is always terminated.
+
+### 17.3.4 Cost + runtime
+Builder g6.xlarge spot ~30 min (~$0.60), validator t3.small ~5 min
+(~negligible), EBS snapshot ~$0.20. Total ~$1 in transient spend; the
+resulting AMI itself accrues snapshot storage at standard EBS rates.
