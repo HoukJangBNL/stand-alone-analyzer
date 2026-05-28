@@ -1,0 +1,11 @@
+{
+    "model_dir": "/home2/qpress/qpress/models/",
+    "checkpoint": "/home2/qpress/qpress/models/sam2.1/sam2.1_hiera_l.pt",
+    "config": "/home2/qpress/qpress/models/sam2.1/configs/sam2.1_hiera_l.yaml",
+    "lora_image_encoder_rank": 16,
+    "lora_alpha": 32.0,
+    "lora_dropout": 0.1,
+    "lora_add_mlp": false,
+    "lora_apply_memory": false,
+    "lora_train_decoder": true
+}

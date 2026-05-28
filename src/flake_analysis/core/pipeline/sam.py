@@ -1,22 +1,57 @@
-"""SAM2 inference adapter — bridges vendor run_amg_v2_inference into
-our ProgressCallback (pct, msg) protocol used by other pipeline steps.
+"""SAM2 inference adapter — bridges vendor ``run_amg_v2`` /
+``run_amg_v2_inference`` into our ``ProgressCallback(pct, msg)`` protocol.
 
 Hardware-gated multi-GPU branch: when ``torch.cuda.device_count() >= 2``,
-delegate to vendor ``run_amg_v2.run_multi_process`` (spawn-pool, GPU pin,
-per-image-id ordering — see vendor lines 1069–1149). Single-GPU /
-no-CUDA hosts continue through ``_vendor_infer`` unchanged.
+delegate to vendor ``run_amg_v2.run_multi_process`` (spawn pool, GPU pin,
+per-image ordering — see vendor lines 1069–1149) using the **M3 asset
+bundle** laid out under ``M3_ROOT`` (default ``/opt/sam/m3``):
+
+    /opt/sam/m3/sam2.1/sam2.1_hiera_l.pt           # base SAM2.1 ckpt
+    /opt/sam/m3/sam2.1/configs/sam2.1_hiera_l.yaml # config
+    /opt/sam/m3/sam2_lora/best_model.pth           # LoRA fine-tune
+    /opt/sam/m3/sam2_lora/args.json                # LoRA hyperparams
+
+Single-GPU / no-CUDA hosts continue through ``_vendor_infer`` (the
+``run_amg_v2_inference.infer`` ``state["model_config"]`` shortcut at
+vendor lines 51–56) — that path is **unchanged** by this branch.
+
+Two vendor side effects are neutralised in our adapter so we can call
+``run_multi_process`` without polluting process state:
+
+1. ``run_amg_v2.ensure_sam2_importable`` does ``os.chdir(sam2_repo)``
+   (P1.2 precedent). We wrap it in ``_safe_ensure_sam2_importable``
+   which save+restores ``os.getcwd()``.
+2. ``run_amg_v2.load_training_args`` returns the args.json *as-is*, and
+   the prod args.json carries absolute paths to the trainer host
+   (``/home2/qpress/...``). We monkeypatch the vendor binding at the
+   start of every multi-GPU run with ``_patched_load_training_args``,
+   which rewrites ``model_dir`` / ``checkpoint`` / ``config`` to the
+   M3-local equivalents *in memory* (the on-disk file is never
+   touched).
 """
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 from typing import Any, Callable, Optional
 
 
+# On-instance M3 asset root. Override via ``SAM_M3_ROOT`` env var (used
+# by tests so they don't depend on /opt/sam being writable). The
+# function-time read of ``M3_ROOT`` lets ``monkeypatch.setattr`` swap it.
+M3_ROOT: Path = Path(os.environ.get("SAM_M3_ROOT", "/opt/sam/m3"))
+
+
+# Module-level guard — vendor's chdir is only worth running once per
+# process; subsequent calls are no-ops in our wrapper.
+_SAM2_IMPORT_APPLIED: bool = False
+
+
 def _vendor_infer(*args, **kwargs):
-    """Lazy import of vendor module so unit tests can patch this seam
-    without requiring sam2/torch to be importable in CI."""
-    import sys
+    """Lazy import of vendor inference module so unit tests can patch
+    this seam without requiring sam2/torch in CI."""
     vendor_root = Path(__file__).resolve().parents[4] / "vendor" / "QPress-SAM-Flake"
     if str(vendor_root) not in sys.path:
         sys.path.insert(0, str(vendor_root))
@@ -27,7 +62,6 @@ def _vendor_infer(*args, **kwargs):
 def _vendor_run_multi_process(*args, **kwargs):
     """Lazy import of vendor multi-GPU pool. Mirrors ``_vendor_infer``'s
     sys.path shim so import-time has zero cost on CPU-only hosts."""
-    import sys
     vendor_root = Path(__file__).resolve().parents[4] / "vendor" / "QPress-SAM-Flake"
     if str(vendor_root) not in sys.path:
         sys.path.insert(0, str(vendor_root))
@@ -35,57 +69,133 @@ def _vendor_run_multi_process(*args, **kwargs):
     return run_multi_process(*args, **kwargs)
 
 
+def _vendor_amg_module():
+    """Lazy access to the vendor ``run_amg_v2`` module so we can swap
+    its ``load_training_args`` binding at runtime without forcing the
+    import on CPU-only hosts."""
+    vendor_root = Path(__file__).resolve().parents[4] / "vendor" / "QPress-SAM-Flake"
+    if str(vendor_root) not in sys.path:
+        sys.path.insert(0, str(vendor_root))
+    import run_amg_v2
+    return run_amg_v2
+
+
+def _vendor_ensure_sam2_importable(sam2_repo: Path) -> None:
+    """Lazy proxy for vendor's chdir-side-effecting helper. Tests stub
+    this seam; ``_safe_ensure_sam2_importable`` is what production code
+    calls."""
+    vendor_root = Path(__file__).resolve().parents[4] / "vendor" / "QPress-SAM-Flake"
+    if str(vendor_root) not in sys.path:
+        sys.path.insert(0, str(vendor_root))
+    from run_amg_v2 import ensure_sam2_importable
+    ensure_sam2_importable(sam2_repo)
+
+
 ProgressCallback = Callable[[float, str], None]
 
 
-# Vendor multi-process config-dict keys consumed by
-# ``worker_process_images`` (vendor lines 988–1053). Building this dict
-# is OUR responsibility — vendor only builds it inside its own ``main()``
-# from ``argparse`` defaults (lines 1212–1238). We mirror the default
-# values from ``parse_args`` (lines 880–947) verbatim.
-_VENDOR_CONFIG_KEYS = (
-    # Model paths
-    "sam2_repo", "use_original_sam2",
-    "config_yaml", "checkpoint",
-    "ckpt_dir", "ckpt_file",
-    # AMG params
-    "points_per_side", "points_per_batch",
-    "pred_iou_thresh", "stability_score_thresh", "box_nms_thresh",
-    "crop_n_layers", "crop_overlap_ratio",
-    "output_mode",
-    # Per-image side-effect controls
-    "flatfield_path",
-    "save_masks", "save_original", "save_overlays", "overlay_alpha",
-    "min_mask_region_area",
-    # Flat-enclosure rejection knobs
-    "reject_flat_enclosed",
-    "flat_rgb_std_thresh", "flat_edge_in_thresh",
-    "enclosure_edge_ratio", "enclosure_ring_width",
-)
+def _list_images(images_dir: Path) -> list[Path]:
+    """Match the extension whitelist used by ``run_amg_v2_inference._list_images``
+    so single-GPU and multi-GPU paths see identical input sets."""
+    exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
+    return sorted(p for p in images_dir.iterdir() if p.suffix.lower() in exts)
 
 
-def _build_vendor_config(weights_path: Path) -> dict[str, Any]:
-    """Construct the config dict consumed by vendor ``worker_process_images``.
+# ---------------------------------------------------------------------------
+# M3 path wiring
+# ---------------------------------------------------------------------------
 
-    Defaults match ``run_amg_v2.parse_args`` exactly (vendor lines ~880–947);
-    do NOT invent values here — drift between this dict and the vendor
-    parser is the #1 risk per the plan.
 
-    Path strategy: vendor's multi-GPU branch builds models via
-    ``build_sam2_finetuned(ckpt_dir, ckpt_file)`` or ``build_sam2_from_yaml``,
-    NOT via the dict-form ``state["model_config"]`` patch used by
-    ``run_amg_v2_inference.py:54``. We point ``ckpt_dir`` at the parent of
-    ``weights_path`` and ``ckpt_file`` at its basename — adapt downstream
-    if the merged-pt layout doesn't fit (acknowledged R#4 in the plan).
+def _resolve_sam2_repo() -> Path:
+    """Resolve the SAM2 source-tree directory the vendor needs on
+    ``sys.path``. Strategy: prefer an installed ``sam2`` package (devops
+    may pip-install it on the worker), fall back to env ``SAM_REPO_DIR``.
+
+    Vendor's ``ensure_sam2_importable`` will be called against this path,
+    and ``build_sam2_finetuned`` resolves Hydra configs by walking the
+    ``configs/`` tree under it.
     """
-    weights_path = Path(weights_path)
+    try:
+        import sam2  # noqa: F401
+        # Installed package — walk up from its module file to the package root.
+        import importlib
+        pkg = importlib.import_module("sam2")
+        pkg_path = Path(pkg.__file__).resolve().parent
+        # Hydra config resolution wants the directory ABOVE configs/, which
+        # is the sam2 package root.
+        return pkg_path
+    except ImportError:
+        pass
+    env = os.environ.get("SAM_REPO_DIR")
+    if env:
+        return Path(env)
+    raise RuntimeError(
+        "SAM2 source tree not locatable: install the `sam2` package or "
+        "set SAM_REPO_DIR to a directory containing the sam2/ tree."
+    )
+
+
+def _safe_ensure_sam2_importable(sam2_repo: Path) -> None:
+    """Wrap vendor's ``ensure_sam2_importable`` so its ``os.chdir`` side
+    effect doesn't leak into our process. Idempotent across one process
+    (the guard flag suppresses repeat calls)."""
+    global _SAM2_IMPORT_APPLIED
+    if _SAM2_IMPORT_APPLIED:
+        return
+    cwd_before = os.getcwd()
+    try:
+        _vendor_ensure_sam2_importable(sam2_repo)
+    finally:
+        os.chdir(cwd_before)
+    _SAM2_IMPORT_APPLIED = True
+
+
+def _load_and_patch_args(ckpt_dir: Path) -> dict:
+    """Read ``args.json`` from ``ckpt_dir`` and return a dict whose
+    ``model_dir`` / ``checkpoint`` / ``config`` fields point at the
+    M3-local layout — without writing to disk.
+
+    Prod args.json carries trainer-host absolute paths
+    (``/home2/qpress/qpress/models/...``); rewriting these is what makes
+    vendor ``build_sam2_finetuned`` find the base ckpt and yaml on the
+    worker.
+    """
+    args_path = ckpt_dir / "args.json"
+    with args_path.open("r") as f:
+        args = json.load(f)
+    # Patch in-memory — never mutate the on-disk file.
+    args["model_dir"] = str(M3_ROOT)
+    args["checkpoint"] = str(M3_ROOT / "sam2.1" / "sam2.1_hiera_l.pt")
+    args["config"] = str(M3_ROOT / "sam2.1" / "configs" / "sam2.1_hiera_l.yaml")
+    return args
+
+
+def _patched_load_training_args(ckpt_dir: Path) -> dict:
+    """Replacement for ``run_amg_v2.load_training_args`` — installed via
+    monkeypatch at the start of every multi-GPU run so vendor's
+    ``build_sam2_finetuned`` sees the rewritten paths."""
+    return _load_and_patch_args(Path(ckpt_dir))
+
+
+def _build_vendor_config() -> dict[str, Any]:
+    """Construct the config dict consumed by vendor
+    ``worker_process_images`` (vendor lines 988–1053) for the M3 asset
+    bundle. AMG defaults match ``run_amg_v2.parse_args`` verbatim
+    (lines ~880–947); do NOT invent values.
+
+    ``sam2_repo`` is left empty here — the caller (``_run_sam_multi_gpu``)
+    populates it after resolving the on-instance SAM2 source tree, so
+    config-build remains side-effect-free.
+    """
     return {
-        "sam2_repo": "../external/sam2",            # DEFAULT_SAM2_REPO
+        # Model paths — M3 layout. ``sam2_repo`` filled in by caller.
+        "sam2_repo": "",
         "use_original_sam2": False,
-        "config_yaml": None,
-        "checkpoint": None,
-        "ckpt_dir": str(weights_path.parent),
-        "ckpt_file": weights_path.name,
+        "config_yaml": None,        # only read when use_original_sam2=True
+        "checkpoint": None,         # only read when use_original_sam2=True
+        "ckpt_dir": str(M3_ROOT / "sam2_lora"),
+        "ckpt_file": "best_model.pth",
+        # AMG params (parser defaults).
         "points_per_side": 48,
         "points_per_batch": 64,
         "pred_iou_thresh": 0.78,
@@ -94,12 +204,14 @@ def _build_vendor_config(weights_path: Path) -> dict[str, Any]:
         "crop_n_layers": 1,
         "crop_overlap_ratio": 512 / 1500,
         "output_mode": "binary_mask",
+        # Per-image side-effect controls.
         "flatfield_path": None,
         "save_masks": True,
         "save_original": False,
         "save_overlays": False,
         "overlay_alpha": 0.45,
         "min_mask_region_area": 500,
+        # Flat-enclosure rejection knobs.
         "reject_flat_enclosed": False,
         "flat_rgb_std_thresh": 6.0,
         "flat_edge_in_thresh": 2.0,
@@ -108,11 +220,9 @@ def _build_vendor_config(weights_path: Path) -> dict[str, Any]:
     }
 
 
-def _list_images(images_dir: Path) -> list[Path]:
-    """Match the extension whitelist used by ``run_amg_v2_inference._list_images``
-    so single-GPU and multi-GPU paths see identical input sets."""
-    exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
-    return sorted(p for p in images_dir.iterdir() if p.suffix.lower() in exts)
+# ---------------------------------------------------------------------------
+# Multi-GPU orchestration
+# ---------------------------------------------------------------------------
 
 
 def _run_sam_multi_gpu(
@@ -123,39 +233,59 @@ def _run_sam_multi_gpu(
     n_gpus: int,
     progress_callback: Optional[ProgressCallback],
 ) -> dict:
-    """Multi-GPU branch — delegates to vendor ``run_multi_process`` and
-    translates its ``List[Dict]`` return into our summary shape.
+    """Multi-GPU branch — delegate to vendor ``run_multi_process`` using
+    the M3 asset bundle.
 
-    Vendor record shape per item (worker lines 1055–1061):
-        {image_info: {id, file_name, ...}, annotations, num_masks, mask_paths, image_path}
-    Our summary shape (matches single-GPU ``_vendor_infer`` consumer):
+    Returns the same summary shape as the single-GPU path:
         {"images", "masks_total", "errors", "per_image": {filename: {n_masks, error}}}
+
+    ``weights_path`` is accepted for signature symmetry with the
+    single-GPU path but is ignored here — multi-GPU resolves the
+    LoRA + base ckpt via ``M3_ROOT``.
     """
-    if progress_callback is not None:
-        progress_callback(0.0, f"starting 8-GPU fan-out across {n_gpus} GPUs")
-
     images = _list_images(images_dir)
-    config = _build_vendor_config(weights_path)
-    vendor_results = _vendor_run_multi_process(
-        images, out_dir, config, n_gpus,
-    )
+    total = len(images)
 
+    if progress_callback is not None:
+        progress_callback(0.0, f"starting {n_gpus}-GPU fan-out across {n_gpus} GPUs")
+
+    if total == 0:
+        summary = {"images": 0, "masks_total": 0, "errors": 0, "per_image": {}}
+        (out_dir / "per_image_results.json").write_text(json.dumps(summary, indent=2))
+        if progress_callback is not None:
+            progress_callback(1.0, "completed 0 images, 0 masks")
+        return summary
+
+    # Resolve sam2 repo + neutralise vendor's chdir.
+    sam2_repo = _resolve_sam2_repo()
+    _safe_ensure_sam2_importable(sam2_repo)
+
+    # Monkeypatch vendor binding so build_sam2_finetuned sees rewritten
+    # paths instead of the raw prod absolutes baked into args.json. We
+    # patch the attribute on the vendor module (NOT the on-disk file).
+    _vendor_amg = _vendor_amg_module()
+    original_loader = _vendor_amg.load_training_args
+    _vendor_amg.load_training_args = _patched_load_training_args
+    try:
+        config = _build_vendor_config()
+        # Ensure sam2_repo is present in the dict regardless of probe outcome.
+        config["sam2_repo"] = str(sam2_repo)
+
+        vendor_results = _vendor_run_multi_process(
+            images, out_dir, config, n_gpus
+        )
+    finally:
+        _vendor_amg.load_training_args = original_loader
+
+    # Vendor returns List[Dict] with ``image_info``, ``num_masks``, etc.
+    # Translate to our ``per_image`` map keyed by filename.
     per_image: dict[str, dict] = {}
-    masks_total = 0
-    errors = 0
-    for rec in vendor_results:
-        # ``image_info["file_name"]`` is the basename written by vendor
-        # ``process_image``; fall back to ``image_path`` for safety.
-        info = rec.get("image_info") or {}
-        filename = info.get("file_name") or Path(rec["image_path"]).name
-        n_masks = int(rec.get("num_masks", 0))
-        # Vendor ``run_multi_process`` does not surface per-image errors
-        # back through the result list — failures inside ``process_image``
-        # raise and abort the worker. We record ``error=None`` for any
-        # record we received; aborted slices simply won't appear here.
-        per_image[filename] = {"n_masks": n_masks, "error": None}
-        masks_total += n_masks
+    for r in vendor_results:
+        name = r["image_info"]["file_name"]
+        per_image[name] = {"n_masks": r["num_masks"], "error": None}
 
+    masks_total = sum(r["n_masks"] for r in per_image.values())
+    errors = sum(1 for r in per_image.values() if r["error"])
     summary = {
         "images": len(per_image),
         "masks_total": masks_total,
@@ -165,8 +295,16 @@ def _run_sam_multi_gpu(
     (out_dir / "per_image_results.json").write_text(json.dumps(summary, indent=2))
 
     if progress_callback is not None:
-        progress_callback(1.0, f"completed {summary['images']} images")
+        progress_callback(
+            1.0,
+            f"completed {summary['images']} images, {masks_total} masks",
+        )
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 
 def run_sam(
@@ -185,8 +323,7 @@ def run_sam(
 
     # Hardware gate (AD1): branch on visible GPU count, not on a config flag.
     # Lazy-import torch so CPU-only test/CI hosts without torch installed
-    # don't pay an import-time penalty — but in practice the worker host
-    # already has torch loaded, so the cost is negligible there.
+    # don't pay an import-time penalty.
     try:
         import torch
         n_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
