@@ -49,6 +49,13 @@ mkdir -p "${STATE_DIR}"
 stamp() { echo "$(date -u +%FT%TZ) $1" >> "${STATE_DIR}/$1.done"; }
 done_stamp() { [[ -f "${STATE_DIR}/$1.done" ]]; }
 
+# --- Force re-run of fix-affected steps ----------------------------------
+# AMI ami-0b7ec5ff47a1eff11 was baked before commits 196824a (sslmode) and
+# d68a9a0 (env-quote). Until AMI re-bake (Task #220), invalidate these
+# stamps so userdata re-runs the corrected env-file write and pulls the
+# post-fix repo HEAD. See docs/sam-ops.md §17.1 for the root cause.
+rm -f "${STATE_DIR}/env.done" "${STATE_DIR}/repo.done"
+
 # --- Helper: IMDSv2 token ------------------------------------------------
 imds_token() {
   curl -sS -X PUT -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" \
