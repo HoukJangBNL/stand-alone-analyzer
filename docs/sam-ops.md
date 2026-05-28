@@ -1319,3 +1319,128 @@ the run, but the env file should be re-quoted on a future bootstrap.
   fixes (symlink, peft install) live only on the terminated instance and
   are described in §15.3 for the AMI rebuild.
 
+## 16. M3 LoRA Merge Build Step — owner-runnable, owner-gated
+
+The 2026-05-28 8-GPU partial measurement (§15) confirmed the per-card
+LoRA-applied forward is the structural bottleneck on the M3 path
+(12.16 s/card-img vs 3.98 s/img on the single-GPU `merged.pt` baseline,
+~3.06× slower). Pre-merging the LoRA into the base SAM2.1 weights collapses
+the runtime adapter math into a single `.pt` that vendor `build_sam2(...)`
+can load directly — the same code path that produced the 3.98 s/img
+baseline. This section documents the build step that produces that artifact
+from the M3 4-asset bundle and uploads it under a dedicated S3 prefix.
+
+The wiring that *uses* the merged_m3 artifact (worker discovery + multi-GPU
+re-measurement) is filed as separate follow-ups (#209, #210, #211) — this
+section covers only the artifact build.
+
+### 16.1 What it produces
+
+A single object plus sidecar under a new S3 prefix:
+
+```
+s3://qpress-uploads/internal/sam/merged_m3/
+  ├── sam2.1_hiera_large.merged_m3.<sha8>.pt        # ~898 MB
+  ├── sam2.1_hiera_large.merged_m3.<sha8>.pt.sha256 # SHA256 line + filename
+  └── sam2.1_hiera_l.yaml                           # config co-located
+```
+
+`<sha8>` is the first 8 hex chars of the full SHA256, identical to the
+naming convention used by the P4.3 single-GPU `merged.pt` publish flow.
+
+The merge math is per-tensor: M3 carries three different LoRA ranks
+(`image_encoder=16`, `memory_attention=32`, `memory_encoder=32`) sharing a
+single `lora_alpha=32.0`. The vendor merge CLI was extended (vendor commit
+`f1764c7` on branch `feat/per-tensor-rank-merge`) to derive `rank` from
+`a.shape[0]` per adapter when `--alpha` is supplied, so the build step
+only has to pass alpha. Legacy `--config rank_alpha.json` (P1.5 contract)
+is preserved.
+
+### 16.2 Why a separate prefix from `internal/sam/`
+
+The existing `merged.pt` discovery in `sam-gpu-worker-userdata.sh` step 5
+filters on the literal prefix `internal/sam/sam2.1_hiera_large.merged.`
+(see `sam-gpu-worker-userdata.sh:170`). The new artifact uses
+`internal/sam/merged_m3/sam2.1_hiera_large.merged_m3.` which:
+
+1. Does not match the existing list filter, so today's single-GPU path is
+   completely untouched (#209/#210 will add discovery for `merged_m3`).
+2. Keeps the older `merged.pt` available for rollback / parity checks.
+3. Lets the bucket lifecycle policy treat the two artifact streams
+   independently when retention rules are tightened.
+
+### 16.3 The build script
+
+Owner-runnable from the repo root:
+
+```bash
+./scripts/aws/sam-build-merged-m3.sh [--dry-run] [--keep-tmp]
+```
+
+What the script does, in order:
+
+1. `aws s3 sync s3://${S3_BUCKET}/${M3_PREFIX} → ${TMP_DIR}/m3/` —
+   pulls the 4-asset M3 bundle exactly as workers do at boot
+   (`sam-gpu-worker-userdata.sh` step 6b, §14).
+2. Reads `lora_alpha` from `sam2_lora/args.json` via `jq`, also surfaces
+   the per-tensor ranks for the operator log (info only — the merge
+   itself derives rank from tensor shape).
+3. Calls `vendor/QPress-SAM-Flake/scripts/merge_lora.py --alpha ${ALPHA}`
+   on the base + LoRA pair, writes the merged tensor to the tmp workspace.
+4. Computes SHA256 of the merged file, then lists existing objects under
+   `${OUT_PREFIX}sam2.1_hiera_large.merged_m3.` sorted by `LastModified`
+   and reads the most recent `.sha256` sidecar — if the SHA matches the
+   newly-merged file, the script exits without uploading (idempotent).
+5. Otherwise prompts `[y/N]` and uploads three objects: the `.pt`, a
+   sidecar `${full_sha}  ${basename}\n`, and the co-located config yaml.
+
+`--dry-run` walks every step except the final S3 upload and prints what
+would be uploaded and the local artifact paths. `--keep-tmp` preserves the
+tmp workspace on exit (default is to `rm -rf` it).
+
+Pre-flight checks (failure exits non-zero before any S3 read): `aws`,
+`python3`, `jq` on PATH; `vendor/QPress-SAM-Flake/scripts/merge_lora.py`
+present (i.e. submodule initialised); IAM credentials with read on
+`${M3_PREFIX}*` and write on `${OUT_PREFIX}*`.
+
+### 16.4 When to run it
+
+Run this script after every successful run of
+`scripts/aws/sam-stage-lora-to-s3.sh` (the existing prod LoRA stage step,
+§14.3) and **before** launching a fresh GPU instance that should consume
+the merged form. The two scripts complement each other:
+
+- `sam-stage-lora-to-s3.sh` — pulls `best_model.pth` from
+  `qpress@hal.cfn.bnl.gov:…` and uploads to
+  `internal/sam/m3/sam2_lora/`. Continue using it for raw-LoRA staging.
+- `sam-build-merged-m3.sh` — *consumes* the M3 bundle and *produces*
+  the merged artifact under `internal/sam/merged_m3/`.
+
+The build is CPU-only (the merge math is element-wise) and finishes in a
+few minutes on any laptop with ~3 GB free disk.
+
+### 16.5 Vendor branch / submodule pointer
+
+The CLI extension lives on branch `feat/per-tensor-rank-merge` in the
+vendor submodule (commit `f1764c7`). Main repo is pinned to that commit
+via `vendor/QPress-SAM-Flake`. The legacy `--config rank_alpha.json` path
+still works — existing P1.5/P1.6 callers (`run_amg_v2_inference.infer`)
+are unaffected.
+
+### 16.6 Follow-ups (PM-tracked)
+
+- **#209** — rewire `_run_sam_multi_gpu` to prefer the merged_m3 artifact
+  via the existing single-GPU `build_sam2(...)` loader. Until #209 lands,
+  the multi-GPU path still goes through `build_sam2_finetuned` and the
+  runtime LoRA application (i.e. uploading merged_m3 alone does not
+  change worker behaviour).
+- **#210** — patch `sam-gpu-worker-userdata.sh` step 5 to also discover
+  `internal/sam/merged_m3/sam2.1_hiera_large.merged_m3.<sha8>.pt`
+  alongside the existing `merged.pt` flow, so a fresh AMI boot pulls the
+  merged_m3 weight without manual `aws s3 cp`.
+- **#211** — once #209 + #210 are in, re-run the 8-GPU full-set
+  measurement (3648 PNG) on the merged_m3 path. Target trajectory ~30 min
+  on g6e.48xlarge if scaling recovers (vs the failed ~90 min trajectory
+  on the LoRA-applied path).
+
+
