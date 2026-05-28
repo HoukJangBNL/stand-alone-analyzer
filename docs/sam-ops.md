@@ -747,3 +747,193 @@ decision doc onto the resources actually shipped.
   Python inference (no separate worker tier)
 - **Cost monitoring:** $20/day soft cap (daily budget) + $600/month hard
   cap (monthly budget) — both tag-scoped
+
+---
+
+## 12. Owner runbook — 1-image warmup (#190 first pass)
+
+워커 부팅 경로가 살아있는지 1회 검증 + procrastinate→worker→DB INSERT 한 바퀴 확인. 예상 비용 ~$0.10, 예상 시간 ~10분. **owner 직접 실행** — devops 위임 아님.
+
+### 12.1 Pre-launch sanity (30초)
+
+붙여넣고 출력 확인:
+
+```bash
+# 1) Launch template default version = 2 (REPO_REF=feat/migration-cutover)
+aws ec2 describe-launch-template-versions --region us-east-2 \
+  --launch-template-id lt-09d01bf17ff7bed30 --versions '$Default' \
+  --query 'LaunchTemplateVersions[0].[VersionNumber,VersionDescription]' --output table
+
+# 2) Branch on remote
+git ls-remote origin feat/migration-cutover
+# 기대값: 4136431...  refs/heads/feat/migration-cutover
+
+# 3) Spot price (us-east-2 g6e.xlarge) — On-Demand는 $1.86/h, Spot은 보통 $0.30~0.50/h
+aws ec2 describe-spot-price-history --region us-east-2 \
+  --instance-types g6e.xlarge --product-descriptions 'Linux/UNIX' \
+  --max-items 3 --query 'SpotPriceHistory[].[AvailabilityZone,SpotPrice]' --output table
+```
+
+### 12.2 발사 (spot, 워커 1대)
+
+```bash
+INSTANCE_ID=$(aws ec2 run-instances --region us-east-2 \
+  --launch-template 'LaunchTemplateId=lt-09d01bf17ff7bed30,Version=$Default' \
+  --instance-market-options 'MarketType=spot,SpotOptions={InstanceInterruptionBehavior=terminate}' \
+  --tag-specifications 'ResourceType=instance,Tags=[{Key=Project,Value=qpress-sam},{Key=Role,Value=worker},{Key=ManualLaunch,Value=warmup-190}]' \
+  --query 'Instances[0].InstanceId' --output text)
+echo "Launched ${INSTANCE_ID}"
+```
+
+이후 어디서 막히든 즉시 차단 명령(§12.6)으로 종료할 것.
+
+### 12.3 부팅 모니터링 (~3-5분)
+
+user-data가 [1/8]~[8/8] 단계로 부트스트랩. 진행은 SSM exec로 cloud-init 로그 tail:
+
+```bash
+aws ec2 wait instance-running --region us-east-2 --instance-ids "${INSTANCE_ID}"
+
+# user-data 로그 tail (60초 보고 cancel)
+aws ssm start-session --region us-east-2 --target "${INSTANCE_ID}" \
+  --document-name AWS-StartInteractiveCommand \
+  --parameters 'command=["sudo tail -f /var/log/cloud-init-output.log"]'
+```
+
+`[8/8] install systemd units` + `flake-analysis-worker.service: Started` 까지 보이면 부팅 완료. Ctrl-D로 SSM 세션 빠지기.
+
+### 12.4 Smoketest (CUDA + LoRA 모델 로드 + 합성 이미지 mask)
+
+```bash
+aws ssm send-command --region us-east-2 \
+  --instance-ids "${INSTANCE_ID}" \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=["cd /opt/sam/stand-alone-analyzer && /opt/sam/stand-alone-analyzer/.venv/bin/python scripts/aws/sam-gpu-smoketest.py --weights $(ls /opt/sam/weights/sam2.1_hiera_large.merged.*.pt | head -1)"]' \
+  --query 'Command.CommandId' --output text
+```
+
+위 출력에서 받은 CommandId로 결과 폴링:
+
+```bash
+CMD_ID=<위 CommandId>
+aws ssm get-command-invocation --region us-east-2 \
+  --command-id "${CMD_ID}" --instance-id "${INSTANCE_ID}" \
+  --query '[Status,StandardOutputContent,StandardErrorContent]' --output text
+```
+
+**기대값**: `Status=Success`, stdout에 `OK`. 실패 시 stderr에 traceback — PM에게 전체 출력 그대로 전달.
+
+### 12.5 Procrastinate 1-job enqueue + DB INSERT 검증
+
+이 부분은 valid `runs` row + `mask_results` 테이블 권한이 필요. 여기서부터는 **PM에 한 번 더 알려서** worker enqueue 명령 확정 후 진행. (현재 RDS prod scan record 유무 PM이 모름.)
+
+owner가 §12.4까지 통과했으면 PM에게 "smoketest OK" 한 줄만 던지면 PM이 다음 단계 위임.
+
+### 12.6 Tear-down (필수 — 끝나면 무조건)
+
+```bash
+aws ec2 terminate-instances --region us-east-2 --instance-ids "${INSTANCE_ID}"
+aws ec2 wait instance-terminated --region us-east-2 --instance-ids "${INSTANCE_ID}"
+echo "TERMINATED"
+```
+
+콘솔 EC2 페이지에서도 한 번 더 확인. spot은 `instance-interrupted-by-aws`로도 죽을 수 있는데 그건 정상 — auto-terminate.
+
+### 12.7 비용 후속 확인 (다음날)
+
+```bash
+# CloudWatch 일일 비용 알람 (P4.5에서 설정한 $20/day soft cap)
+aws cloudwatch describe-alarms --region us-east-1 \
+  --alarm-name-prefix qpress-sam-daily-cost \
+  --query 'MetricAlarms[].[AlarmName,StateValue]' --output table
+```
+
+OK 상태면 정상. ALARM이면 PM에게 즉시 보고.
+
+---
+
+## 13. 8-GPU Measurement Run — 2026-05-28 (SMOKE_FAIL)
+
+**Outcome:** 10-image smoke run failed in 62.6 s with `FileNotFoundError: '../external/sam2'`. Architecture mismatch between vendor `run_multi_process` (multi-GPU pool, `build_sam2_finetuned` path) and our `merged.pt` artifact format (designed for single-GPU `state["model_config"]` shortcut). **No 3648-image run executed; instance terminated at smoke failure per plan's escalation policy.**
+
+### 13.1 Run summary
+
+| Field | Value |
+|---|---|
+| Plan | `docs/superpowers/plans/2026-05-28-sam-8gpu-parallel.md` (Tasks 5–8) |
+| Branch | `feat/migration-cutover` (HEAD `00b997f` after cherry-picking worker fixes) |
+| Instance | `i-038703b1a1740faad` — `g6e.48xlarge` spot in `us-east-2a` |
+| Spot price | `$4.26 / hr` |
+| Launch | `2026-05-28T04:08:35Z` |
+| Smoke deferred | `2026-05-28T04:15:53Z` (procrastinate `JOB_ID=6`, `RUN_ID=99001`) |
+| Smoke started | `04:16:04Z` |
+| Smoke failed | `04:17:07Z` (62.6 s wall) |
+| Terminated | `~04:21Z` |
+| Wall billed | ~13 min |
+| Estimated cost | **$0.92** (≤ $1.50 hard cap from owner brief) |
+| GPUs detected | 8 × NVIDIA L40S (verified via `nvidia-smi -L`) |
+| Worker process | `python -m flake_analysis.worker --queue gpu --concurrency 1` (active) |
+
+### 13.2 What worked
+
+- Launch template v9 (`g6e.48xlarge` + `ami-0b7ec5ff47a1eff11`) booted cleanly. AMI is pre-baked with CUDA + venv + repo + weights — SSM `Online` at t≈75 s, worker active at t≈90 s.
+- 8 × L40S enumerated correctly. The hardware gate `torch.cuda.device_count() >= 2` triggered the new branch (verified — error path went through `_run_sam_multi_gpu` → `_vendor_run_multi_process`).
+- Worker fix-cherry-picks (`d5d9783` open `App.open_async()`, `00b997f` `kwargs=` for psycopg pool) applied cleanly onto `feat/migration-cutover`. Worker now starts on this branch (previously crashed on `procrastinate.exceptions.AppNotOpen`).
+- `/proc/PID/environ` launcher idiom worked — defer script ran as root SSM, read SAA_DB_* from worker pid `5051`, opened procrastinate `App`, deferred job, returned `JOB_ID=6`.
+- 10-image smoke staged via S3 server-side copy (`dev/scans/6/images/` → `internal/sam/measure-input-scan6/`) then `aws s3 cp` from instance role.
+
+### 13.3 What broke — root cause
+
+Vendor's `run_multi_process` (in `vendor/QPress-SAM-Flake/run_amg_v2.py`) calls `build_sam2_finetuned(sam2_repo, ckpt_dir, ckpt_file, device)` per worker child (line ~998), which in turn calls `ensure_sam2_importable(sam2_repo)` — that function `os.chdir(sam2_repo)` and adds it to `sys.path`. Our config dict in `_build_vendor_config` hard-codes `sam2_repo="../external/sam2"` (vendor's `DEFAULT_SAM2_REPO` constant at `run_amg_v2.py:40`), but **no `external/sam2` directory exists in our deployed repo** — `sam2` is installed as a pip package at `.venv/lib/python3.11/site-packages/sam2/` (vendor `requirements-inference.txt`).
+
+Beyond the path: `build_sam2_finetuned` also requires:
+1. `ckpt_dir/args.json` (consumed by `load_training_args` line 536) — does NOT exist beside `merged.pt`.
+2. A base SAM2 checkpoint at `train_args["checkpoint"]` (line 539) for `build_sam2(...)` to load before LoRA application.
+3. `lora.apply_lora_to_sam2_components` (line 562) to mount LoRA adapters — but `merged.pt` has no LoRA structure, it's a pre-merged single state-dict.
+
+Plan Risk #4 anticipated config-key drift; the actual surface is bigger — `merged.pt` was produced precisely to skip the LoRA-mount-then-load chain that `run_multi_process` insists on.
+
+`merged.pt` introspection:
+```
+top keys: ['model_config', 'model_state_dict']
+model_config keys: []          # empty dict
+model_state_dict n_keys: 903   # raw merged weights
+```
+
+Note: `model_config={}` means even the single-GPU path (`_vendor_infer` → `run_amg_v2_inference.infer` line 54: `build_sam2(state["model_config"], None, device=device)`) likely fails too — but this was never tested end-to-end on real GPU prior to this run, so the regression isn't from our 8-GPU change.
+
+### 13.4 Exact stderr (procrastinate event truncated; journal authoritative)
+
+```
+multiprocessing.pool.RemoteTraceback:
+Traceback (most recent call last):
+FileNotFoundError: [Errno 2] No such file or directory: '../external/sam2'
+Traceback (most recent call last):
+  File "/opt/sam/stand-alone-analyzer/src/flake_analysis/worker/tasks.py", line 131, in run_sam
+    result = run_sam_step(...)
+  File "/opt/sam/stand-alone-analyzer/src/flake_analysis/pipeline/sam.py", line 22, in run_sam_step
+    return run_sam(...)
+  File "/opt/sam/stand-alone-analyzer/src/flake_analysis/core/pipeline/sam.py", line 196, in run_sam
+    return _run_sam_multi_gpu(...)
+  File "/opt/sam/stand-alone-analyzer/src/flake_analysis/core/pipeline/sam.py", line 139, in _run_sam_multi_gpu
+FileNotFoundError: [Errno 2] No such file or directory: '../external/sam2'
+```
+
+### 13.5 Recommendation — route to algo-engineer
+
+Three options for the multi-GPU path:
+
+1. **Adapter shim in `_run_sam_multi_gpu`** — replace the vendor `run_multi_process` call with our own minimal spawn-pool that loads `merged.pt` per child via the same `state["model_config"]` shortcut the single-GPU path uses. Risk: ~80 lines of CUDA-spawn logic to reimplement vendor functionality. Plan AD2 explicitly rejected this.
+
+2. **Patch vendor `worker_process_images`** to accept a `merged_pt_path` config key and use the `state["model_config"]` shortcut. Vendor edit, breaks "READ-ONLY vendor" rule. Cleanest if algo-engineer signs off.
+
+3. **Re-merge weights into the `args.json`+base-ckpt+LoRA layout vendor expects.** Means re-running the LoRA training-export pipeline with the multi-GPU layout in mind. Highest fidelity, slowest. Punts the question to whoever produced `merged.pt`.
+
+Single-GPU path on `g6e.xlarge` (the documented 3.98 s/img baseline) was apparently never re-validated on real GPU after the merge format settled — confirm that baseline still holds before fanning out.
+
+### 13.6 Cleanup performed
+
+- Instance `i-038703b1a1740faad` terminated.
+- S3 staging at `s3://qpress-uploads/internal/sam/measure-input-scan6/` (3648 PNG, 10.32 GB) deleted.
+- Two worker-runtime fix commits cherry-picked onto `feat/migration-cutover`: `d5d9783` (procrastinate App pool open), `00b997f` (psycopg pool kwargs=). These were on `worktree-agent-a7087c671a2ac8601` only — without them the worker on this branch would not even start.
+

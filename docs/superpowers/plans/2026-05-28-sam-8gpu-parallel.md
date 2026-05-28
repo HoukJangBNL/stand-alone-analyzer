@@ -116,24 +116,24 @@ So **vendor already returns one merged, ordered list**. Our adapter only has to 
 - [x] Test with `INSTANCE_TYPE=g6e.48xlarge IMAGE_ID_OVERRIDE=ami-0b7ec5ff47a1eff11 ./scripts/aws/sam-launch-template.sh` — should create or update `qpress-sam-gpu-worker` to a new version targeting the 8-GPU instance type. Do **not** launch an instance yet; just verify the template version JSON is correct via `aws ec2 describe-launch-template-versions`. **Result: v9 created (default), InstanceType=g6e.48xlarge, ImageId=ami-0b7ec5ff47a1eff11.**
 
 ### Task 5 — Launch g6e.48xlarge spot, wait for procrastinate worker (~3 min compute, ~7 min wait)
-- [ ] `aws ec2 run-instances --launch-template LaunchTemplateName=qpress-sam-gpu-worker,Version=\$Default --instance-type g6e.48xlarge --region us-east-2 --tag-specifications 'ResourceType=instance,Tags=[{Key=Purpose,Value=8gpu-measurement}]'`. Capture instance-id.
-- [ ] Wait for SSM agent: poll `aws ssm describe-instance-information --instance-information-filter-list 'key=InstanceIds,valueSet=<id>'` until `PingStatus=Online` (~3–5 min).
-- [ ] Once online, verify worker started: `aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript --parameters 'commands=["pgrep -af flake_analysis.worker | head -3", "nvidia-smi -L | wc -l"]'` — expect 1 worker pid and `8` from `nvidia-smi -L`.
+- [x] `aws ec2 run-instances --launch-template LaunchTemplateName=qpress-sam-gpu-worker,Version=\$Default --instance-type g6e.48xlarge --region us-east-2 --tag-specifications 'ResourceType=instance,Tags=[{Key=Purpose,Value=8gpu-measurement}]'`. Capture instance-id. **Result: i-038703b1a1740faad launched 2026-05-28 ~04:08Z.**
+- [x] Wait for SSM agent: poll `aws ssm describe-instance-information --instance-information-filter-list 'key=InstanceIds,valueSet=<id>'` until `PingStatus=Online` (~3–5 min). **Result: Online ~04:11Z.**
+- [x] Once online, verify worker started: `aws ssm send-command --instance-ids <id> --document-name AWS-RunShellScript --parameters 'commands=["pgrep -af flake_analysis.worker | head -3", "nvidia-smi -L | wc -l"]'` — expect 1 worker pid and `8` from `nvidia-smi -L`. **Result: 8 GPUs visible, worker required cherry-picks d5d9783+00b997f from worktree-agent branch + branch checkout to feat/migration-cutover.**
 
 ### Task 6 — Defer the 3648-image `run_sam` task using the `/proc/PID/environ` pattern (~5 min)
-- [ ] On the instance via SSM: write `/tmp/measure_8gpu_defer.py` that imports `flake_analysis.worker.app.app`, computes `raw_images_dir`, `analysis_folder`, `weights_path` from project-state for the target scan (3648 imgs), and calls `app.configure_task(name="run_sam", queue="gpu").defer(run_id=<NEW_ID>, raw_images_dir=..., analysis_folder=..., weights_path="/opt/sam/weights/merged.pt")`.
-- [ ] Reuse the launcher idiom from `/tmp/phase_c_run.sh` (read `SAA_*`, `HF_*`, `SAM_*` from `/proc/$(pgrep flake_analysis.worker)/environ`, exec the venv python on `/tmp/measure_8gpu_defer.py`).
-- [ ] Send via `aws ssm send-command` and capture the run_id. **Output:** procrastinate job id + run_id, both logged.
+- [x] On the instance via SSM: write `/tmp/measure_8gpu_defer.py` that imports `flake_analysis.worker.app.app`, computes `raw_images_dir`, `analysis_folder`, `weights_path` from project-state for the target scan (3648 imgs), and calls `app.configure_task(name="run_sam", queue="gpu").defer(run_id=<NEW_ID>, raw_images_dir=..., analysis_folder=..., weights_path="/opt/sam/weights/merged.pt")`.
+- [x] Reuse the launcher idiom from `/tmp/phase_c_run.sh` (read `SAA_*`, `HF_*`, `SAM_*` from `/proc/$(pgrep flake_analysis.worker)/environ`, exec the venv python on `/tmp/measure_8gpu_defer.py`).
+- [x] Send via `aws ssm send-command` and capture the run_id. **Output:** procrastinate job id + run_id, both logged. **SMOKE FIRST: deferred 10-image smoke as job_id=6 against `s3://qpress-uploads/internal/sam/measure-input-scan6/` (10 PNG subset). 3648-image scale run NOT deferred — smoke failed first (see Task 7).**
 
 ### Task 7 — Monitor + collect (~30 min, mostly waiting)
-- [ ] Tail the worker via SSM every 60s: `tail -n 50 /var/log/flake_analysis/worker.log` and `nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader`. Record GPU utilization snapshots at t=2min, 5min, 15min.
-- [ ] When task completes (procrastinate emits `completed` SSE frame OR PG `procrastinate_jobs.status='succeeded'`), capture: total wall-time (job `attempted_at` → `succeeded_at`), `per_image_results.json` summary (images, masks_total, errors), worker stdout for any `[Worker N]` warnings.
-- [ ] Compute observed s/img and speedup vs 3.98 s baseline. **Output:** numbers in a comment on the run record + `docs/sam-ops.md` measurement section.
+- [x] Tail the worker via SSM every 60s: `tail -n 50 /var/log/flake_analysis/worker.log` and `nvidia-smi --query-gpu=index,utilization.gpu,memory.used --format=csv,noheader`. Record GPU utilization snapshots at t=2min, 5min, 15min. **Result: smoke job 6 failed at ~62.6 s with `FileNotFoundError: '../external/sam2'` — never reached the GPU fan-out; no utilization snapshots taken.**
+- [x] When task completes (procrastinate emits `completed` SSE frame OR PG `procrastinate_jobs.status='succeeded'`), capture: total wall-time (job `attempted_at` → `succeeded_at`), `per_image_results.json` summary (images, masks_total, errors), worker stdout for any `[Worker N]` warnings. **Result: status=`failed`. Architecture blocker — vendor `run_multi_process` → `build_sam2_finetuned` requires sam2_repo dir + args.json + base SAM2 ckpt + LoRA mount; our `merged.pt` is the `state["model_config"]` shortcut format. STOP-policy honored, no improvisation.**
+- [x] Compute observed s/img and speedup vs 3.98 s baseline. **Output:** numbers in a comment on the run record + `docs/sam-ops.md` measurement section. **Result: N/A (smoke failed pre-fan-out). See `docs/sam-ops.md` §13 for full diagnosis + 3 resolution options for algo-engineer.**
 
 ### Task 8 — Terminate + write up (~5 min)
-- [ ] `aws ec2 terminate-instances --instance-ids <id>` immediately after collection. Verify spot instance stops (no idle billing).
-- [ ] Append a "8-GPU Measurement Run YYYY-MM-DD" section to `docs/sam-ops.md` with: instance-type, run_id, image count, wall-time, s/img observed, s/img ideal, speedup, errors, per-GPU utilization snapshot.
-- [ ] Update `docs/project-status.md` with the measurement outcome and a one-line recommendation (promote / shelve / iterate). **Done.**
+- [x] `aws ec2 terminate-instances --instance-ids <id>` immediately after collection. Verify spot instance stops (no idle billing). **Result: terminated 2026-05-28 04:21Z; ~13 min total → ~$0.92 cost.**
+- [x] Append a "8-GPU Measurement Run YYYY-MM-DD" section to `docs/sam-ops.md` with: instance-type, run_id, image count, wall-time, s/img observed, s/img ideal, speedup, errors, per-GPU utilization snapshot. **Done — §13 SMOKE_FAIL writeup.**
+- [x] Update `docs/project-status.md` with the measurement outcome and a one-line recommendation (promote / shelve / iterate). **Done — recommendation: route to algo-engineer for vendor-config alignment.**
 
 ---
 
