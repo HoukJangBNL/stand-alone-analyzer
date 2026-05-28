@@ -44,7 +44,7 @@ import boto3
 import psycopg
 from botocore.exceptions import ClientError
 
-from flake_analysis.db.url import DbSettings
+from flake_analysis.db.url import DbSettings, _require_ssl
 
 logger = logging.getLogger(__name__)
 
@@ -151,6 +151,9 @@ class PgAdvisoryLock:
             "port": s.db_port,
             "dbname": s.db_name,
         }
+        if _require_ssl(s.db_host):
+            # RDS rds.force_ssl=1: SSL-only, no prefer→fallback. See #217.
+            kwargs["sslmode"] = "require"
         if s.db_user:
             kwargs["user"] = s.db_user
         if s.db_password:

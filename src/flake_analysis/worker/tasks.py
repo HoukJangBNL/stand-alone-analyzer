@@ -45,7 +45,7 @@ from typing import Any
 
 import psycopg
 
-from flake_analysis.db.url import DbSettings
+from flake_analysis.db.url import DbSettings, _require_ssl
 from flake_analysis.pipeline.sam import run_sam_step
 from flake_analysis.worker.app import app
 
@@ -73,6 +73,9 @@ def _emit_progress(*, run_id: int, payload: dict[str, Any]) -> None:
         "port": s.db_port,
         "dbname": s.db_name,
     }
+    if _require_ssl(s.db_host):
+        # RDS rds.force_ssl=1: SSL-only, no prefer→fallback. See #217.
+        conn_kwargs["sslmode"] = "require"
     if s.db_user:
         conn_kwargs["user"] = s.db_user
     if s.db_password:

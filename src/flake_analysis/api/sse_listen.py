@@ -27,7 +27,7 @@ from typing import Any, AsyncIterator
 
 import asyncpg
 
-from flake_analysis.db.url import DbSettings
+from flake_analysis.db.url import DbSettings, _require_ssl
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,11 @@ def channel_name(run_id: int) -> str:
 def _asyncpg_kwargs() -> dict[str, Any]:
     """Build asyncpg.connect kwargs from SAA_DB_* env vars.
 
-    asyncpg uses ``database=`` (not ``dbname=``) — the only argname
-    difference from psycopg.
+    asyncpg uses ``database=`` (not ``dbname=``) and ``ssl=`` (not
+    ``sslmode=``) — those are the argname differences from psycopg.
+    SSL is forced to ``require`` to match RDS ``rds.force_ssl=1`` and
+    suppress libpq-style ``prefer→fallback`` retry paths
+    (Refs: #211, #217).
     """
     s = DbSettings()
     kw: dict[str, Any] = {
@@ -49,6 +52,10 @@ def _asyncpg_kwargs() -> dict[str, Any]:
         "port": s.db_port,
         "database": s.db_name,
     }
+    if _require_ssl(s.db_host):
+        # SSL forced on RDS (rds.force_ssl=1). Local dev/test PGs typically
+        # lack SSL, so skip the gate there. Refs: #211, #217.
+        kw["ssl"] = "require"
     if s.db_user:
         kw["user"] = s.db_user
     if s.db_password:
