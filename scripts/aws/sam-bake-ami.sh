@@ -604,15 +604,23 @@ if [[ "${PROV_STATUS}" != "Success" ]]; then
 fi
 
 # --- Stop instance + create-image ----------------------------------------
-log "[stop] ${BUILDER_ID}"
-aws_ ec2 stop-instances --instance-ids "${BUILDER_ID}" >/dev/null
-aws_ ec2 wait instance-stopped --instance-ids "${BUILDER_ID}"
+# One-time spot instances cannot be stopped (only terminated). On-demand
+# instances can. Either way, --no-reboot create-image works directly from
+# the running instance — the stop step is purely cosmetic for snapshot
+# consistency. Skip the stop for spot, do it for on-demand.
+if [[ "${BUILDER_MARKET}" == "spot" ]]; then
+  log "[stop] skipped — spot instances cannot be stopped, --no-reboot create-image suffices"
+else
+  log "[stop] ${BUILDER_ID}"
+  aws_ ec2 stop-instances --instance-ids "${BUILDER_ID}" >/dev/null
+  aws_ ec2 wait instance-stopped --instance-ids "${BUILDER_ID}"
+fi
 
 log "[create-image] ${AMI_NAME}"
 NEW_AMI="$(aws_ ec2 create-image \
   --instance-id "${BUILDER_ID}" \
   --name "${AMI_NAME}" \
-  --description "qpress-sam GPU worker AMI baked from ${REPO_REF} @ ${REPO_SHA8} on ${BAKE_TS}. Vendor submodule @ ${VENDOR_SHA8}. peft pre-installed. No baked done-stamps, no baked env-file. RCA #221 fixes applied." \
+  --description "qpress-sam GPU worker AMI baked from ${REPO_REF} @ ${REPO_SHA8} on ${BAKE_TS}. Vendor submodule @ ${VENDOR_SHA8}. peft pre-installed. No baked done-stamps, no baked env-file. RCA #221 fixes applied. Base: ${BASE_AMI_NAME:-DLAMI Ubuntu 22.04} (${BASE_AMI})." \
   --no-reboot \
   --query 'ImageId' --output text)"
 log "NEW_AMI         = ${NEW_AMI}"
