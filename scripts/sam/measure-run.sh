@@ -161,12 +161,15 @@ if (( DRYRUN )); then
 else
     # Wait for cloud-init / user-data to finish before checking artifacts.
     # SSM-online (phase 5) only means ssm-agent registered — userdata may
-    # still be installing CUDA, downloading weights, building vendor, etc.
-    # User-data writes /etc/flake-analysis-worker.env late in its run.
-    # Poll for /var/lib/cloud/instance/boot-finished AND the worker env
-    # file. Max wait 15 min.
-    log 6 "wait for user-data completion (max 15m)"
-    pf_deadline=$(( $(date -u +%s) + 900 ))
+    # still be installing CUDA, downloading weights (898 MB merged_m3),
+    # building vendor, staging dataset (100 PNG / 284 MB), writing the
+    # worker env file. Cold spot allocation observed ~16 min on
+    # ami-092ae5880cb9cf957 (T13 attempt 2). Cap at 25 min to leave
+    # headroom; future AMI re-bake with pre-staged .venv + dataset
+    # would shrink this to ~2 min.
+    PREFLIGHT_WAIT_MIN="${PREFLIGHT_WAIT_MIN:-25}"
+    log 6 "wait for user-data completion (max ${PREFLIGHT_WAIT_MIN}m)"
+    pf_deadline=$(( $(date -u +%s) + PREFLIGHT_WAIT_MIN * 60 ))
     while :; do
         if (( $(date -u +%s) >= pf_deadline )); then
             echo "pre-flight fail: user-data did not finish within 15 min" >&2
