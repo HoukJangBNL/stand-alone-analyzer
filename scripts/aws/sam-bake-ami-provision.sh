@@ -107,6 +107,10 @@ ENV_FILE="/etc/flake-analysis-worker.env"
 INFO_FILE="/etc/flake-analysis-bootstrap-info.json"
 
 export DEBIAN_FRONTEND=noninteractive
+# SSM RunCommand executes as root with a minimal env; HOME is sometimes
+# unset, which makes `git config --global` fail with "fatal: $HOME not set".
+# Pin it to /root so global git config writes land predictably.
+export HOME="${HOME:-/root}"
 
 # --- Step 1: apt base packages (mirror userdata step 1) ------------------
 echo "[bake 1/9] apt base packages"
