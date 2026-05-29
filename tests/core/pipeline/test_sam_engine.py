@@ -32,12 +32,16 @@ def test_run_sam_calls_vendor_infer(tmp_path):
             progress_callback=lambda pct, msg: progress_emits.append((pct, msg)),
         )
 
+    # Filter out marker:* progress events (timing harness, see Task 3 of
+    # the GPU measurement harness plan); this test only cares about the
+    # vendor-shim translation.
+    shim_emits = [(p, m) for (p, m) in progress_emits if not m.startswith("marker:")]
     # 0.5 (1/2), 1.0 (2/2)
-    assert len(progress_emits) == 2
-    assert progress_emits[0][0] == 0.5
-    assert "a.png" in progress_emits[0][1]
-    assert progress_emits[1][0] == 1.0
-    assert "b.png" in progress_emits[1][1]
+    assert len(shim_emits) == 2
+    assert shim_emits[0][0] == 0.5
+    assert "a.png" in shim_emits[0][1]
+    assert shim_emits[1][0] == 1.0
+    assert "b.png" in shim_emits[1][1]
 
     # Per-image results manifest is written
     assert (out_dir / "per_image_results.json").exists()

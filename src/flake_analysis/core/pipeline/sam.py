@@ -330,10 +330,24 @@ def _run_sam_multi_gpu(
     images = _list_images(images_dir)
     total = len(images)
 
+    # Marker — entry to multi-GPU branch. Workers will load the model
+    # inside _vendor_run_multi_process below; this marker bookends the
+    # caller-visible model-load phase. See Task 3 of the GPU measurement
+    # harness plan.
+    if progress_callback is not None:
+        progress_callback(0.0, "marker:model_load_start")
+
     if progress_callback is not None:
         progress_callback(0.0, f"starting {n_gpus}-GPU fan-out across {n_gpus} GPUs")
 
     if total == 0:
+        # Still emit processing_start/end so empty-input measurement runs
+        # produce a consistent marker sequence (model_load → processing →
+        # processing_end). Caller (Task 4 worker/tasks.py) routes these to
+        # worker_events.
+        if progress_callback is not None:
+            progress_callback(0.0, "marker:processing_start")
+            progress_callback(1.0, "marker:processing_end")
         summary = {"images": 0, "masks_total": 0, "errors": 0, "per_image": {}}
         (out_dir / "per_image_results.json").write_text(json.dumps(summary, indent=2))
         if progress_callback is not None:
@@ -389,9 +403,19 @@ def _run_sam_multi_gpu(
                     f"→ build_sam2_finetuned (LoRA applied per forward)",
                 )
 
+        # Marker — model load done in spawned workers, vendor about to
+        # take over the per-image processing loop.
+        if progress_callback is not None:
+            progress_callback(0.0, "marker:processing_start")
+
         vendor_results = _vendor_run_multi_process(
             images, out_dir, config, n_gpus
         )
+
+        # Marker — vendor returned; processing complete. Placed inside
+        # the try-block so a vendor exception still skips the marker.
+        if progress_callback is not None:
+            progress_callback(1.0, "marker:processing_end")
     finally:
         _vendor_amg.load_training_args = original_loader
 
@@ -456,6 +480,14 @@ def run_sam(
             progress_callback=progress_callback,
         )
 
+    # Single-GPU markers. Vendor's _vendor_infer does both model load and
+    # processing inside one opaque call, so model_load_start and
+    # processing_start fire back-to-back at entry; processing_end fires
+    # after the vendor call returns.
+    if progress_callback is not None:
+        progress_callback(0.0, "marker:model_load_start")
+        progress_callback(0.0, "marker:processing_start")
+
     def _shim(payload: dict) -> None:
         if progress_callback is None:
             return
@@ -476,6 +508,10 @@ def run_sam(
         device=device,
         progress_callback=_shim,
     )
+
+    # Marker — vendor returned; processing complete.
+    if progress_callback is not None:
+        progress_callback(1.0, "marker:processing_end")
 
     summary = {
         "images": len(result),
