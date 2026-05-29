@@ -31,6 +31,7 @@ S3_MERGED_M3_PFX="${S3_MERGED_M3_PFX:-internal/sam/merged_m3/}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 PY_VERSION="${PY_VERSION:-3.11}"
 IDLE_TIMEOUT_S="${IDLE_TIMEOUT_S:-600}"
+ABS_CAP_MIN="${ABS_CAP_MIN:-60}"
 
 # --- Paths ----------------------------------------------------------------
 LOG_FILE="/var/log/sam-gpu-worker-userdata.log"
@@ -539,10 +540,43 @@ Unit=flake-analysis-idle-shutdown.service
 WantedBy=timers.target
 UNIT
 
+# --- abs-cap self-terminate ---------------------------------------------
+# Belt-and-suspenders against operator-session death (#229 §20). Fires
+# ABS_CAP_MIN minutes after boot and unconditionally terminates the
+# instance, regardless of measure-run.sh's polling state.
+install -m 0755 \
+    "${REPO_DIR}/scripts/aws/abs-cap-terminate.sh" \
+    /usr/local/bin/abs-cap-terminate.sh
+
+cat > /etc/systemd/system/flake-analysis-abs-cap.service <<'UNIT'
+[Unit]
+Description=Absolute wall-clock cap — terminate this instance
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/abs-cap-terminate.sh
+UNIT
+
+cat > /etc/systemd/system/flake-analysis-abs-cap.timer <<UNIT
+[Unit]
+Description=Fire abs-cap.service ${ABS_CAP_MIN} min after boot
+
+[Timer]
+OnBootSec=${ABS_CAP_MIN}min
+Unit=flake-analysis-abs-cap.service
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 # Reload + enable + start.
 systemctl daemon-reload
 systemctl enable --now flake-analysis-worker.service
 systemctl enable --now flake-analysis-spot-monitor.timer
 systemctl enable --now flake-analysis-idle-shutdown.timer
+systemctl enable --now flake-analysis-abs-cap.timer
 
 echo "=== sam-gpu-worker-userdata done: $(date -u +%FT%TZ) ==="
