@@ -65,3 +65,76 @@ def test_load_worker_env_malformed_line_raises(tmp_path: Path) -> None:
     env_file.write_text("LINE_WITHOUT_EQUALS\nSAA_DB_HOST=h\n")
     with pytest.raises(ValueError, match="malformed"):
         load_worker_env(env_file)
+
+
+def test_resolve_model_meta_local_with_sidecar(tmp_path: Path) -> None:
+    from flake_analysis.worker.measurement import resolve_model_meta
+
+    pt = tmp_path / "merged_m3.pt"
+    pt.write_bytes(b"fake-weights")
+    sidecar = tmp_path / "merged_m3.pt.sha256"
+    sidecar.write_text(
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef  merged_m3.pt\n"
+    )
+
+    meta = resolve_model_meta(str(pt))
+    assert meta["name"] == "merged_m3"
+    assert meta["sha256"] == "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+    assert meta["source_uri"] == f"file://{pt}"
+    assert meta["local_path"] == str(pt)
+
+
+def test_resolve_model_meta_local_missing_sidecar_raises(tmp_path: Path) -> None:
+    from flake_analysis.worker.measurement import resolve_model_meta
+
+    pt = tmp_path / "no_sidecar.pt"
+    pt.write_bytes(b"x")
+    with pytest.raises(ValueError, match="sidecar"):
+        resolve_model_meta(str(pt))
+
+
+def test_resolve_model_meta_s3_uri_downloads(monkeypatch, tmp_path: Path) -> None:
+    """S3 URI: downloads .pt + reads .sha256 sidecar, returns metadata
+    with the s3:// URI as source_uri. moto provides the in-memory S3."""
+    import boto3
+    from moto import mock_aws
+
+    from flake_analysis.worker import measurement as meas_mod
+
+    # Redirect download dir into tmp_path so the test never touches /opt/sam.
+    monkeypatch.setattr(meas_mod, "_WEIGHTS_LOCAL_DIR", tmp_path / "weights")
+
+    with mock_aws():
+        s3 = boto3.client("s3", region_name="us-east-2")
+        s3.create_bucket(
+            Bucket="qpress-uploads",
+            CreateBucketConfiguration={"LocationConstraint": "us-east-2"},
+        )
+        s3.put_object(
+            Bucket="qpress-uploads",
+            Key="internal/sam/merged_m3/sam2.1_hiera_large.merged_m3.3ec586fc.pt",
+            Body=b"fake-weights",
+        )
+        s3.put_object(
+            Bucket="qpress-uploads",
+            Key="internal/sam/merged_m3/sam2.1_hiera_large.merged_m3.3ec586fc.pt.sha256",
+            Body=b"3ec586fc3ec586fc3ec586fc3ec586fc3ec586fc3ec586fc3ec586fc3ec586fc  sam2.1_hiera_large.merged_m3.3ec586fc.pt\n",
+        )
+
+        meta = meas_mod.resolve_model_meta(
+            "s3://qpress-uploads/internal/sam/merged_m3/"
+            "sam2.1_hiera_large.merged_m3.3ec586fc.pt"
+        )
+
+    assert meta["name"] == "sam2.1_hiera_large.merged_m3.3ec586fc"
+    assert meta["sha256"] == "3ec586fc3ec586fc3ec586fc3ec586fc3ec586fc3ec586fc3ec586fc3ec586fc"
+    assert meta["source_uri"].startswith("s3://qpress-uploads/")
+    assert Path(meta["local_path"]).exists()
+    assert Path(meta["local_path"]).read_bytes() == b"fake-weights"
+
+
+def test_resolve_model_meta_invalid_uri_raises() -> None:
+    from flake_analysis.worker.measurement import resolve_model_meta
+
+    with pytest.raises(ValueError, match="weights_uri|scheme"):
+        resolve_model_meta("ftp://example.com/x.pt")

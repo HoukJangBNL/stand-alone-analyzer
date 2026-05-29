@@ -18,6 +18,7 @@ Designed to be called from:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 
@@ -57,3 +58,98 @@ def load_worker_env(env_file: Path = Path("/etc/flake-analysis-worker.env")) -> 
             value = value[1:-1]
         out[key] = value
     return out
+
+
+# Default download dir on the GPU worker. Overridable in tests via monkeypatch.
+_WEIGHTS_LOCAL_DIR = Path("/opt/sam/weights")
+_S3_URI_RE = re.compile(r"^s3://([^/]+)/(.+)$")
+
+
+def _read_sidecar_sha256(sidecar_text: str) -> str:
+    """Parse the first 64-hex token of a .sha256 sidecar file."""
+    match = re.search(r"\b([0-9a-f]{64})\b", sidecar_text)
+    if not match:
+        raise ValueError(f"no sha256 in sidecar: {sidecar_text!r}")
+    return match.group(1)
+
+
+def resolve_model_meta(weights_uri: str) -> dict[str, str]:
+    """Resolve a weights reference into a deterministic local artifact + metadata.
+
+    Args:
+        weights_uri: Either an absolute local path to a .pt file, or an
+            ``s3://bucket/prefix/name.pt`` URI. A sidecar
+            ``<name>.pt.sha256`` is required at the same prefix; the
+            sidecar must contain a 64-hex sha256 token.
+
+    Returns:
+        Dict with keys ``name``, ``sha256``, ``source_uri``, ``local_path``.
+
+    Raises:
+        ValueError: invalid scheme, missing sidecar, malformed sidecar.
+    """
+    if weights_uri.startswith("s3://"):
+        return _resolve_s3(weights_uri)
+    if weights_uri.startswith("/") or weights_uri.startswith("file://"):
+        local = (
+            weights_uri[len("file://"):]
+            if weights_uri.startswith("file://")
+            else weights_uri
+        )
+        return _resolve_local(Path(local))
+    raise ValueError(f"unsupported weights_uri scheme: {weights_uri!r}")
+
+
+def _resolve_local(pt_path: Path) -> dict[str, str]:
+    if not pt_path.exists():
+        raise ValueError(f"weights_uri points to missing file: {pt_path}")
+    sidecar = pt_path.with_name(pt_path.name + ".sha256")
+    if not sidecar.exists():
+        raise ValueError(f"sidecar sha256 file missing: {sidecar}")
+    sha = _read_sidecar_sha256(sidecar.read_text())
+    return {
+        "name": pt_path.stem,
+        "sha256": sha,
+        "source_uri": f"file://{pt_path}",
+        "local_path": str(pt_path),
+    }
+
+
+def _resolve_s3(s3_uri: str) -> dict[str, str]:
+    import boto3
+
+    match = _S3_URI_RE.match(s3_uri)
+    if not match:
+        raise ValueError(f"malformed s3 URI: {s3_uri!r}")
+    bucket, key = match.group(1), match.group(2)
+    if not key.endswith(".pt"):
+        raise ValueError(f"weights URI must end in .pt: {s3_uri!r}")
+
+    s3 = boto3.client("s3")
+    sidecar_obj = s3.get_object(Bucket=bucket, Key=key + ".sha256")
+    sha = _read_sidecar_sha256(sidecar_obj["Body"].read().decode("utf-8"))
+
+    _WEIGHTS_LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+    local_path = _WEIGHTS_LOCAL_DIR / Path(key).name
+    # Idempotent: skip download if local sha already matches sidecar.
+    if local_path.exists():
+        import hashlib
+        h = hashlib.sha256()
+        with local_path.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        if h.hexdigest().lower() == sha.lower():
+            return {
+                "name": Path(key).stem,
+                "sha256": sha,
+                "source_uri": s3_uri,
+                "local_path": str(local_path),
+            }
+
+    s3.download_file(bucket, key, str(local_path))
+    return {
+        "name": Path(key).stem,
+        "sha256": sha,
+        "source_uri": s3_uri,
+        "local_path": str(local_path),
+    }
