@@ -23,7 +23,7 @@ echo 'Acquire::ForceIPv4 "true";' > /etc/apt/apt.conf.d/99force-ipv4
 
 # --- Configurable tunables ------------------------------------------------
 REPO_URL="${REPO_URL:-https://github.com/HoukJangBNL/stand-alone-analyzer.git}"
-REPO_REF="${REPO_REF:-feat/migration-cutover}"
+REPO_REF="${REPO_REF:-main}"
 S3_BUCKET="${S3_BUCKET:-qpress-uploads}"
 S3_MERGED_PFX="${S3_MERGED_PFX:-internal/sam/}"
 S3_M3_PFX="${S3_M3_PFX:-internal/sam/m3/}"
