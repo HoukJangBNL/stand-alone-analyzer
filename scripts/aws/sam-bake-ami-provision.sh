@@ -20,13 +20,23 @@
 #   @@GITHUB_PAT_SSM@@  SSM SecureString name (e.g. /qpress-sam/github_pat)
 #   @@AWS_REGION@@      e.g. us-east-2
 #   @@BAKE_TS@@         ISO-8601 UTC timestamp recorded in the manifest
+#   @@BAKE_UUID@@       unique bake id (used for S3 log path)
+#   @@S3_LOG_BUCKET@@   S3 bucket for persisted provision log (e.g. qpress-uploads)
+#   @@S3_LOG_PREFIX@@   key prefix under bucket (e.g. internal/sam/bake-logs)
 #
 # The orchestrator passes this as a base64-encoded blob through SSM
 # send-command; SSM RunCommand decodes + executes. Total wire size after
 # substitution: ~5 KB (well under SSM's 64 KB document limit).
 
 set -euo pipefail
-exec > >(tee -a /var/log/sam-bake-ami-provision.log) 2>&1
+
+# Persist the entire provisioning run to a local logfile. SSM RunCommand
+# truncates StandardOutputContent at 24 KB, which previously hid the apt
+# RCA on bake #223 attempt 4. The full log is mirrored to /var/log AND
+# uploaded to S3 on both success and failure paths so the orchestrator can
+# fetch the unredacted log.
+PROVISION_LOG="/var/log/sam-bake-provision.log"
+exec > >(tee -a "${PROVISION_LOG}") 2>&1
 echo "=== sam-bake-ami-provision start: $(date -u +%FT%TZ) ==="
 
 # --- Substituted by orchestrator -----------------------------------------
@@ -38,6 +48,28 @@ PY_VERSION="@@PY_VERSION@@"
 GITHUB_PAT_SSM="@@GITHUB_PAT_SSM@@"
 AWS_REGION="@@AWS_REGION@@"
 BAKE_TS="@@BAKE_TS@@"
+BAKE_UUID="@@BAKE_UUID@@"
+S3_LOG_BUCKET="@@S3_LOG_BUCKET@@"
+S3_LOG_PREFIX="@@S3_LOG_PREFIX@@"
+
+# --- S3 log uploader (success AND failure paths) -------------------------
+# Instance profile qpress-sam-gpu-role has s3:PutObject on
+# arn:aws:s3:::qpress-uploads/internal/sam/* — confirmed pre-bake.
+# This trap fires on script exit (any cause). Best-effort: do not let an
+# upload failure mask the original exit code.
+upload_provision_log() {
+  local rc=$?
+  local key="${S3_LOG_PREFIX}/${BAKE_UUID}/provision.log"
+  echo "=== sam-bake-ami-provision end: $(date -u +%FT%TZ) rc=${rc} ==="
+  if [[ -n "${S3_LOG_BUCKET}" && -n "${BAKE_UUID}" ]]; then
+    aws s3 cp "${PROVISION_LOG}" "s3://${S3_LOG_BUCKET}/${key}" \
+      --region "${AWS_REGION}" >/dev/null 2>&1 \
+      && echo "[log] uploaded to s3://${S3_LOG_BUCKET}/${key}" \
+      || echo "[log] WARNING: S3 upload failed (rc unchanged=${rc})"
+  fi
+  return "${rc}"
+}
+trap upload_provision_log EXIT
 
 # --- Constants -----------------------------------------------------------
 WORK_ROOT="/opt/sam"

@@ -57,6 +57,11 @@
 #   --ref <git-ref>       override REPO_REF (default: feat/migration-cutover HEAD)
 #   --skip-validation     skip post-bake validation launch (NOT recommended)
 #   --keep-builder        on bake failure, keep the builder for forensics
+#   --no-fallback         disable spot->on-demand auto-fallback (default ON).
+#                         With fallback ON: try spot in 2a/2b/2c; on capacity
+#                         exhaustion across all AZs, retry once per AZ as
+#                         on-demand. Estimated cost ceiling: g6.xlarge
+#                         on-demand ~$0.91/hr; bake budget ~$2 (<2.2 hr).
 #   --dry-run             resolve all inputs, print plan, exit 0 (no AWS writes)
 #   -h / --help           this help
 #
@@ -100,6 +105,9 @@ REPO_REF=""
 SKIP_VALIDATION=0
 KEEP_BUILDER=0
 DRY_RUN=0
+NO_FALLBACK=0
+S3_LOG_BUCKET="${S3_LOG_BUCKET:-qpress-uploads}"
+S3_LOG_PREFIX="${S3_LOG_PREFIX:-internal/sam/bake-logs}"
 
 aws_() { aws --profile "${AWS_PROFILE}" --region "${AWS_REGION}" "$@"; }
 log()  { printf '[sam-bake-ami] %s\n' "$*" >&2; }
@@ -115,6 +123,7 @@ while [[ $# -gt 0 ]]; do
     --ref)              REPO_REF="${2:?--ref needs a git ref}"; shift 2 ;;
     --skip-validation)  SKIP_VALIDATION=1; shift ;;
     --keep-builder)     KEEP_BUILDER=1; shift ;;
+    --no-fallback)      NO_FALLBACK=1; shift ;;
     --dry-run)          DRY_RUN=1; shift ;;
     -h|--help)          usage; exit 0 ;;
     *)                  fail "unknown flag: $1 (see --help)" ;;
@@ -174,7 +183,10 @@ render_provision() {
     "PY_VERSION=${PY_VERSION}" \
     "GITHUB_PAT_SSM=${GITHUB_PAT_SSM}" \
     "AWS_REGION=${AWS_REGION}" \
-    "BAKE_TS=${BAKE_TS}"; do
+    "BAKE_TS=${BAKE_TS}" \
+    "BAKE_UUID=${BAKE_UUID}" \
+    "S3_LOG_BUCKET=${S3_LOG_BUCKET}" \
+    "S3_LOG_PREFIX=${S3_LOG_PREFIX}"; do
     local k="${pair%%=*}"
     local v="${pair#*=}"
     if [[ "${v}" == *"@@"* ]]; then
@@ -192,7 +204,7 @@ PROVISION_SCRIPT="$(render_provision)"
 # Sanity: no unsubstituted KNOWN keys left. (We don't reject every @@*@@
 # match because the template uses literal @@VAR@@ in its own doc-comments
 # as a meta-example.)
-for k in REPO_URL REPO_REF REPO_SHA VENDOR_SHA PY_VERSION GITHUB_PAT_SSM AWS_REGION BAKE_TS; do
+for k in REPO_URL REPO_REF REPO_SHA VENDOR_SHA PY_VERSION GITHUB_PAT_SSM AWS_REGION BAKE_TS BAKE_UUID S3_LOG_BUCKET S3_LOG_PREFIX; do
   if printf '%s' "${PROVISION_SCRIPT}" | grep -q "@@${k}@@"; then
     fail "provisioning template still contains unsubstituted @@${k}@@"
   fi
@@ -219,11 +231,19 @@ else
 fi
 log "BASE_AMI        = ${BASE_AMI}"
 
-# --- Resolve SG + subnet + instance profile ------------------------------
+# --- Resolve SG + subnets (multi-AZ) + instance profile ------------------
+# Bake #223 RCA: g6.xlarge spot capacity rotates between us-east-2a/2b/2c
+# within seconds. A single-AZ retry strategy never converges under drought.
+# Resolve a public subnet in EACH AZ up-front; the launch loop iterates
+# them in order and falls back to on-demand if all spot capacity exhausts.
+#
+# SUBNET_ID env override (single-subnet mode): if the operator pins a
+# subnet, that subnet wins and fallback is restricted to that AZ only.
+SUBNETS=()  # ordered list of "az subnet-id" pairs
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   VPC_ID="vpc-DRYRUN"
   SG_ID="sg-DRYRUN"
-  SUBNET_ID="subnet-DRYRUN"
+  SUBNETS=("us-east-2a subnet-DRYRUN-2a" "us-east-2b subnet-DRYRUN-2b" "us-east-2c subnet-DRYRUN-2c")
 else
   SG_LOOKUP="$(aws_ ec2 describe-security-groups \
     --filters "Name=group-name,Values=${SG_NAME}" \
@@ -234,23 +254,38 @@ else
     fail "security group ${SG_NAME} not found"
   fi
 
-  SUBNET_ID="${SUBNET_ID:-}"
-  if [[ -z "${SUBNET_ID}" ]]; then
-    SUBNET_ID="$(aws_ ec2 describe-subnets \
-      --filters \
-        "Name=vpc-id,Values=${VPC_ID}" \
-        "Name=availability-zone,Values=us-east-2a" \
-        "Name=map-public-ip-on-launch,Values=true" \
-      --query 'Subnets[0].SubnetId' --output text)"
-  fi
-  if [[ -z "${SUBNET_ID}" || "${SUBNET_ID}" == "None" ]]; then
-    fail "no public subnet in ${VPC_ID} us-east-2a"
+  if [[ -n "${SUBNET_ID:-}" ]]; then
+    # Operator-pinned subnet — discover its AZ for logging/tagging.
+    OVERRIDE_AZ="$(aws_ ec2 describe-subnets \
+      --subnet-ids "${SUBNET_ID}" \
+      --query 'Subnets[0].AvailabilityZone' --output text 2>/dev/null || echo "unknown")"
+    SUBNETS=("${OVERRIDE_AZ} ${SUBNET_ID}")
+  else
+    for az in us-east-2a us-east-2b us-east-2c; do
+      sn="$(aws_ ec2 describe-subnets \
+        --filters \
+          "Name=vpc-id,Values=${VPC_ID}" \
+          "Name=availability-zone,Values=${az}" \
+          "Name=map-public-ip-on-launch,Values=true" \
+        --query 'Subnets[0].SubnetId' --output text)"
+      if [[ -n "${sn}" && "${sn}" != "None" ]]; then
+        SUBNETS+=("${az} ${sn}")
+      fi
+    done
+    if [[ ${#SUBNETS[@]} -eq 0 ]]; then
+      fail "no public subnets discovered across us-east-2{a,b,c} in ${VPC_ID}"
+    fi
   fi
 fi
 log "VPC_ID          = ${VPC_ID}"
 log "SG_ID           = ${SG_ID}"
-log "SUBNET_ID       = ${SUBNET_ID}"
 log "ROLE_NAME       = ${ROLE_NAME}"
+log "SUBNETS         = ${SUBNETS[*]}"
+if [[ ${NO_FALLBACK} -eq 1 ]]; then
+  log "FALLBACK        = disabled (--no-fallback) — spot only, single attempt per AZ"
+else
+  log "FALLBACK        = enabled — spot[2a,2b,2c] then on-demand[2a,2b,2c]"
+fi
 
 # --- Pre-flight: terminate orphan ami-bake-#222 instances ----------------
 # A previous failed run may have left a builder behind. Find anything
@@ -330,30 +365,119 @@ if [[ "${DRY_RUN}" -eq 1 ]]; then
   log "[dry-run] provisioning script $(printf '%s' "${PROVISION_SCRIPT}" | wc -l | tr -d ' ') lines, $(printf '%s' "${PROVISION_SCRIPT}" | wc -c | tr -d ' ') bytes"
   log "[dry-run] would create AMI named ${AMI_NAME}"
   log "[dry-run] would validate via ${VALIDATOR_TYPE}"
+  log "[dry-run] decision tree:"
+  if [[ ${NO_FALLBACK} -eq 1 ]]; then
+    for entry in "${SUBNETS[@]}"; do
+      az="${entry%% *}"; sn="${entry#* }"
+      log "[dry-run]   1. spot   ${BUILDER_TYPE} in ${az} (${sn}) — fail-fast, no fallback"
+    done
+  else
+    step=1
+    for entry in "${SUBNETS[@]}"; do
+      az="${entry%% *}"; sn="${entry#* }"
+      log "[dry-run]   ${step}. spot   ${BUILDER_TYPE} in ${az} (${sn})"
+      step=$((step+1))
+    done
+    for entry in "${SUBNETS[@]}"; do
+      az="${entry%% *}"; sn="${entry#* }"
+      log "[dry-run]   ${step}. on-demand ${BUILDER_TYPE} in ${az} (${sn})  [~\$0.91/hr cap ~\$2 = 2.2 hr]"
+      step=$((step+1))
+    done
+  fi
   log "[dry-run] complete (no AWS state changes)"
   exit 0
 fi
 
-# --- Launch the builder instance -----------------------------------------
-log "[launch] ${BUILDER_TYPE} spot from ${BASE_AMI}"
-TAG_SPEC="ResourceType=instance,Tags=[\
+# --- try_launch_builder: one (subnet, market) RunInstances attempt -------
+# Returns 0 with BUILDER_ID set on success.
+# Returns 10 (capacity error) if AWS reports
+#   InsufficientInstanceCapacity / SpotMaxPriceTooLow / MaxSpotInstanceCountExceeded
+#   — caller should try next AZ or fall back to on-demand.
+# Returns 1 on any other RunInstances error — caller must abort.
+LAUNCH_ERR_FILE=""
+try_launch_builder() {
+  local market="$1" sn="$2" az="$3"
+  local market_args=()
+  if [[ "${market}" == "spot" ]]; then
+    market_args=(--instance-market-options 'MarketType=spot')
+  fi
+  local tag_spec
+  tag_spec="ResourceType=instance,Tags=[\
 {Key=Project,Value=qpress-sam},\
 {Key=Purpose,Value=${PURPOSE_TAG}},\
 {Key=BakeUUID,Value=${BAKE_UUID}},\
+{Key=Market,Value=${market}},\
+{Key=AvailabilityZone,Value=${az}},\
 {Key=Name,Value=${AMI_NAME_PREFIX}-builder-${BAKE_TS_COMPACT}}]"
 
-BUILDER_ID="$(aws_ ec2 run-instances \
-  --image-id "${BASE_AMI}" \
-  --instance-type "${BUILDER_TYPE}" \
-  --instance-market-options 'MarketType=spot' \
-  --iam-instance-profile "Name=${ROLE_NAME}" \
-  --network-interfaces "DeviceIndex=0,AssociatePublicIpAddress=true,Groups=${SG_ID},SubnetId=${SUBNET_ID}" \
-  --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=100,VolumeType=gp3,DeleteOnTermination=true}' \
-  --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \
-  --tag-specifications "${TAG_SPEC}" \
-  --query 'Instances[0].InstanceId' \
-  --output text)"
+  LAUNCH_ERR_FILE="$(mktemp)"
+  if BUILDER_ID="$(aws_ ec2 run-instances \
+      --image-id "${BASE_AMI}" \
+      --instance-type "${BUILDER_TYPE}" \
+      "${market_args[@]}" \
+      --iam-instance-profile "Name=${ROLE_NAME}" \
+      --network-interfaces "DeviceIndex=0,AssociatePublicIpAddress=true,Groups=${SG_ID},SubnetId=${sn}" \
+      --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=100,VolumeType=gp3,DeleteOnTermination=true}' \
+      --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \
+      --tag-specifications "${tag_spec}" \
+      --query 'Instances[0].InstanceId' \
+      --output text 2>"${LAUNCH_ERR_FILE}")"; then
+    rm -f "${LAUNCH_ERR_FILE}"
+    return 0
+  fi
+  local err
+  err="$(cat "${LAUNCH_ERR_FILE}")"
+  rm -f "${LAUNCH_ERR_FILE}"
+  BUILDER_ID=""
+  if echo "${err}" | grep -qE 'InsufficientInstanceCapacity|SpotMaxPriceTooLow|MaxSpotInstanceCountExceeded|Unsupported.*spot'; then
+    log "[launch] ${market} in ${az}: capacity error — $(echo "${err}" | head -n1)"
+    return 10
+  fi
+  log "[launch] ${market} in ${az}: non-capacity error — ${err}"
+  return 1
+}
+
+# Iterate spot[2a,2b,2c] -> on-demand[2a,2b,2c] (capped by --no-fallback).
+BUILDER_ID=""
+BUILDER_MARKET=""
+BUILDER_AZ=""
+log "[launch] start: ${BUILDER_TYPE} from ${BASE_AMI}"
+for entry in "${SUBNETS[@]}"; do
+  az="${entry%% *}"; sn="${entry#* }"
+  log "[launch] try spot in ${az} (${sn})"
+  rc=0
+  try_launch_builder spot "${sn}" "${az}" || rc=$?
+  case "${rc}" in
+    0)  BUILDER_MARKET=spot; BUILDER_AZ="${az}"; break ;;
+    10) continue ;;
+    *)  fail "spot launch in ${az} failed with non-capacity error (see above)" ;;
+  esac
+done
+
+if [[ -z "${BUILDER_ID}" ]]; then
+  if [[ ${NO_FALLBACK} -eq 1 ]]; then
+    fail "all spot launches exhausted across ${#SUBNETS[@]} AZ(s); --no-fallback set, refusing on-demand. Status=ALL-AZ-EXHAUSTED"
+  fi
+  log "[launch] all spot AZs exhausted — falling back to on-demand (g6.xlarge ~\$0.91/hr; budget cap ~\$2)"
+  for entry in "${SUBNETS[@]}"; do
+    az="${entry%% *}"; sn="${entry#* }"
+    log "[launch] try on-demand in ${az} (${sn})"
+    rc=0
+    try_launch_builder on-demand "${sn}" "${az}" || rc=$?
+    case "${rc}" in
+      0)  BUILDER_MARKET=on-demand; BUILDER_AZ="${az}"; break ;;
+      10) continue ;;
+      *)  fail "on-demand launch in ${az} failed with non-capacity error (see above)" ;;
+    esac
+  done
+fi
+
+if [[ -z "${BUILDER_ID}" ]]; then
+  fail "all spot AND on-demand launches exhausted across ${#SUBNETS[@]} AZ(s). Status=ALL-AZ-EXHAUSTED"
+fi
 log "BUILDER_ID      = ${BUILDER_ID}"
+log "BUILDER_MARKET  = ${BUILDER_MARKET}"
+log "BUILDER_AZ      = ${BUILDER_AZ}"
 
 # Cleanup trap — if anything below fails, terminate the builder unless
 # --keep-builder.
@@ -432,12 +556,28 @@ for _i in $(seq 1 180); do
         --command-id "${PROVISION_CMD_ID}" \
         --instance-id "${BUILDER_ID}" \
         --query '[Status,StandardErrorContent]' --output text >&2 || true
-      fail "provisioning ${PROV_STATUS}"
+      break
       ;;
     *) sleep 30 ;;
   esac
 done
-[[ "${PROV_STATUS}" == "Success" ]] || fail "provisioning timed out (last status: ${PROV_STATUS})"
+
+# Pull the persisted provision log from S3 regardless of success/failure.
+# The provision script's EXIT trap uploads /var/log/sam-bake-provision.log
+# on every exit path, so this is our authoritative diagnostic source.
+S3_PROV_KEY="${S3_LOG_PREFIX}/${BAKE_UUID}/provision.log"
+LOCAL_PROV_LOG="${REPO_ROOT}/claudedocs/sam-211-bake-${BAKE_UUID}.provision.log"
+mkdir -p "${REPO_ROOT}/claudedocs"
+log "[log] fetching s3://${S3_LOG_BUCKET}/${S3_PROV_KEY}"
+if aws_ s3 cp "s3://${S3_LOG_BUCKET}/${S3_PROV_KEY}" "${LOCAL_PROV_LOG}" >/dev/null 2>&1; then
+  log "[log] provision log saved to ${LOCAL_PROV_LOG} ($(wc -c < "${LOCAL_PROV_LOG}" | tr -d ' ') bytes)"
+else
+  log "[log] WARNING: could not fetch S3 provision log (UUID=${BAKE_UUID}). May not have been uploaded yet."
+fi
+
+if [[ "${PROV_STATUS}" != "Success" ]]; then
+  fail "provisioning ${PROV_STATUS}; see ${LOCAL_PROV_LOG} for full RCA (S3-persisted, NOT 24KB-truncated)"
+fi
 
 # --- Stop instance + create-image ----------------------------------------
 log "[stop] ${BUILDER_ID}"
@@ -485,7 +625,24 @@ if [[ "${SKIP_VALIDATION}" -eq 1 ]]; then
   exit 0
 fi
 
-log "[validate] launching ${VALIDATOR_TYPE} from ${NEW_AMI}"
+# Validator uses the same subnet the builder ran in (proven capacity for
+# this account/region right now; t3.small is unlikely to hit capacity
+# anyway). On --no-fallback / single-subnet override, that's the only
+# subnet we ever resolved.
+VAL_SUBNET_ID=""
+for entry in "${SUBNETS[@]}"; do
+  vaz="${entry%% *}"; vsn="${entry#* }"
+  if [[ "${vaz}" == "${BUILDER_AZ}" ]]; then
+    VAL_SUBNET_ID="${vsn}"; break
+  fi
+done
+if [[ -z "${VAL_SUBNET_ID}" ]]; then
+  # Fallback: take the first known subnet.
+  first_entry="${SUBNETS[0]}"
+  VAL_SUBNET_ID="${first_entry#* }"
+fi
+
+log "[validate] launching ${VALIDATOR_TYPE} from ${NEW_AMI} in ${BUILDER_AZ} (${VAL_SUBNET_ID})"
 VAL_TAG_SPEC="ResourceType=instance,Tags=[\
 {Key=Project,Value=qpress-sam},\
 {Key=Purpose,Value=${PURPOSE_TAG}-validate},\
@@ -495,7 +652,7 @@ VAL_ID="$(aws_ ec2 run-instances \
   --image-id "${NEW_AMI}" \
   --instance-type "${VALIDATOR_TYPE}" \
   --iam-instance-profile "Name=${ROLE_NAME}" \
-  --network-interfaces "DeviceIndex=0,AssociatePublicIpAddress=true,Groups=${SG_ID},SubnetId=${SUBNET_ID}" \
+  --network-interfaces "DeviceIndex=0,AssociatePublicIpAddress=true,Groups=${SG_ID},SubnetId=${VAL_SUBNET_ID}" \
   --metadata-options 'HttpTokens=required,HttpPutResponseHopLimit=2,HttpEndpoint=enabled' \
   --tag-specifications "${VAL_TAG_SPEC}" \
   --query 'Instances[0].InstanceId' --output text)"
