@@ -617,10 +617,13 @@ else
 fi
 
 log "[create-image] ${AMI_NAME}"
+# CreateImage Description has 255-char cap. Keep it concise; AMI tags
+# carry the structured metadata (BakeUUID, BakedFrom, RCAFix, etc.).
+IMAGE_DESC="qpress-sam GPU AMI ${REPO_SHA8}/${VENDOR_SHA8} @ ${BAKE_TS}; base=${BASE_AMI}; RCAFix=#221,#228"
 NEW_AMI="$(aws_ ec2 create-image \
   --instance-id "${BUILDER_ID}" \
   --name "${AMI_NAME}" \
-  --description "qpress-sam GPU worker AMI baked from ${REPO_REF} @ ${REPO_SHA8} on ${BAKE_TS}. Vendor submodule @ ${VENDOR_SHA8}. peft pre-installed. No baked done-stamps, no baked env-file. RCA #221 fixes applied. Base: ${BASE_AMI_NAME:-DLAMI Ubuntu 22.04} (${BASE_AMI})." \
+  --description "${IMAGE_DESC}" \
   --no-reboot \
   --query 'ImageId' --output text)"
 log "NEW_AMI         = ${NEW_AMI}"
