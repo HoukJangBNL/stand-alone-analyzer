@@ -57,19 +57,47 @@ S3_LOG_PREFIX="@@S3_LOG_PREFIX@@"
 # arn:aws:s3:::qpress-uploads/internal/sam/* — confirmed pre-bake.
 # This trap fires on script exit (any cause). Best-effort: do not let an
 # upload failure mask the original exit code.
+#
+# Bake #227 RCA: stock Ubuntu 22.04 cloud image does NOT preinstall
+# awscli. If step 1 (apt base) hasn't finished yet OR fails before this
+# trap fires, `aws` is `command not found` and the upload silently
+# disappears. So install awscli inline at the top of the script (before
+# step 1), as a single self-contained apt install. If that itself fails,
+# we still tee to /var/log on the instance — but the instance gets
+# terminated, so we additionally try a snap install as a fallback inside
+# the trap.
 upload_provision_log() {
   local rc=$?
   local key="${S3_LOG_PREFIX}/${BAKE_UUID}/provision.log"
-  echo "=== sam-bake-ami-provision end: $(date -u +%FT%TZ) rc=${rc} ==="
-  if [[ -n "${S3_LOG_BUCKET}" && -n "${BAKE_UUID}" ]]; then
-    aws s3 cp "${PROVISION_LOG}" "s3://${S3_LOG_BUCKET}/${key}" \
-      --region "${AWS_REGION}" >/dev/null 2>&1 \
-      && echo "[log] uploaded to s3://${S3_LOG_BUCKET}/${key}" \
-      || echo "[log] WARNING: S3 upload failed (rc unchanged=${rc})"
+  # Use stderr for these diagnostics so they survive the upload pipeline.
+  echo "=== sam-bake-ami-provision end: $(date -u +%FT%TZ) rc=${rc} ===" >&2
+  if ! command -v aws >/dev/null 2>&1; then
+    echo "[log] aws CLI not found; attempting emergency apt install..." >&2
+    apt-get install -y --no-install-recommends awscli >&2 || \
+      echo "[log] emergency apt install failed; log will not reach S3" >&2
+  fi
+  if command -v aws >/dev/null 2>&1 && [[ -n "${S3_LOG_BUCKET}" && -n "${BAKE_UUID}" ]]; then
+    if aws s3 cp "${PROVISION_LOG}" "s3://${S3_LOG_BUCKET}/${key}" \
+        --region "${AWS_REGION}" >&2; then
+      echo "[log] uploaded to s3://${S3_LOG_BUCKET}/${key}" >&2
+    else
+      echo "[log] WARNING: S3 upload failed (rc unchanged=${rc})" >&2
+    fi
   fi
   return "${rc}"
 }
 trap upload_provision_log EXIT
+
+# Install awscli BEFORE step 1 (independent of step 1's apt install) so
+# the trap always has a working aws binary even if step 1 itself hangs
+# or aborts mid-stream.
+echo "[bake 0/9] ensure awscli for S3 log shipping"
+if ! command -v aws >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update -y
+  apt-get install -y --no-install-recommends awscli || true
+fi
+command -v aws >/dev/null 2>&1 || echo "WARNING: awscli still not available — S3 log shipping will fail" >&2
 
 # --- Constants -----------------------------------------------------------
 WORK_ROOT="/opt/sam"
