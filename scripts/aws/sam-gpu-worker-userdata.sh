@@ -95,15 +95,35 @@ if ! done_stamp apt-base; then
 fi
 
 # --- Step 2: NVIDIA driver + CUDA 12.4 toolkit ---------------------------
+# When running on the AWS DLAMI base (post-#228), nvidia-smi already lists
+# all visible GPUs and the AWS-validated driver is in place. Installing
+# `cuda-drivers` from upstream NVIDIA repo would replace it with a stock
+# 610-series driver that only enumerates 2 of 8 L40S cards on g6e.48xlarge
+# (T13 attempt 4: i-0a326075c2fc624d3, nvidia-smi reported 2 / expected 8).
+# Detect a working driver and skip the cuda-drivers install if present.
 if ! done_stamp cuda; then
   echo "[2/8] CUDA 12.4 toolkit + driver"
-  CUDA_KEYRING_DEB="/tmp/cuda-keyring.deb"
-  wget -qO "${CUDA_KEYRING_DEB}" \
-    https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-  dpkg -i "${CUDA_KEYRING_DEB}"
-  apt-get update -y
-  apt-get install -y --no-install-recommends cuda-toolkit-12-4 cuda-drivers
-  apt-get install -y --no-install-recommends libcudnn9-cuda-12 libcudnn9-dev-cuda-12 || true
+  if command -v nvidia-smi >/dev/null && nvidia-smi -L 2>/dev/null | grep -q "^GPU"; then
+    GPU_COUNT=$(nvidia-smi -L 2>/dev/null | wc -l)
+    echo "  pre-installed NVIDIA driver detected (visible GPUs=${GPU_COUNT}); skipping cuda-drivers install"
+    # toolkit-only — keep nvcc + headers without disturbing the kernel module.
+    CUDA_KEYRING_DEB="/tmp/cuda-keyring.deb"
+    wget -qO "${CUDA_KEYRING_DEB}" \
+      https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+    dpkg -i "${CUDA_KEYRING_DEB}"
+    apt-get update -y
+    apt-get install -y --no-install-recommends cuda-toolkit-12-4 || true
+    apt-get install -y --no-install-recommends libcudnn9-cuda-12 libcudnn9-dev-cuda-12 || true
+  else
+    echo "  no working NVIDIA driver detected; installing cuda-toolkit-12-4 + cuda-drivers from NVIDIA repo"
+    CUDA_KEYRING_DEB="/tmp/cuda-keyring.deb"
+    wget -qO "${CUDA_KEYRING_DEB}" \
+      https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+    dpkg -i "${CUDA_KEYRING_DEB}"
+    apt-get update -y
+    apt-get install -y --no-install-recommends cuda-toolkit-12-4 cuda-drivers
+    apt-get install -y --no-install-recommends libcudnn9-cuda-12 libcudnn9-dev-cuda-12 || true
+  fi
   stamp cuda
 fi
 
