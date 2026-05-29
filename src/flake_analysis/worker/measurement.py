@@ -4,13 +4,11 @@ These functions are the boundary between systemd-managed worker state
 and ad-hoc Python (measurement scripts, future prod GPU dispatcher).
 
 Currently shipped:
-* :func:`load_worker_env` — bridge systemd EnvironmentFile= → os.environ
-
-To be added in subsequent plan tasks:
-* ``resolve_model_meta``  — local path or s3:// URI → deterministic
-                             local artifact + name/sha256/source_uri
-                             metadata
-* ``build_defer_payload`` — kwargs for app.configure_task('run_sam').defer
+* :func:`load_worker_env`     — bridge systemd EnvironmentFile= → os.environ
+* :func:`resolve_model_meta`  — local path or s3:// URI → deterministic
+                                 local artifact + name/sha256/source_uri
+                                 metadata
+* :func:`build_defer_payload` — kwargs for app.configure_task('run_sam').defer
 
 Designed to be called from:
 * ``scripts/sam/measure-defer.py`` (this plan)
@@ -152,4 +150,37 @@ def _resolve_s3(s3_uri: str) -> dict[str, str]:
         "sha256": sha,
         "source_uri": s3_uri,
         "local_path": str(local_path),
+    }
+
+
+def build_defer_payload(
+    *,
+    run_id: int,
+    scan_id: int,  # noqa: ARG001 — reserved for future use; kept for caller stability
+    model_meta: dict,
+    dataset_dir: Path,
+    analysis_folder: Path,
+) -> dict:
+    """Construct kwargs for ``app.configure_task('run_sam', queue='gpu').defer_async``.
+
+    Pure function: no DB, no IO. ``model_meta`` must include
+    ``local_path`` (set by :func:`resolve_model_meta`); only the
+    user-facing keys (``name``/``sha256``/``source_uri``) propagate
+    into the deferred payload — ``local_path`` is consumed here and
+    stripped (the path is what becomes ``weights_path``).
+    """
+    if "local_path" not in model_meta:
+        raise ValueError(
+            "model_meta missing 'local_path' — call resolve_model_meta first"
+        )
+    return {
+        "run_id": run_id,
+        "raw_images_dir": str(dataset_dir),
+        "analysis_folder": str(analysis_folder),
+        "weights_path": model_meta["local_path"],
+        "model_meta": {
+            "name": model_meta["name"],
+            "sha256": model_meta["sha256"],
+            "source_uri": model_meta["source_uri"],
+        },
     }

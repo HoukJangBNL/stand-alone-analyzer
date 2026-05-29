@@ -138,3 +138,45 @@ def test_resolve_model_meta_invalid_uri_raises() -> None:
 
     with pytest.raises(ValueError, match="weights_uri|scheme"):
         resolve_model_meta("ftp://example.com/x.pt")
+
+
+def test_build_defer_payload_shape(tmp_path: Path) -> None:
+    from flake_analysis.worker.measurement import build_defer_payload
+
+    payload = build_defer_payload(
+        run_id=42,
+        scan_id=287,
+        model_meta={
+            "name": "merged_m3",
+            "sha256": "abc",
+            "source_uri": "s3://qpress-uploads/internal/sam/merged_m3/x.pt",
+            "local_path": "/opt/sam/weights/x.pt",
+        },
+        dataset_dir=tmp_path / "dataset",
+        analysis_folder=tmp_path / "an",
+    )
+
+    assert payload == {
+        "run_id": 42,
+        "raw_images_dir": str(tmp_path / "dataset"),
+        "analysis_folder": str(tmp_path / "an"),
+        "weights_path": "/opt/sam/weights/x.pt",
+        "model_meta": {
+            "name": "merged_m3",
+            "sha256": "abc",
+            "source_uri": "s3://qpress-uploads/internal/sam/merged_m3/x.pt",
+        },
+    }
+
+
+def test_build_defer_payload_missing_local_path_raises(tmp_path: Path) -> None:
+    from flake_analysis.worker.measurement import build_defer_payload
+
+    with pytest.raises(ValueError, match="local_path"):
+        build_defer_payload(
+            run_id=1,
+            scan_id=1,
+            model_meta={"name": "x", "sha256": "y", "source_uri": "z"},
+            dataset_dir=tmp_path,
+            analysis_folder=tmp_path,
+        )
