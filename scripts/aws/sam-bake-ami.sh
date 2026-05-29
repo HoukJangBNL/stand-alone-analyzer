@@ -640,8 +640,21 @@ aws_ ec2 create-tags --resources "${NEW_AMI}" --tags \
   "Key=BakeUUID,Value=${BAKE_UUID}" \
   "Key=Status,Value=baking"
 
-log "[wait] AMI available (typical 5-10 min)"
-aws_ ec2 wait image-available --image-ids "${NEW_AMI}"
+log "[wait] AMI available (typical 10-20 min for 100 GB snapshot)"
+# AWS default waiter is 40x15s=10min; a 100 GB snapshot can take longer.
+# Custom poll loop: 40 attempts x 30s = 20 min, plus 5x60s overflow = 25 min.
+AMI_STATE="pending"
+for _i in $(seq 1 50); do
+  AMI_STATE="$(aws_ ec2 describe-images --image-ids "${NEW_AMI}" \
+    --query 'Images[0].State' --output text 2>/dev/null || echo unknown)"
+  case "${AMI_STATE}" in
+    available) break ;;
+    failed|invalid|deregistered|error) break ;;
+    pending|transient) sleep 30 ;;
+    *) sleep 30 ;;
+  esac
+done
+[[ "${AMI_STATE}" == "available" ]] || fail "AMI ${NEW_AMI} did not become available within 25 min (state=${AMI_STATE})"
 log "[ami] ${NEW_AMI} state=available"
 
 # Builder no longer needed — terminate now (separate from EXIT trap so
