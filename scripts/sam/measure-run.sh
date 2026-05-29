@@ -157,19 +157,52 @@ fi
 # ------- phase 6 -------
 log 6 "pre-flight"
 if (( DRYRUN )); then
-    log 6 "Would: SSM run nvidia-smi -L | wc -l == 8 etc"
+    log 6 "Would: wait for user-data done, then SSM run nvidia-smi -L | wc -l == 8 etc"
 else
+    # Wait for cloud-init / user-data to finish before checking artifacts.
+    # SSM-online (phase 5) only means ssm-agent registered — userdata may
+    # still be installing CUDA, downloading weights, building vendor, etc.
+    # User-data writes /etc/flake-analysis-worker.env late in its run.
+    # Poll for /var/lib/cloud/instance/boot-finished AND the worker env
+    # file. Max wait 15 min.
+    log 6 "wait for user-data completion (max 15m)"
+    pf_deadline=$(( $(date -u +%s) + 900 ))
+    while :; do
+        if (( $(date -u +%s) >= pf_deadline )); then
+            echo "pre-flight fail: user-data did not finish within 15 min" >&2
+            exit 3
+        fi
+        cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+            --document-name AWS-RunShellScript \
+            --parameters 'commands=["test -f /var/lib/cloud/instance/boot-finished && echo BOOT_FINISHED","test -f /etc/flake-analysis-worker.env && echo ENV_PRESENT","systemctl is-active flake-analysis-worker.service || true"]' \
+            --query "Command.CommandId" --output text)
+        sleep 10
+        out=$(aws_q ssm get-command-invocation \
+            --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+            --query "StandardOutputContent" --output text 2>/dev/null || echo "")
+        if grep -q "^BOOT_FINISHED$" <<< "$out" \
+                && grep -q "^ENV_PRESENT$" <<< "$out" \
+                && grep -q "^active$" <<< "$out"; then
+            log 6 "user-data done — worker active"
+            break
+        fi
+        log 6 "still booting (boot=$(grep -c BOOT_FINISHED <<<"$out") env=$(grep -c ENV_PRESENT <<<"$out") active=$(grep -c "^active$" <<<"$out"))"
+        sleep 20
+    done
+
+    # Now run the actual artifact checks.
     cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
         --document-name AWS-RunShellScript \
-        --parameters 'commands=["nvidia-smi -L | wc -l","ls /opt/sam/stand-alone-analyzer/vendor/QPress-SAM-Flake/run_amg_v2.py","ls /etc/flake-analysis-worker.env","pgrep -f flake_analysis.worker | head -1"]' \
+        --parameters 'commands=["nvidia-smi -L | wc -l","ls /opt/sam/stand-alone-analyzer/vendor/QPress-SAM-Flake/run_amg_v2.py","ls /etc/flake-analysis-worker.env","pgrep -f flake_analysis.worker | head -1","ls /opt/sam/dataset/scan6-100 | wc -l"]' \
         --query "Command.CommandId" --output text)
     sleep 5
     out=$(aws_q ssm get-command-invocation \
         --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
         --query "StandardOutputContent" --output text)
-    grep -q "^8$" <<< "$out" || { echo "pre-flight fail: not 8 GPUs visible" >&2; exit 3; }
-    grep -q "run_amg_v2.py" <<< "$out" || { echo "pre-flight fail: vendor not present" >&2; exit 3; }
-    grep -q "flake-analysis-worker.env" <<< "$out" || { echo "pre-flight fail: worker env missing" >&2; exit 3; }
+    grep -q "^8$" <<< "$out" || { echo "pre-flight fail: not 8 GPUs visible" >&2; echo "$out" >&2; exit 3; }
+    grep -q "run_amg_v2.py" <<< "$out" || { echo "pre-flight fail: vendor not present" >&2; echo "$out" >&2; exit 3; }
+    grep -q "flake-analysis-worker.env" <<< "$out" || { echo "pre-flight fail: worker env missing" >&2; echo "$out" >&2; exit 3; }
+    grep -q "^100$" <<< "$out" || { echo "pre-flight fail: dataset count != 100" >&2; echo "$out" >&2; exit 3; }
 fi
 
 # ------- phase 7 -------
