@@ -2181,3 +2181,119 @@ Steps 2-4 in aggregate plus the systemd unit warm-up appear to push past 15 min 
 ### 21.5 Status
 
 BLOCKED at phase 6 (pre-flight). Trap behavior (cost-safe terminate) functioned correctly. Remediation: raise phase 6 cap and/or pre-bake dataset+venv into AMI. No retry without that change. Awaiting PM decision.
+
+## 22. 8-GPU 100-image measurement run 2026-05-29 (#229 follow-up T13 attempt 3 — BLOCKED at user-data git submodule)
+
+**Run ID:** `1780075404` (epoch from script invocation)
+**Plan / spec:** `docs/superpowers/plans/2026-05-29-gpu-measurement-harness.md` Task 13. Third attempt. After the §21 phase-6 cap fire, PM landed `ce3774c` raising the phase 6 cap from 15 → 25 min (configurable via `PREFLIGHT_WAIT_MIN`). This attempt exercised the 25-min cap path and exposed a different, deeper failure: cloud-init itself errored at user-data step `[4/8] clone repo + submodule` ~9.5 min after launch, leaving env-file unwritten so the orchestrator polled to the new 25-min cap before tripping.
+
+**Outcome:** orchestrator phase 6 polled 41 ticks at 30 s = ~20 min of "still booting (boot=0|1, env=0, active=0)". Operator caught the actual cloud-init error via SSM diagnostic at ~18 min wall, manually issued `terminate-instances`. Trap-EXIT fired at the 25-min cap with the now-redundant terminate (no-op on shutting-down). No measurement performed. Cap-fire log message still reads "15 min" — that string is a literal in `measure-run.sh`'s error path; the actual wait honored the 25-min cap (verified by 41 × 30 s tick count). Minor cosmetic followup, not blocking.
+
+### 22.1 Run summary
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `ce3774c` (phase-6 cap bump) |
+| AMI | `ami-092ae5880cb9cf957` (DLAMI, peft 0.19.1, torch 2.12.0+cu130, vendor 505e1cb) — same as §18-§21 |
+| Launch template | `qpress-sam-gpu-worker` v22 (script republishes per run; v22 ≡ v21 content, only `ImageId`/`InstanceType` re-stamped) |
+| Instance | `i-0ec88d80aeeef16bf` — `g6e.48xlarge` **spot** in `us-east-2a` |
+| SIR | `sir-jbafgsbh` |
+| Launch ts (UTC) | `2026-05-29T17:23:29Z` (epoch 1780075409) |
+| SSM online | `2026-05-29T17:24:34Z` (boot_s = 65 s, consistent with §19-§21) |
+| Cloud-init finished (FAIL) | `2026-05-29T17:33:28Z` (Up 567.23 s in cloud-init log) |
+| Operator-issued terminate | `~2026-05-29T17:46Z` (after operator SSM diagnostic identified the root cause) |
+| Trap-EXIT terminate | `~2026-05-29T17:48Z` (25-min cap fired; redundant — already shutting-down) |
+| Wall billed | **~25 min** (launch → terminate-initiated, lower-bounded by orchestrator cap) |
+| Cost (estimated) | **≈ $1.85** (spot ~$4.47/hr × 25/60 hr in us-east-2a) |
+| Measurement | NOT STARTED |
+
+### 22.2 Root cause — baked vendor checkout fights `git submodule update`
+
+User-data script `scripts/aws/sam-gpu-worker-userdata.sh` step `[4/8]`:
+
+```bash
+if [[ ! -d "${REPO_DIR}/.git" ]]; then
+  git clone "${REPO_URL}" "${REPO_DIR}"
+fi
+pushd "${REPO_DIR}" > /dev/null
+git fetch --all --tags
+git checkout "${REPO_REF}"
+git submodule update --init --recursive vendor/QPress-SAM-Flake
+```
+
+What happened on this AMI revision:
+
+1. AMI was baked with the repo already cloned at `01ceb7f` ("fix(bake): sync before AMI snapshot to flush page cache"). The bake includes a checkout of `vendor/QPress-SAM-Flake` at the gitlink that matched `01ceb7f`'s `.gitmodules`/index. **The `repo` done-stamp under `/var/lib/qpress-sam/` was NOT baked**, so on first boot user-data still entered the `done_stamp repo` branch.
+2. `[[ ! -d "${REPO_DIR}/.git" ]]` is false → `git clone` skipped. OK.
+3. `git fetch --all --tags` succeeds, fetches commits up to `ce3774c` (origin/main).
+4. `git checkout main` succeeds *but does not advance HEAD* — the working tree was already on local branch `main` pointing at `01ceb7f`. The fetch updated `origin/main` to `ce3774c`, but `git checkout main` does not auto-fast-forward; it just confirms the branch is checked out. Verified by cloud-init log line: `Your branch is behind 'origin/main' by 341 commits, and can be fast-forwarded.` So at this point, working tree is still at `01ceb7f`.
+5. `git submodule update --init --recursive vendor/QPress-SAM-Flake` — fails: `error: pathspec 'vendor/QPress-SAM-Flake' did not match any file(s) known to git`. At commit `01ceb7f`, the gitlink for `vendor/QPress-SAM-Flake` either had a different commit recorded vs. what's on disk (causing fsck-style refusal), or the submodule path/state mismatch triggered the pathspec error. Note also `warning: unable to rmdir 'vendor/QPress-SAM-Flake': Directory not empty` — git tried to remove the directory presumably to re-checkout the submodule contents, and the `Directory not empty` indicates baked-in content there it couldn't clean.
+6. `set -e` in user-data → cloud-init module `cc_scripts_user.py` exits non-zero; cloud-init reports `Failed to run module scripts_user`. **No subsequent steps run** — no env-file write, no systemd unit start.
+
+The orchestrator's phase-6 polling vector is `(boot_finished, env_file_exists, service_active)`. Because env-file was never written, polling produces `env=0` forever. The 25-min cap eventually fires.
+
+**Why §18-§21 didn't hit this:** those runs all used the same AMI, but in §21 the user-data presumably got further along (the writeup notes `boot-finished` flag appearing at ~9 min, suggesting cloud-init at least finished cleanly even if env-write was slow). Possible explanations:
+- AMI state on disk has shifted since §21 (e.g., something on the AMI changed the working-tree state between bakes).
+- Race: §21 may have benefited from a `pull --ff-only` step that's not present in `[4/8]`. Reviewing the git step shows it's `checkout`, not `pull` — so any prior success was likely incidental on that revision matching the AMI's baked commit.
+- More likely: the recent commit landings `2293d09` (`fix(bake): bump vendor gitlink ...`), `93302ee`, `49e3e92`, `323a16a`, `5a63a7d`, `ce3774c` happened after the AMI was baked at `01ceb7f`. The vendor gitlink change in `2293d09` is exactly the kind of change that breaks `git submodule update` on a working tree pinned to an older commit. **§22 is the first run to launch an AMI baked at `01ceb7f` against a `main` that's now at `ce3774c` with the vendor gitlink shifted underneath.**
+
+### 22.3 Critical observation — operator SSM diagnostic worked
+
+§21.3 step 3 recommended capturing cloud-init log on cap-fire. This run validated that approach by *manual* operator intervention: ~18 min into phase 6, with `boot=1 env=0` for >5 min and obvious staleness, operator dispatched:
+
+```bash
+aws ssm send-command --region us-east-2 \
+  --instance-ids i-0ec88d80aeeef16bf \
+  --document-name AWS-RunShellScript \
+  --parameters 'commands=["tail -n 80 /var/log/cloud-init-output.log","ls /var/lib/qpress-sam/","ps -ef | grep -E python|pip|cloud-init"]'
+```
+
+The result (cached at `claudedocs/measurement-1780075404/cloud-init-tail.log`) immediately surfaced the `[4/8] clone repo + submodule` failure and the cloud-init `Failed to run module scripts_user` line. **Without this manual SSM probe, root cause would have remained opaque** — the orchestrator's three booleans (boot, env, active) cannot distinguish "still installing" from "user-data crashed and abandoned env-write". Operator probe at ~T+18 min saved ~7 min of further polling cost and produced the actionable signature.
+
+§21.3 step 3 is now elevated from "next steps" to **required**: `measure-run.sh` should issue an SSM RunShellScript at the cap-fire branch, *before* the trap terminates, capturing `/var/log/cloud-init-output.log` and `/var/lib/qpress-sam/` directory listing. This run proved the SSM probe is reliable mid-cap-fire (instance still alive, agent responsive). Once the orchestrator embeds this, a future BLOCKED run produces self-describing artifacts in `claudedocs/measurement-${RUN_ID}/`.
+
+### 22.4 Remediation options
+
+In order of estimated effort + payoff:
+
+1. **Patch user-data `[4/8]` to fast-forward before submodule update.** Minimal change:
+   ```bash
+   git fetch --all --tags
+   git checkout "${REPO_REF}"
+   git pull --ff-only origin "${REPO_REF}"   # NEW — advance to current main
+   git submodule sync --recursive             # NEW — accept new gitlink path/URL
+   git submodule update --init --recursive vendor/QPress-SAM-Flake
+   ```
+   Cost: 5 min code change + 1 AMI rebake (~$0.30) OR no rebake if user-data is treated as live (since the script is read on instance boot, not baked).
+   Tradeoff: doesn't address root issue that AMI's baked working tree is stale on every launch. Each launch repeats fetch+pull. Acceptable for now (pull = ~5-10 s).
+
+2. **Stop baking the working tree into the AMI.** Strip `/opt/qpress/...` repo dir during bake's pre-snapshot cleanup so user-data always does a fresh `git clone`. Eliminates the entire stale-tree class of failure. Cost: bake-script edit + 1 rebake.
+
+3. **Pin user-data to a specific REPO_REF SHA instead of `main`.** Robust against main moving but couples each measurement to a documented SHA. Cost: minor; have to update launch-template default each release.
+
+4. **Pre-bake the *current* commit's working tree + done-stamps into the AMI.** Baked stamps would skip step `[4/8]` entirely. Highest payoff (eliminates phase 6 wait almost entirely) but locks AMI tightly to a SHA — every code change requires rebake. Best for a stable measurement campaign, not for active development.
+
+PM recommendation: **Option 1 (patch user-data)** for immediate unblock, plan **Option 2** as the durable fix. Option 4 is for the eventual production AMI.
+
+### 22.5 #229 + follow-up cumulative
+
+| Attempt | Instance | Market | Duration | Cost | Outcome |
+|---|---|---|---|---|---|
+| §18 | `i-015f7e90f34ec2eec` | spot | 14 min | $0.92 | cloud-init `git checkout main` failed |
+| §19 | `i-0fa4925d3bf3d340e` | spot | 19 min | $1.26 | defer DB config missing |
+| §20 | `i-0e0d5d103fe4dd57f` | on-demand | 59 min | $7.09 | `/proc/PID/environ` pattern insufficient + 53 min idle |
+| §21 attempt 1 | `i-08f95adc57c08b7e0` | spot | ~1 min | $0.14 | phase 6 race (env not yet written, no polling) — fixed in `1a3c4d7` |
+| §21 attempt 2 | `i-0d167e2b072640cd1` | spot | 16 min | $1.31 | phase 6 polling cap fired (15 min) — user-data exceeded cap |
+| §22 attempt 3 (this) | `i-0ec88d80aeeef16bf` | spot | 25 min | **$1.85** | user-data `[4/8]` git submodule failed at T+10 min — orchestrator polled to 25-min cap before noticing |
+| **Total** | | | **134 min** | **$12.57** | **0 measurements completed** |
+
+**$100 cap remaining: $87.43**
+
+### 22.6 Status
+
+BLOCKED at user-data step `[4/8]` (cloud-init module failure). Trap behavior functioned. Phase-6 cap bump `ce3774c` is correct in spirit but didn't help here because the failure mode is different (cloud-init crash, not slow install). Two actionable followups:
+
+- **Patch `scripts/aws/sam-gpu-worker-userdata.sh` `[4/8]` to add `git pull --ff-only` + `git submodule sync` before the submodule update.** Owner: `devops-engineer`.
+- **Embed SSM cloud-init log capture in `measure-run.sh` cap-fire branch.** Owner: `devops-engineer`.
+
+No retry without at least the user-data patch. Awaiting PM decision on whether to land both fixes before T13 attempt 4, or attempt 4 with just the user-data patch and defer the SSM-on-cap-fire to a separate task.
