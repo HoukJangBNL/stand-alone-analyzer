@@ -360,6 +360,26 @@ if ! done_stamp merged-m3-weights; then
   fi
 fi
 
+# --- Step 5e: stage measurement dataset (idempotent) ---------------------
+# GPU Measurement Harness (Task 12). Cold launch syncs the smoke dataset
+# from S3 so scripts/sam/measure-defer.py can enqueue runs against a known
+# local path without per-run S3 I/O. `aws s3 sync` is natively idempotent
+# (size + mtime), and the done_stamp guard short-circuits re-runs after
+# first success. Operators can override DATASET_PFX at LT version create
+# time to point a future run at a different dataset prefix.
+DATASET_PFX="${DATASET_PFX:-internal/sam/scan6-100/}"
+DATASET_DIR="${WORK_ROOT}/dataset/$(basename "${DATASET_PFX%/}")"
+if ! done_stamp dataset; then
+  echo "[6e/8] stage measurement dataset s3://${S3_BUCKET}/${DATASET_PFX} → ${DATASET_DIR}"
+  mkdir -p "${DATASET_DIR}"
+  aws s3 sync "s3://${S3_BUCKET}/${DATASET_PFX}" "${DATASET_DIR}/" \
+    --region "${AWS_REGION}" \
+    --no-progress
+  chown -R "${RUN_USER}:${RUN_USER}" "${DATASET_DIR}"
+  du -sh "${DATASET_DIR}"
+  stamp dataset
+fi
+
 # --- Step 6: pull DB creds from SSM + write env file ---------------------
 # Worker reads SAA_DB_* from /etc/flake-analysis-worker.env via
 # EnvironmentFile= in the systemd unit. SSM SecureString for password
