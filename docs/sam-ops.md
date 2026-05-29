@@ -2297,3 +2297,107 @@ BLOCKED at user-data step `[4/8]` (cloud-init module failure). Trap behavior fun
 - **Embed SSM cloud-init log capture in `measure-run.sh` cap-fire branch.** Owner: `devops-engineer`.
 
 No retry without at least the user-data patch. Awaiting PM decision on whether to land both fixes before T13 attempt 4, or attempt 4 with just the user-data patch and defer the SSM-on-cap-fire to a separate task.
+
+---
+
+## 23. 8-GPU 100-image measurement run 2026-05-29 (#229 follow-up T13 attempt 4 — BLOCKED at pre-flight: only 2 of 8 GPUs visible)
+
+**Run ID:** `1780077963`
+**Plan:** `docs/superpowers/plans/2026-05-29-gpu-measurement-harness.md` Task 13 attempt 4.
+**Status:** BLOCKED at phase 6 pre-flight. Different failure mode than §18–§22.
+
+### 23.1 Run header
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | main / `2b8d568` |
+| AMI | `ami-092ae5880cb9cf957` (DLAMI base `ami-08b80b3cc8adb346a`, baked at `01ceb7f1` 2026-05-29 02:53Z) |
+| Launch template | `qpress-sam-gpu-worker` v23 (re-published by `measure-run.sh` phase 3) |
+| Instance | `i-0a326075c2fc624d3` — `g6e.48xlarge` spot in `us-east-2a` |
+| Launch ts (UTC) | 2026-05-29T18:06:15Z |
+| SSM online | boot_s = 65 |
+| User-data done | YES — worker active (env=1, active=1) |
+| Pre-flight result | **FAIL: nvidia-smi -L reported 2 GPUs (expected 8)** |
+| Wall billed | ~13 min |
+| Cost (estimated) | **~$0.95** |
+
+### 23.2 What happened
+
+`measure-run.sh` phase 6 polled to user-data completion (`worker active` reported). Pre-flight then ran via SSM:
+
+```
+nvidia-smi -L | wc -l              → 2     ← expected 8
+ls /opt/sam/.../run_amg_v2.py      → OK
+ls /etc/flake-analysis-worker.env  → OK
+pgrep -f flake_analysis.worker     → OK (PID 34828)
+ls /opt/sam/dataset/scan6-100 |wc  → 100   ← OK
+```
+
+`grep -q "^8$"` failed → exit 3 → trap terminated the instance. Total elapsed ~3 min after SSM online; total billed ~13 min.
+
+### 23.3 Root cause
+
+Console output (582 lines, `claudedocs/measurement-1780077963/console-output.txt`) shows **userdata step `[2/8] CUDA 12.4 toolkit + driver` ran a fresh install at boot**:
+
+> `0 upgraded, 153 newly installed, 0 to remove`
+> packages 092 `nvidia-driver_610.43.02-1ubuntu1`, 093 `cuda-drivers_610.43.02-1ubuntu1`, etc.
+
+This is **not consistent** with the `sam-bake-ami-provision.sh` (#228 RCA fix, line 125–153) intent: bake delegates the kernel/driver/toolkit triple to AWS DLAMI and explicitly drops the bake-time `cuda-toolkit-12-4 cuda-drivers` install (PR #228 § "Bake #228 RCA fix"). But:
+
+1. `sam-bake-ami-provision.sh` line 287 (per `grep`) clears `STATE_DIR/*.done` so userdata sees a clean slate on cold launch.
+2. `sam-gpu-worker-userdata.sh` step 2 (`scripts/aws/sam-gpu-worker-userdata.sh:97-108`) is gated by `done_stamp cuda` — which is absent at first boot — so it runs `apt-get install -y --no-install-recommends cuda-toolkit-12-4 cuda-drivers`.
+3. `cuda-drivers` apt-pulls **`nvidia-driver 610.43.02`**, replacing the DLAMI's pre-installed AWS-validated driver in-place.
+4. Replacement leaves the running kernel module loaded against (likely) only the first 2 GPUs' PCI domains. `nvidia-smi -L` then enumerates 2 cards.
+
+Past §15 / §18 / §19 / §20 / §21 / §22 runs all happened before the #228 RCA fix landed — they used the older AMI lineage where bake-time CUDA install was kept, so userdata's `cuda.done` carried over and the driver install was a no-op at cold launch. The interaction surfaces ONLY when:
+
+- The base AMI is the new DLAMI (`ami-08b80b3cc8adb346a`, post-#228), AND
+- userdata's `cuda.done` stamp is missing (always true on cold launch since `STATE_DIR` is cleaned at bake), AND
+- `apt-get install cuda-drivers` upgrades the driver beyond what DLAMI shipped.
+
+### 23.4 Why §22 (the previous failure) didn't catch this
+
+§22 failed at userdata step `[4/8]` (git submodule) before step 2 finished installing — so we never got to `nvidia-smi`. §22's user-data fix `2b8d568` (git reset --hard + submodule sync) made step 4 robust, which let step 2 actually complete and produce this new failure mode.
+
+### 23.5 Costs and total
+
+| Attempt | Instance | Market | Duration | Cost | Outcome |
+|---|---|---|---|---|---|
+| §18 | `i-015f7e90f34ec2eec` | spot | 14 min | $0.92 | cloud-init `git checkout main` failed |
+| §19 | `i-0fa4925d3bf3d340e` | spot | 19 min | $1.26 | defer DB config missing |
+| §20 | `i-0e0d5d103fe4dd57f` | on-demand | 59 min | $7.09 | `/proc/PID/environ` insufficient + 53 min idle |
+| §21 attempt 1 | `i-08f95adc57c08b7e0` | spot | ~1 min | $0.14 | phase 6 race — fixed in `1a3c4d7` |
+| §21 attempt 2 | `i-0d167e2b072640cd1` | spot | 16 min | $1.31 | phase 6 polling cap fired |
+| §22 attempt 3 | `i-0ec88d80aeeef16bf` | spot | 25 min | $1.85 | user-data step 4 git submodule fail |
+| §23 attempt 4 (this) | `i-0a326075c2fc624d3` | spot | 13 min | **~$0.95** | userdata step 2 driver install only enumerated 2/8 GPUs |
+| **Total** | | | **147 min** | **~$13.52** | **0 measurements completed** |
+
+**$100 cap remaining: ~$86.48**
+
+### 23.6 Status and proposed next steps
+
+BLOCKED. **Do NOT retry without one of the following:**
+
+**Option A — fix at userdata (cheap, fast).** Patch `scripts/aws/sam-gpu-worker-userdata.sh` step 2 to detect a working pre-installed driver and skip the `cuda-drivers` install:
+
+```bash
+if ! done_stamp cuda; then
+  if nvidia-smi --query-gpu=count --format=csv,noheader >/dev/null 2>&1; then
+    echo "[2/8] DLAMI driver present, skip cuda-drivers install"
+    apt-get install -y --no-install-recommends cuda-toolkit-12-4
+  else
+    echo "[2/8] no driver present, full install"
+    apt-get install -y --no-install-recommends cuda-toolkit-12-4 cuda-drivers
+  fi
+  apt-get install -y --no-install-recommends libcudnn9-cuda-12 libcudnn9-dev-cuda-12 || true
+  stamp cuda
+fi
+```
+
+This mirrors the §17.3 / #228 contract (delegate driver to AWS) and only installs the toolkit — which is needed for `nvcc` and CUDA libs that vendor inference uses.
+
+**Option B — rebake AMI with `cuda.done` stamp pre-set.** Modify `sam-bake-ami-provision.sh` to (a) install `cuda-toolkit-12-4` at bake (no driver), (b) write `STATE_DIR/cuda.done` AND `STATE_DIR/apt-base.done` AND `STATE_DIR/python.done` AND `STATE_DIR/uv.done` AND `STATE_DIR/repo.done` AND `STATE_DIR/deps.done` so cold launches skip steps 1–5 entirely. Cold-start time drops from ~12 min to ~2 min. Bigger blast radius — needs careful design re: which steps can be safely pre-stamped (dataset and DB env can't because they're per-launch).
+
+**Option A is the immediate unblock.** Option B is the long-term fix and overlaps with the §17.3 spec for "fast cold launch."
+
+Awaiting PM decision. No retry without owner sign-off on the patch path.
