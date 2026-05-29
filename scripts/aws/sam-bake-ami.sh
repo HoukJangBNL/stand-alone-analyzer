@@ -14,11 +14,15 @@
 # on a different machine.
 #
 # === Approach: launch + provision + create-image + terminate =============
-# 1. Launch a small g6.xlarge spot instance from stock Ubuntu 22.04.
+# 1. Launch a small g6.xlarge spot instance from AWS Deep Learning Base
+#    GPU AMI (Ubuntu 22.04) — NVIDIA driver + CUDA preinstalled by AWS
+#    against a kernel they've validated (#228 RCA fix; replaces stock
+#    Canonical Ubuntu 22.04 which had a kernel/driver DKMS mismatch).
 # 2. Provision via SSM RunCommand using sam-bake-ami-provision.sh
-#    (templated, lives next to this script). Installs apt base, CUDA,
+#    (templated, lives next to this script). Installs apt base,
 #    Python 3.11, uv, repo + submodule (root-owned, safe.directory baked),
 #    uv sync worker deps + vendor inference deps + peft. Scrubs state.
+#    CUDA install is NO LONGER part of the bake — the DLAMI already has it.
 # 3. Stop, create-image (no-reboot), wait for state=available, terminate
 #    builder.
 # 4. Self-validate the resulting AMI (spot a t3.small from it, run SSM
@@ -210,26 +214,43 @@ for k in REPO_URL REPO_REF REPO_SHA VENDOR_SHA PY_VERSION GITHUB_PAT_SSM AWS_REG
   fi
 done
 
-# --- Resolve stock Ubuntu 22.04 base AMI ---------------------------------
-# Same query as scripts/aws/sam-launch-template.sh. Do NOT use the broken
-# ami-0b7ec5ff47a1eff11 we are replacing.
-log "[resolve] latest Ubuntu 22.04 amd64 AMI in ${AWS_REGION}"
+# --- Resolve base AMI ---------------------------------------------------
+# Bake #228 RCA-driven switch: stock Ubuntu 22.04 cloud image (Canonical
+# 099720109477) ships kernel 6.8.0-1055-aws, against which NVIDIA driver
+# 610.43.02 from the cuda-keyring apt repo fails DKMS module build (#227
+# log lines 1379-1383). Switch base to the AWS Deep Learning Base GPU AMI
+# (Ubuntu 22.04), which ships a kernel/driver pair AWS has already
+# validated. We pick the OSS Nvidia Driver variant for licensing.
+#
+# AMI ID is resolved dynamically (no hardcode) so future re-bakes
+# automatically pick up newer DLAMI publishes. Override the name pattern
+# via BASE_AMI_NAME_PATTERN if AWS renames the family in the future.
+BASE_AMI_NAME_PATTERN="${BASE_AMI_NAME_PATTERN:-Deep Learning Base OSS Nvidia Driver GPU AMI (Ubuntu 22.04)*}"
+log "[resolve] latest DLAMI matching '${BASE_AMI_NAME_PATTERN}' in ${AWS_REGION}"
 if [[ "${DRY_RUN}" -eq 1 ]]; then
   BASE_AMI="ami-DRYRUN-base"
+  BASE_AMI_NAME="DRYRUN-DLAMI"
+  BASE_AMI_DATE="DRYRUN"
 else
-  BASE_AMI="$(aws_ ec2 describe-images \
-    --owners 099720109477 \
+  BASE_INFO="$(aws_ ec2 describe-images \
+    --owners amazon \
     --filters \
-      'Name=name,Values=ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*' \
+      "Name=name,Values=${BASE_AMI_NAME_PATTERN}" \
       'Name=state,Values=available' \
       'Name=architecture,Values=x86_64' \
-    --query 'sort_by(Images, &CreationDate)[-1].ImageId' \
+      'Name=root-device-type,Values=ebs' \
+    --query 'sort_by(Images, &CreationDate)[-1].[ImageId,Name,CreationDate]' \
     --output text)"
+  BASE_AMI="$(echo "${BASE_INFO}" | awk '{print $1}')"
+  BASE_AMI_NAME="$(echo "${BASE_INFO}" | awk '{$1=""; $NF=""; sub(/^[ \t]+/,""); sub(/[ \t]+$/,""); print}')"
+  BASE_AMI_DATE="$(echo "${BASE_INFO}" | awk '{print $NF}')"
   if [[ -z "${BASE_AMI}" || "${BASE_AMI}" == "None" ]]; then
-    fail "could not resolve stock Ubuntu 22.04 AMI"
+    fail "could not resolve DLAMI matching '${BASE_AMI_NAME_PATTERN}'"
   fi
 fi
 log "BASE_AMI        = ${BASE_AMI}"
+log "BASE_AMI_NAME   = ${BASE_AMI_NAME}"
+log "BASE_AMI_DATE   = ${BASE_AMI_DATE}"
 
 # --- Resolve SG + subnets (multi-AZ) + instance profile ------------------
 # Bake #223 RCA: g6.xlarge spot capacity rotates between us-east-2a/2b/2c
@@ -512,8 +533,9 @@ done
 [[ "${PING_STATUS}" == "Online" ]] || fail "builder ${BUILDER_ID} did not register with SSM within 5 min"
 
 # --- Run the provisioning payload via SSM --------------------------------
-# Send as base64 to avoid quoting nightmares. Provisioning takes ~25-40 min
-# (CUDA install dominates). SSM hard timeout: 5400 s (90 min).
+# Send as base64 to avoid quoting nightmares. With DLAMI base (#228), CUDA
+# is preinstalled and the bake is dominated by uv sync + torch wheels;
+# typical 12-20 min. SSM hard timeout kept at 5400 s (90 min) headroom.
 log "[ssm] sending provisioning payload"
 PROVISION_B64="$(printf '%s' "${PROVISION_SCRIPT}" | base64 | tr -d '\n')"
 SSM_PARAMS_FILE="$(mktemp)"

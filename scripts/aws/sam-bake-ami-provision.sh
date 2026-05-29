@@ -118,14 +118,54 @@ apt-get install -y --no-install-recommends \
   software-properties-common unzip wget gzip \
   postgresql-client
 
-# --- Step 2: NVIDIA driver + CUDA 12.4 -----------------------------------
-echo "[bake 2/9] CUDA 12.4 toolkit + driver"
-wget -qO /tmp/cuda-keyring.deb \
-  https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
-dpkg -i /tmp/cuda-keyring.deb
-apt-get update -y
-apt-get install -y --no-install-recommends cuda-toolkit-12-4 cuda-drivers
-apt-get install -y --no-install-recommends libcudnn9-cuda-12 libcudnn9-dev-cuda-12 || true
+# --- Step 2: CUDA sanity check (DLAMI ships driver+toolkit) --------------
+# Bake #228 RCA fix: We no longer install cuda-toolkit-12-4 / cuda-drivers
+# at bake. The base AMI is now the AWS Deep Learning Base GPU AMI
+# (Ubuntu 22.04), which AWS ships with a kernel/driver/toolkit triple
+# they've already validated. Bake #227 proved that installing NVIDIA
+# driver 610.43.02 from the cuda-keyring apt repo fails DKMS module build
+# against Canonical's HWE kernel 6.8.0-1055-aws, so we delegate that
+# concern to AWS.
+#
+# Sanity check: nvidia-smi must report at least 1 GPU, and nvcc must
+# report a CUDA 12.x toolkit. If either fails, abort the provision —
+# the EXIT trap will still upload the log to S3.
+echo "[bake 2/9] CUDA sanity check (DLAMI-provided)"
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  echo "FATAL: nvidia-smi not found on DLAMI base — wrong AMI?" >&2
+  exit 1
+fi
+if ! nvidia-smi >/dev/null 2>&1; then
+  echo "FATAL: nvidia-smi runs but reports failure" >&2
+  nvidia-smi || true
+  exit 1
+fi
+GPU_COUNT="$(nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null | head -n1 || echo 0)"
+if [[ -z "${GPU_COUNT}" || "${GPU_COUNT}" == "0" ]]; then
+  echo "FATAL: nvidia-smi reports 0 GPUs (expected >=1 on g6.xlarge)" >&2
+  nvidia-smi || true
+  exit 1
+fi
+echo "[bake 2/9] nvidia-smi OK, GPU count=${GPU_COUNT}"
+
+NVCC_BIN=""
+if command -v nvcc >/dev/null 2>&1; then
+  NVCC_BIN="$(command -v nvcc)"
+elif [[ -x /usr/local/cuda/bin/nvcc ]]; then
+  NVCC_BIN="/usr/local/cuda/bin/nvcc"
+  export PATH="/usr/local/cuda/bin:${PATH}"
+fi
+if [[ -z "${NVCC_BIN}" ]]; then
+  echo "FATAL: nvcc not found on DLAMI base (looked in PATH and /usr/local/cuda/bin)" >&2
+  exit 1
+fi
+NVCC_CUDA_VER="$("${NVCC_BIN}" --version 2>/dev/null | awk -F, '/release/{print $2}' | awk '{print $2}')"
+if [[ ! "${NVCC_CUDA_VER}" =~ ^12\. ]]; then
+  echo "FATAL: nvcc reports CUDA ${NVCC_CUDA_VER:-unknown}, expected 12.x" >&2
+  "${NVCC_BIN}" --version || true
+  exit 1
+fi
+echo "[bake 2/9] nvcc OK, CUDA=${NVCC_CUDA_VER}"
 
 # --- Step 3: Python 3.11 + uv --------------------------------------------
 echo "[bake 3/9] Python ${PY_VERSION} + uv"
