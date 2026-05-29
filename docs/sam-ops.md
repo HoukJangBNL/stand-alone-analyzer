@@ -2114,3 +2114,70 @@ The measurement work moves to a new plan: **GPU measurement automation harness**
 5. **AMI is fine** — `ami-092ae5880cb9cf957` is validated and re-usable. No re-bake.
 
 That plan is to be brainstormed and authored before the next measurement attempt. The current AMI, LT v18, and dataset (`scan6-100`, `merged_m3.pt`) all stay parked; cost to resume = next launch + measurement only.
+
+---
+
+## 21. 8-GPU 100-image measurement run 2026-05-29 (#229 follow-up — BLOCKED at phase 6)
+
+**Run ID:** `1780073362` (epoch from script invocation)
+**Plan / spec:** `docs/superpowers/plans/2026-05-29-gpu-measurement-harness.md` Task 13. Second attempt (first attempt RUN_ID `1780062668` aborted at the same phase due to a polling race fixed in `1a3c4d7`).
+
+**Outcome:** orchestrator phase 6 polled `/var/lib/cloud/instance/boot-finished` + `/etc/flake-analysis-worker.env` + `flake-analysis-worker.service is-active` for the full 15-minute internal cap and never observed the env-file write. `boot-finished` flag did appear (~9 min into the poll window, ~10 min wall). `flake-analysis-worker.env` and the systemd service did not. Trap EXIT terminated the instance cleanly. No measurement was performed.
+
+### 21.1 Run summary
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `feat/migration-cutover` / `1a3c4d7` (race-fix on top of #229 retry2) |
+| AMI | `ami-092ae5880cb9cf957` (DLAMI, peft 0.19.1, torch 2.12.0+cu130, vendor 505e1cb) — same as §18-§20 |
+| Launch template | `qpress-sam-gpu-worker` v21 (script republishes per run; v21 ≡ v18-v20 content) |
+| Instance | `i-0d167e2b072640cd1` — `g6e.48xlarge` **spot** in `us-east-2a` |
+| Launch ts (UTC) | `2026-05-29T16:49:35Z` |
+| SSM online | `2026-05-29T16:50:40Z` (boot_s = 65 s, consistent with §19/§20) |
+| `boot-finished` flag | observed ~`16:59:30Z` (~9 min into phase 6 polling, ~10 min after launch) |
+| `/etc/flake-analysis-worker.env` | NOT observed within 15-min cap |
+| `flake-analysis-worker.service is-active` | NOT observed within 15-min cap |
+| Pre-flight cap fire | `2026-05-29T17:05:30Z` — 15 min after phase 6 start |
+| Trap-EXIT terminate | `2026-05-29T17:05:49Z` (`shutting-down` state) |
+| Wall billed | **~16 min** (launch → terminate-initiated) |
+| Cost (estimated) | **≈ $1.31** (spot $4.83/hr × 16.3/60 hr) |
+| Measurement | NOT STARTED |
+
+### 21.2 Root cause hypothesis
+
+Cold install on the DLAMI base from a clean instance start does not finish within 15 minutes. The user-data script's path on this AMI revision does:
+
+1. `git checkout` of project + vendor submodule sync (~30-60 s).
+2. `uv sync` / venv hydration (~2-3 min).
+3. Vendor SAM-2 build + peft/torch import bake (~3-4 min).
+4. `aws s3 cp` of weights (898 MB) + `aws s3 sync` of dataset (100 PNGs, 284 MB) (~2-4 min combined depending on link).
+5. Render `/etc/flake-analysis-worker.env` from the project + RDS env-source mechanism (#211 path).
+6. `systemctl start flake-analysis-worker.service`.
+
+Steps 2-4 in aggregate plus the systemd unit warm-up appear to push past 15 min on a cold spot fleet allocation. §20 noted "cloud-init done (12.3 min)" for an on-demand instance — this attempt's spot instance evidently took longer (the boot-finished flag itself only appeared at ~10 min wall, leaving only 5 min of the 15-min cap for steps 5-6 to complete).
+
+**No on-instance log captured** — SSM RunShellScript dispatched at termination time stayed `Pending` (the agent shut down with the host). Only the orchestrator's polling output is available; phase 6's polling vector is `(boot, env, active)` so we have only those three booleans per tick.
+
+### 21.3 Next steps
+
+1. **Raise the phase 6 cap.** 15 min is too aggressive for cold spot allocation on this AMI. Recommend 25 min default, configurable via `--preflight-wait-min` flag. Cost impact at the 25-min cap is ~$2 spot, well inside the $5 cost-cap.
+2. **Pre-bake the dataset and venv into the AMI.** §20.5 step 5 ("AMI is fine — no re-bake") needs revisiting now that we see the cold path is the bottleneck. A re-bake that includes (a) `scan6-100/` under `/opt/sam/dataset/` and (b) a hydrated `.venv/` would cut user-data to ~2 min. Trade-off: AMI rebuild cost (~$0.30) vs. saving ~10 min × every measurement run.
+3. **Capture cloud-init log on cap-fire.** Modify `measure-run.sh` so on phase 6 timeout it issues an SSM `tail /var/log/cloud-init-output.log` *before* the trap terminate runs. Currently the trap terminates first and the instance is unreachable for diagnostic SSM by the time the operator has the log. The diagnostic SSM should be a synchronous step inside the cap-fire branch.
+4. **Spot-vs-on-demand parity check.** Compare an on-demand launch's user-data wall-clock to spot's; if spot is consistently slower (less-warm placement, slower EBS provisioning), bias toward on-demand for measurement runs given the cost is similar at 16-min wall.
+
+### 21.4 #229 + follow-up cumulative
+
+| Attempt | Instance | Market | Duration | Cost | Outcome |
+|---|---|---|---|---|---|
+| §18 | `i-015f7e90f34ec2eec` | spot | 14 min | $0.92 | cloud-init `git checkout main` failed |
+| §19 | `i-0fa4925d3bf3d340e` | spot | 19 min | $1.26 | defer DB config missing |
+| §20 | `i-0e0d5d103fe4dd57f` | on-demand | 59 min | $7.09 | `/proc/PID/environ` pattern insufficient + 53 min idle |
+| §21 attempt 1 | `i-08f95adc57c08b7e0` | spot | ~1 min | $0.14 | phase 6 race (env not yet written, no polling) — fixed in `1a3c4d7` |
+| §21 attempt 2 (this) | `i-0d167e2b072640cd1` | spot | 16 min | **$1.31** | phase 6 polling cap fired (15 min) — user-data exceeded cap |
+| **Total** | | | **109 min** | **$10.72** | **0 measurements completed** |
+
+**$100 cap remaining: $89.28**
+
+### 21.5 Status
+
+BLOCKED at phase 6 (pre-flight). Trap behavior (cost-safe terminate) functioned correctly. Remediation: raise phase 6 cap and/or pre-bake dataset+venv into AMI. No retry without that change. Awaiting PM decision.
