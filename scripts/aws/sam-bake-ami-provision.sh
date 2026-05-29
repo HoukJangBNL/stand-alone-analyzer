@@ -307,3 +307,14 @@ rm -f /root/.git-credentials
 unset GH_PAT GH_REWRITE GH_PAT_RAW
 
 echo "[bake 9/9] provision complete: $(date -u +%FT%TZ)"
+
+# Force kernel page cache flush before AMI snapshot. With --no-reboot
+# create-image AWS takes a crash-consistent (not quiesced) snapshot, so
+# any unflushed writes from steps 7-8 (notably /etc/flake-analysis-
+# bootstrap-info.json) can land 0-byte on the AMI even though the
+# in-instance filesystem shows them populated. Bake #228 attempt 8
+# verified this — the JSON content was correct in /var/log but the
+# resulting AMI had a 0-byte manifest.
+sync
+sync
+echo "[bake 9/9] sync complete; safe to snapshot"
