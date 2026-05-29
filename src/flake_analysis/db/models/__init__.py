@@ -30,6 +30,7 @@ from flake_analysis.db.models.upload import (
     UploadSessionStatus,
 )
 from flake_analysis.db.models.user import User
+from flake_analysis.db.models.worker_events import WorkerEvent
 
 __all__ = [
     "Analysis",
@@ -57,4 +58,5 @@ __all__ = [
     "UsageEvent",
     "User",
     "UserRole",
+    "WorkerEvent",
 ]
