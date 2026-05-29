@@ -210,16 +210,24 @@ git clone "${REPO_URL}" "${REPO_DIR}"
 ( cd "${REPO_DIR}" && git fetch --all --tags && git checkout "${REPO_SHA}" )
 
 # Submodule init+update with PAT-injected URL if available.
-GH_REWRITE=""
+#
+# We pass the credential rewrite via `git -c` (in-process only) instead
+# of writing to a config file. Reasons:
+#   1. `--local` (in parent repo's .git/config) is NOT inherited by
+#      submodule sub-invocations — bake #228 attempt 3 confirmed:
+#      submodule clone still prompted for a username with --local set.
+#   2. `--global` would persist the PAT to /root/.gitconfig which the
+#      AMI snapshot would bake in. Security regression.
+#   3. `-c url.X.insteadOf=Y` is process-scoped and inherited by git's
+#      child processes (including submodule clones).
+GH_CFG=()
 if [[ -n "${GH_PAT}" ]]; then
   GH_REWRITE="https://x-access-token:${GH_PAT}@github.com/"
-  git -C "${REPO_DIR}" config --local "url.${GH_REWRITE}.insteadOf" "https://github.com/"
+  GH_CFG=(-c "url.${GH_REWRITE}.insteadOf=https://github.com/")
 fi
-git -C "${REPO_DIR}" submodule update --init --recursive vendor/QPress-SAM-Flake
-# Strip the credential rewrite so the cloned config carries no PAT into AMI.
-if [[ -n "${GH_REWRITE}" ]]; then
-  git -C "${REPO_DIR}" config --local --unset-all "url.${GH_REWRITE}.insteadOf" 2>/dev/null || true
-fi
+git ${GH_CFG[@]+"${GH_CFG[@]}"} -C "${REPO_DIR}" \
+  submodule update --init --recursive vendor/QPress-SAM-Flake
+unset GH_CFG GH_REWRITE
 
 # Confirm root ownership end-to-end (defensive).
 chown -R root:root "${WORK_ROOT}"
