@@ -432,10 +432,12 @@ try_launch_builder() {
 {Key=Name,Value=${AMI_NAME_PREFIX}-builder-${BAKE_TS_COMPACT}}]"
 
   LAUNCH_ERR_FILE="$(mktemp)"
+  # bash 3.2 (macOS default) errors on "${empty_array[@]}" under set -u.
+  # Use ${var[@]+...} expansion to guard the empty-array case.
   if BUILDER_ID="$(aws_ ec2 run-instances \
       --image-id "${BASE_AMI}" \
       --instance-type "${BUILDER_TYPE}" \
-      "${market_args[@]}" \
+      ${market_args[@]+"${market_args[@]}"} \
       --iam-instance-profile "Name=${ROLE_NAME}" \
       --network-interfaces "DeviceIndex=0,AssociatePublicIpAddress=true,Groups=${SG_ID},SubnetId=${sn}" \
       --block-device-mappings 'DeviceName=/dev/sda1,Ebs={VolumeSize=100,VolumeType=gp3,DeleteOnTermination=true}' \
