@@ -136,8 +136,14 @@ if ! done_stamp repo; then
   fi
   pushd "${REPO_DIR}" > /dev/null
   git fetch --all --tags
-  git checkout "${REPO_REF}"
-  git submodule update --init --recursive vendor/QPress-SAM-Flake
+  # Reset hard to remote ref — handles the case where AMI was baked from
+  # an older SHA on the same branch and remote has advanced (T13 attempt 3:
+  # AMI baked at 01ceb7f, main 341 commits ahead, vendor gitlink shifted).
+  # Also pull submodule URL/SHA changes via `submodule sync` before update.
+  git reset --hard "origin/${REPO_REF}" 2>/dev/null \
+    || git reset --hard "${REPO_REF}"
+  git submodule sync --recursive
+  git submodule update --init --recursive --force vendor/QPress-SAM-Flake
   popd > /dev/null
   chown -R "${RUN_USER}:${RUN_USER}" "${WORK_ROOT}"
   stamp repo
