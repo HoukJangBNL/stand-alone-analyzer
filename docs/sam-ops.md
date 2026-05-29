@@ -1850,3 +1850,267 @@ is always terminated.
 Builder g6.xlarge spot ~30 min (~$0.60), validator t3.small ~5 min
 (~negligible), EBS snapshot ~$0.20. Total ~$1 in transient spend; the
 resulting AMI itself accrues snapshot storage at standard EBS rates.
+
+---
+
+## 18. 8-GPU 100-image measurement run 2026-05-29 (#229) — BLOCKED at pre-flight
+
+**Outcome:** BLOCKED at Phase C (pre-flight checks) before measurement could begin. The AMI `ami-092ae5880cb9cf957` (baked from `feat/migration-cutover @ 01ceb7f1`, see #228) boots successfully but the launch-template user-data (`sam-gpu-worker-userdata.sh`) attempts to checkout `main` branch after boot, and the vendor submodule (`vendor/QPress-SAM-Flake`) is not registered in `main` — it only exists on `feat/migration-cutover`. Cloud-init fails with `error: pathspec 'vendor/QPress-SAM-Flake' did not match any file(s) known to git` during `git submodule update --init`, preventing weights download and worker startup.
+
+### 18.1 Run summary
+
+| Field | Value |
+|---|---|
+| Plan | `docs/superpowers/plans/2026-05-28-sam-8gpu-parallel.md` (Tasks 5–8) |
+| Branch (AMI bake) | `feat/migration-cutover @ 01ceb7f1` (baked into AMI) |
+| Branch (userdata) | `main` (hardcoded checkout in `sam-gpu-worker-userdata.sh`) |
+| AMI | `ami-092ae5880cb9cf957` (DLAMI Ubuntu 22.04, CUDA 12.9, driver 580.159.04, peft 0.19.1, torch 2.12.0+cu130, vendor `505e1cb`) |
+| Launch template | `qpress-sam-gpu-worker` v17 (published for this run) |
+| Instance | `i-015f7e90f34ec2eec` — `g6e.48xlarge` spot in `us-east-2a` |
+| Launch | `2026-05-29T03:35:21Z` |
+| SSM online | `2026-05-29T03:36:24Z` (boot_s = 63 s) |
+| cloud-init status | `error` (user-data script failed at vendor submodule checkout) |
+| Terminated | `2026-05-29T03:49Z` |
+| Wall billed | ~14 min |
+| Cost | **≈ $0.92** (g6e.48xlarge spot ~$3.98/hr × 14/60 hr) |
+| Measurement | NOT STARTED (blocked at pre-flight) |
+
+### 18.2 Root cause
+
+Three-way mismatch between AMI bake, user-data branch, and submodule registration:
+
+1. **AMI `ami-092ae5880cb9cf957`** was baked from `feat/migration-cutover @ 01ceb7f1` by `scripts/aws/sam-bake-ami.sh` (#228). At bake time, the repo at `/opt/sam/stand-alone-analyzer` is on `feat/migration-cutover` HEAD with the vendor submodule initialized.
+
+2. **Launch template user-data** (`sam-gpu-worker-userdata.sh`, captured in LT v17) contains a hardcoded checkout step:
+   ```bash
+   cd /opt/sam/stand-alone-analyzer
+   git fetch origin
+   git checkout main  # <-- HARDCODED
+   git submodule update --init --recursive
+   ```
+   This is Step 2 of the user-data (repo update / branch switch).
+
+3. **Vendor submodule registration** — `.gitmodules` with the `vendor/QPress-SAM-Flake` entry exists on `feat/migration-cutover` but NOT on `main`. When user-data checks out `main`, git sees:
+   ```
+   warning: unable to rmdir 'vendor/QPress-SAM-Flake': Directory not empty
+   Previous HEAD position was 01ceb7f fix(bake): sync before AMI snapshot to flush page cache
+   Switched to branch 'main'
+   Your branch is up to date with 'origin/main'.
+   error: pathspec 'vendor/QPress-SAM-Flake' did not match any file(s) known to git
+   ```
+   The `vendor/` directory from the baked AMI persists on disk but git no longer tracks it, so `submodule update --init` fails.
+
+### 18.3 Why this wasn't caught earlier
+
+- §15 (2026-05-28 M3 8-GPU run) used an **old AMI** (`ami-0b7ec5ff47a1eff11`, hand-baked before the vendor submodule was added to the repo) and the instance was pre-launched and idle — the operator manually fixed missing paths (`peft`, vendor symlinks) via SSM before deferring the measurement. That run never exercised the user-data bootstrap from a fresh AMI.
+- #228 (AMI bake) validated the AMI's `/etc/flake-analysis-bootstrap-info.json` manifest and confirmed `peft` importable, but did NOT launch a worker that would run the full user-data → repo-checkout → submodule-init → weights-download flow. The validation was scoped to "AMI snapshot integrity", not "full boot-to-worker lifecycle".
+
+### 18.4 Resolution options
+
+Three paths, in order of permanence:
+
+**Option A (canonical): merge `feat/migration-cutover` → `main` or update user-data to match AMI branch**
+
+If the `feat/migration-cutover` branch (which has the vendor submodule) is production-ready, merge it to `main` so the user-data's `git checkout main` picks up the submodule registration. Alternatively, if `feat/migration-cutover` is the canonical prod branch, update `sam-gpu-worker-userdata.sh` to checkout `feat/migration-cutover` instead of `main` and publish a new LT version.
+
+**Option B (AMI re-bake): bake from `main` or remove the user-data checkout step**
+
+If `main` is intentionally submodule-free and the vendor code should live only on `feat/migration-cutover`, then:
+1. Remove the `git checkout main` step from `sam-gpu-worker-userdata.sh` so the AMI's baked branch (`feat/migration-cutover`) is preserved across boots, OR
+2. Bake the AMI from `main` (if `main` can bootstrap without the vendor submodule — probably NOT viable since the vendor code is load-bearing for SAM inference).
+
+**Option C (manual pre-flight workaround, NOT RECOMMENDED):**
+
+SSH/SSM into a fresh instance before deferring work, manually `git checkout feat/migration-cutover && git submodule update --init`, then proceed. This is the §15 pattern — it worked once but is not reproducible for automated launches.
+
+### 18.5 Recommendation
+
+**Option A** is the correct fix. The vendor submodule is production code (used by §15 and all multi-GPU paths). If `feat/migration-cutover` is stable, merge it to `main`. If not, either:
+- Update the user-data to `git checkout feat/migration-cutover`, or
+- Cherry-pick the `.gitmodules` addition and vendor-related commits onto `main`.
+
+The AMI (`ami-092ae5880cb9cf957`) itself is correct — it has the vendor code, peft, and all the #221/#228 fixes. The blocker is purely the user-data vs. branch-state mismatch.
+
+### 18.6 Next steps (for operator)
+
+1. Choose Option A resolution (decide branch strategy: merge or update user-data).
+2. If user-data changes, re-publish launch template with the fix.
+3. If branch merge, no LT change needed — the existing LT v17 will work once `main` has the submodule.
+4. Re-launch #229 measurement after the fix.
+
+### 18.7 Cost-to-date for #229
+
+- This blocked attempt: **$0.92**
+- Remaining from $2 cap for measurement: **$1.08** (insufficient for a full 8-GPU run; typical g6e.48xlarge 100-image run is ~10–20 min → ~$1–1.50).
+
+If the fix involves a new AMI bake (Option B), add ~$1 to the cost. **Recommendation: do NOT re-bake** — fix the user-data or branch state (Option A, zero incremental cost).
+
+---
+
+## 19. 8-GPU 100-image measurement run 2026-05-29 (#229 retry) — BLOCKED at Phase D (database config)
+
+**Outcome:** BLOCKED at Phase D (defer) after fixing the §18 user-data issue. LT v18 published with `REPO_REF=feat/migration-cutover`, instance `i-0fa4925d3bf3d340e` (`us-east-2a`) launched successfully, all pre-flight checks PASS (8 GPUs, vendor submodule present, weights downloaded, worker running), but **procrastinate `app.open()` cannot connect to postgres** — instance has no database configured, tries `127.0.0.1:5432` which fails.
+
+### 19.1 Run summary
+
+| Field | Value |
+|---|---|
+| Plan | Original brief Phase A–G, user-data fixed per §18 Option A |
+| Branch (user-data) | `feat/migration-cutover` (commit `503cce9` — PM fix) |
+| AMI | `ami-092ae5880cb9cf957` (same as §18, no re-bake) |
+| Launch template | `qpress-sam-gpu-worker` v18 (published for this retry) |
+| Instance | `i-0fa4925d3bf3d340e` — `g6e.48xlarge` spot in `us-east-2a` |
+| Launch | `2026-05-29T04:08:17Z` |
+| SSM online | `2026-05-29T04:09:24Z` (boot_s = 67 s) |
+| cloud-init status | `done` (04:21:44Z, ~12.3 min for dependencies) |
+| Dataset | `scan6-100` (100 PNG, 271 MB) downloaded to `/tmp/scan6-100` |
+| Defer attempt | `2026-05-29T04:25:41Z` |
+| Defer failure | `psycopg_pool.PoolTimeout: pool initialization incomplete after 30.0 sec` |
+| Terminated | `2026-05-29T04:27Z` |
+| Wall billed | ~19 min |
+| Cost | **≈ $1.26** (g6e.48xlarge spot ~$3.98/hr × 19/60 hr) |
+| Measurement | NOT STARTED (blocked at defer, no job created) |
+
+### 19.2 Root cause
+
+The measurement brief assumed "defer the task" would work out-of-the-box, but the procrastinate worker requires **database connectivity** to enqueue jobs. The GPU instance has:
+
+1. ✅ Worker process running (`pgrep flake_analysis.worker` → PID 35566/35571)
+2. ✅ Worker polls procrastinate_jobs via **RDS** (environment from SSM `/qpress-sam/db_*`)
+3. ❌ **Defer script** uses `app.open()` which tries to connect to `127.0.0.1:5432` (hardcoded default, NO RDS config in the defer script's environment)
+
+The defer script ran as a separate `python3` process invoked by SSM, **not** in the worker's process context, so it didn't inherit the worker's RDS connection env vars from `/etc/flake-analysis-worker.env`.
+
+### 19.3 Architecture gap
+
+The measurement design has a circular dependency:
+
+- **Worker** needs database to poll for jobs → configured via SSM env file → working
+- **Defer** needs database to enqueue jobs → ran as standalone script → NO db config → fails
+
+Previous M3 run (§15) never hit this because the operator manually deferred via the worker's own process environment (using `/proc/PID/environ` pattern). The current brief tried to defer from an SSM command, which is a cleaner pattern but requires the defer script to have RDS credentials.
+
+### 19.4 Resolution options
+
+**Option A (defer from worker context — reuse §15 pattern):**
+
+Execute the defer script inside the worker's process environment by reading `/proc/$(pgrep flake_analysis.worker)/environ`, sourcing it, then running the script. This is the proven §15 pattern.
+
+**Pros**: Zero code/config changes, works immediately.  
+**Cons**: Fragile (depends on worker PID discovery, env-file format).
+
+**Option B (provide RDS config to defer script):**
+
+Pass RDS connection env vars (`SAA_DB_HOST`, `SAA_DB_PORT`, `SAA_DB_NAME`, `SAA_DB_USER`, `SAA_DB_PASSWORD`) to the defer script via SSM parameter fetching or by sourcing `/etc/flake-analysis-worker.env` (if it exists on the AMI — needs verification).
+
+**Pros**: Cleaner, no process introspection.  
+**Cons**: Requires checking if `/etc/flake-analysis-worker.env` is baked into the AMI or created at boot.
+
+**Option C (local postgres for defer — NOT viable):**
+
+Install postgres locally on the GPU instance for defer-only. NOT viable because the worker is already polling RDS `procrastinate_jobs` — a local postgres would be an orphan.
+
+### 19.5 Recommendation
+
+**Option A** (defer from worker env using §15 `/proc/PID/environ` pattern). It's battle-tested and requires zero changes to AMI, user-data, or code. The measurement is a one-shot run, not a long-lived production workflow, so the fragility is acceptable.
+
+Implementation:
+```bash
+WORKER_PID=$(pgrep -f "flake_analysis.worker" | head -1)
+sudo cat /proc/$WORKER_PID/environ | tr '\0' '\n' > /tmp/worker_env.sh
+source /tmp/worker_env.sh
+cd /opt/sam/stand-alone-analyzer
+.venv/bin/python3 /tmp/defer_v2.py
+```
+
+### 19.6 Next steps (for operator)
+
+1. Re-launch instance (same LT v18, AMI, spot).
+2. Pre-flight checks (already pass from this run).
+3. Download dataset (already confirmed working).
+4. **Defer using Option A pattern** (worker env inheritance).
+5. Proceed to Phase E–G (monitor + collect + terminate).
+
+### 19.7 Cost-to-date for #229
+
+- First attempt (§18, BLOCKED at cloud-init): **$0.92**
+- This retry (§19, BLOCKED at defer): **$1.26**
+- **Total: $2.18** (exceeded original $2 cap, but owner raised to $100)
+- Remaining from $5 cap (this retry): **$2.82**
+
+---
+
+## 20. 8-GPU 100-image measurement run 2026-05-29 (#229 retry2) — ABORT
+
+**Outcome:** Third architecture gap exposed. **§15 `/proc/PID/environ` pattern does not work** for the systemd-managed worker. Owner aborted #229 after this attempt; the measurement is being moved to a dedicated automation plan.
+
+### 20.1 Run summary
+
+| Field | Value |
+|---|---|
+| Branch | `feat/migration-cutover` (post-`6a7a422` IPv4 + `94f7232` factory cherry-picks) |
+| AMI | `ami-092ae5880cb9cf957` (unchanged from §19) |
+| Launch template | `qpress-sam-gpu-worker` v18 (unchanged from §19) |
+| Instance | `i-0e0d5d103fe4dd57f` — `g6e.48xlarge` **on-demand** in `us-east-2a` |
+| Market | On-demand ($7.23/hr) — spot capacity drought, auto-fallback fired |
+| Launch | `2026-05-29T04:31:39Z` |
+| SSM online | `2026-05-29T04:32:45Z` (boot_s = 66 s, consistent with §19) |
+| cloud-init | done (12.3 min, same as §19) |
+| Worker | running (PID 35117/35122) |
+| Vendor + dataset + weights | all present and verified |
+| `/proc/PID/environ` extract | **3 keys only**: `PATH`, `HOME`, `USER`. Missing `SAA_DB_HOST/PORT/NAME/USER/PASSWORD`. |
+| Defer attempt result | `psycopg_pool.PoolTimeout` (same as §19, since RDS env vars never reached the defer process) |
+| Terminated | `2026-05-29T05:30:52Z` |
+| Wall billed | **59 min** |
+| Cost | **≈ $7.09** ($7.23/hr × 59/60 hr) |
+| Measurement | NOT STARTED |
+
+### 20.2 Root cause — why §15 pattern doesn't work
+
+The §15 M3 run instructions describe `cat /proc/$WORKER_PID/environ | tr '\0' '\n' | source` to inherit RDS credentials from the running worker. That worked **then** because the operator was running interactively as `ubuntu` and had likely sourced the env file in their shell already, then started the worker as a child of that shell — so the env propagated through fork.
+
+In **production with systemd**, the worker is started by:
+```
+[Service]
+EnvironmentFile=/etc/flake-analysis-worker.env
+ExecStart=...
+```
+
+systemd reads the env file and merges it into the **service's environment block at startup**, which then becomes the process's environ. **But** `/proc/PID/environ` reflects the environ block **at exec time** only — and systemd's behavior is well-documented to not duplicate `EnvironmentFile=` contents into a place visible to `/proc/PID/environ` for child processes that arrive via SSM (because SSM `RunShellScript` spawns a new shell that does not inherit the systemd unit's env).
+
+We confirmed empirically: the worker process's `/proc/35117/environ` contained only the SSM `RunShellScript` shell's defaults — `PATH`, `HOME`, `USER`. None of `SAA_*` survived.
+
+### 20.3 PM rule violation — 53 min idle
+
+Mechanically the most expensive part of this attempt:
+
+1. PM dispatched the agent with a brief that said "wait 10 min for cloud-init, then check, then defer." The agent took the brief literally — fired off a 10-min sleep command, reported "wait running in background," and **closed its task** (subagents are single-turn unless explicitly told to loop and check).
+2. PM read the agent's `task_status=completed` notification body — which said "10-minute wait running in background" — and interpreted this as "agent is polling." The agent was not polling. It had finished.
+3. The on-demand instance kept billing at $7.23/hr for **53 minutes** before owner asked "are we still going?" and PM checked AWS state.
+
+**Lesson:** subagent dispatch briefs that involve waiting MUST include an explicit polling-and-act loop with an exit condition. "Wait 10 min then check" needs to be encoded as the agent's whole task body, not as one of its steps. Agents close at the end of their task — they do not wake themselves up.
+
+### 20.4 #229 cumulative
+
+| Attempt | Instance | Market | Duration | Cost | Outcome |
+|---|---|---|---|---|---|
+| §18 | `i-015f7e90f34ec2eec` | spot | 14 min | $0.92 | cloud-init `git checkout main` failed |
+| §19 | `i-0fa4925d3bf3d340e` | spot | 19 min | $1.26 | defer DB config missing |
+| §20 (this) | `i-0e0d5d103fe4dd57f` | on-demand | **59 min** | **$7.09** | `/proc/PID/environ` pattern insufficient + 53 min idle |
+| **Total** | | | **92 min** | **$9.27** | **0 measurements completed** |
+
+**$100 cap remaining: $90.73**
+
+### 20.5 Decision — ABORT and split
+
+Owner decision (2026-05-29): abort #229, do not continue retrying within this measurement task. Three architecture gaps in three attempts — fixing them one at a time inside `#229` is no longer cost-effective; each fix exposes the next one.
+
+The measurement work moves to a new plan: **GPU measurement automation harness**. Scope:
+
+1. **Defer environment** — replace the `/proc/PID/environ` shortcut with one of: (a) defer launcher sources `/etc/flake-analysis-worker.env` directly, or (b) defer launcher fetches all `SAA_*` from SSM Parameter Store. Either way, document that systemd `EnvironmentFile=` does not propagate via `/proc/PID/environ`.
+2. **Instrumentation** — bake `boot_s` / `model_load_s` / `processing_s` separation into the worker code path itself (per-stage log lines), not as a measurement-time monkey-patch. This was the original goal of #229 and remains valid.
+3. **Subagent polling-and-act pattern** — encode the wait-then-check loop as the agent's whole task body so it doesn't close on the first sleep. Document the pattern in `.claude/agents/devops-engineer.md` so future briefs inherit it.
+4. **Cost-cap auto-terminate** — wire a CloudWatch alarm or Lambda watchdog that hard-terminates the instance when wall-clock exceeds N minutes since launch, regardless of agent state. Belt-and-suspenders for the dispatch-and-forget failure mode that just cost $7.09.
+5. **AMI is fine** — `ami-092ae5880cb9cf957` is validated and re-usable. No re-bake.
+
+That plan is to be brainstormed and authored before the next measurement attempt. The current AMI, LT v18, and dataset (`scan6-100`, `merged_m3.pt`) all stay parked; cost to resume = next launch + measurement only.
