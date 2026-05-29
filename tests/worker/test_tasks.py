@@ -187,3 +187,129 @@ async def test_worker_emits_error_on_runner_exception(
     finished = connector.finished_jobs
     assert len(finished) == 1
     assert finished[0]["status"] == "failed"
+
+
+def test_run_sam_emits_task_lifecycle_events(monkeypatch):
+    """run_sam emits sam_task_start at entry and sam_task_end at exit
+    via emit_marker, with model_meta in the start payload and
+    status/masks_total/errors in the end payload."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    captured: list[dict] = []
+
+    def fake_emit_marker(*, run_id, event, payload=None):
+        captured.append({"run_id": run_id, "event": event, "payload": payload})
+
+    monkeypatch.setattr(worker_tasks, "emit_marker", fake_emit_marker)
+    monkeypatch.setattr(worker_tasks, "_emit_progress", lambda **kw: None)
+
+    fake_result = {"images": 5, "masks_total": 12, "errors": 0, "per_image": {}}
+
+    def fake_runner(*, raw_images_dir, analysis_folder, weights_path, device, progress_callback):
+        return fake_result
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", fake_runner)
+
+    worker_tasks.run_sam(
+        run_id=7,
+        raw_images_dir="/tmp/raw",
+        analysis_folder="/tmp/an",
+        weights_path="/opt/sam/weights/m.pt",
+        model_meta={"name": "merged_m3", "sha256": "abc", "source_uri": "s3://b/k"},
+    )
+
+    events = [c["event"] for c in captured]
+    assert events[0] == "sam_task_start"
+    assert events[-1] == "sam_task_end"
+    assert captured[0]["payload"]["model_meta"] == {
+        "name": "merged_m3",
+        "sha256": "abc",
+        "source_uri": "s3://b/k",
+    }
+    assert captured[-1]["payload"]["status"] == "success"
+    assert captured[-1]["payload"]["masks_total"] == 12
+
+
+def test_run_sam_routes_marker_progress_to_emit_marker(monkeypatch):
+    """Progress messages whose text starts with 'marker:' must route to
+    emit_marker (worker_events sink) and must NOT leak into _emit_progress
+    (the SSE NOTIFY channel)."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    marker_events: list[str] = []
+    progress_messages: list[str] = []
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "emit_marker",
+        lambda *, run_id, event, payload=None: marker_events.append(event),
+    )
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_messages.append(payload.get("message", "")),
+    )
+
+    def fake_runner(*, raw_images_dir, analysis_folder, weights_path, device, progress_callback):
+        progress_callback(0.0, "starting")
+        progress_callback(0.1, "marker:model_load_start")
+        progress_callback(0.5, "halfway")
+        progress_callback(1.0, "marker:processing_end")
+        return {"images": 1, "masks_total": 0, "errors": 0, "per_image": {}}
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", fake_runner)
+
+    worker_tasks.run_sam(
+        run_id=8,
+        raw_images_dir="/x",
+        analysis_folder="/y",
+        weights_path="/z.pt",
+    )
+
+    # marker:* messages routed to emit_marker, including task lifecycle bookends
+    assert "marker:model_load_start" in marker_events
+    assert "marker:processing_end" in marker_events
+    assert "sam_task_start" in marker_events
+    assert "sam_task_end" in marker_events
+    # non-marker progress messages flow through to SSE
+    assert "starting" in progress_messages
+    assert "halfway" in progress_messages
+    # markers MUST NOT leak into _emit_progress
+    assert "marker:model_load_start" not in progress_messages
+    assert "marker:processing_end" not in progress_messages
+
+
+def test_run_sam_emits_task_end_on_failure(monkeypatch):
+    """If run_sam_step raises, sam_task_end must still fire with
+    status='failed' and the exception class name in payload['exc']."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    captured: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "emit_marker",
+        lambda *, run_id, event, payload=None:
+            captured.append({"event": event, "payload": payload}),
+    )
+    monkeypatch.setattr(worker_tasks, "_emit_progress", lambda **kw: None)
+
+    class _Boom(RuntimeError):
+        pass
+
+    def boom(**kw):
+        raise _Boom("vendor blew up")
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", boom)
+
+    import pytest as _pytest
+    with _pytest.raises(_Boom):
+        worker_tasks.run_sam(
+            run_id=9,
+            raw_images_dir="/x",
+            analysis_folder="/y",
+            weights_path="/z.pt",
+        )
+
+    end = next(c for c in captured if c["event"] == "sam_task_end")
+    assert end["payload"]["status"] == "failed"
+    assert end["payload"]["exc"] == "_Boom"

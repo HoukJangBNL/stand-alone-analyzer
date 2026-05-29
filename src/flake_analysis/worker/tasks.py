@@ -48,6 +48,7 @@ import psycopg
 from flake_analysis.db.url import DbSettings, _require_ssl
 from flake_analysis.pipeline.sam import run_sam_step
 from flake_analysis.worker.app import app
+from flake_analysis.worker.markers import emit_marker
 
 logger = logging.getLogger(__name__)
 
@@ -102,34 +103,55 @@ def run_sam(
     analysis_folder: str,
     weights_path: str,
     device: str | None = None,
+    model_meta: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Run SAM2 inference, fan-out progress, return the runner's result dict.
+    """Run SAM2 inference, fan-out progress + markers, return runner result.
 
-    Args mirror :func:`flake_analysis.pipeline.sam.run_sam_step` plus
-    ``run_id`` for progress addressing. All paths are passed as strings
-    because procrastinate serializes args to JSON before persisting.
+    Marker fan-out: progress messages whose text starts with ``"marker:"``
+    are routed to :func:`emit_marker` (worker_events sink) instead of
+    SSE NOTIFY. All other progress messages flow through the existing
+    SSE path unchanged.
 
-    On success, emits a terminal ``completed`` notification carrying the
-    runner result, and returns the same dict to procrastinate (so
-    `app.run_worker_async` records it). On failure, emits an ``error``
-    notification and re-raises so procrastinate marks the job ``failed``
-    (procrastinate's retry policy can pick it up if configured; we do
-    not retry by default — SAM failures are usually deterministic).
+    Lifecycle: emits ``sam_task_start`` at entry (with ``model_meta`` and
+    inputs in the payload) and ``sam_task_end`` at exit (with
+    ``status``, ``masks_total``, ``errors``, and ``exc`` on failure).
+    These let offline analysis derive total wall time without joining
+    against ``procrastinate_jobs``.
     """
+    emit_marker(
+        run_id=run_id,
+        event="sam_task_start",
+        payload={
+            "raw_images_dir": raw_images_dir,
+            "analysis_folder": analysis_folder,
+            "weights_path": weights_path,
+            "model_meta": model_meta,
+        },
+    )
+
     def _on_progress(progress: float, message: str) -> None:
+        msg = str(message)
+        if msg.startswith("marker:"):
+            try:
+                emit_marker(run_id=run_id, event=msg, payload=None)
+            except Exception:  # noqa: BLE001 — never let marker emit failures
+                logger.exception("marker emit failed for run_id=%s", run_id)
+            return
         try:
             _emit_progress(
                 run_id=run_id,
                 payload={
                     "type": "progress",
                     "progress": float(progress),
-                    "message": str(message),
+                    "message": msg,
                 },
             )
-        except Exception:  # noqa: BLE001 — never let progress emit failures
-            # cancel the actual SAM run.
+        except Exception:  # noqa: BLE001
             logger.exception("progress emit failed for run_id=%s", run_id)
 
+    status = "success"
+    masks_total = 0
+    errors = 0
     try:
         result = run_sam_step(
             raw_images_dir=raw_images_dir,
@@ -138,7 +160,10 @@ def run_sam(
             device=device,
             progress_callback=_on_progress,
         )
+        masks_total = int(result.get("masks_total", 0) or 0)
+        errors = int(result.get("errors", 0) or 0)
     except BaseException as exc:  # noqa: BLE001 — re-raised below
+        status = "failed"
         try:
             _emit_progress(
                 run_id=run_id,
@@ -150,6 +175,16 @@ def run_sam(
             )
         except Exception:  # noqa: BLE001
             logger.exception("error emit failed for run_id=%s", run_id)
+        emit_marker(
+            run_id=run_id,
+            event="sam_task_end",
+            payload={
+                "status": status,
+                "masks_total": masks_total,
+                "errors": errors,
+                "exc": type(exc).__name__,
+            },
+        )
         raise
 
     try:
@@ -160,4 +195,13 @@ def run_sam(
     except Exception:  # noqa: BLE001
         logger.exception("completed emit failed for run_id=%s", run_id)
 
+    emit_marker(
+        run_id=run_id,
+        event="sam_task_end",
+        payload={
+            "status": status,
+            "masks_total": masks_total,
+            "errors": errors,
+        },
+    )
     return result
