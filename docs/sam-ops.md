@@ -2540,3 +2540,148 @@ This mirrors phase 6's polling pattern, gives defer up to 2 min (vs the 10s race
 Time/cost cost of fix: ~5 LoC change, single commit, push, then re-launch. Each spot launch with the cumulative fixes is ~$0.75-1.30 if it cleanly progresses through phases 7-11. With remaining $85.73 cap, ~30-50 more attempts feasible — but no expectation of needing more than 1-2 if no further hidden races surface.
 
 Awaiting PM decision: apply patch and re-launch attempt 6, or batch additional safety items first (e.g., capture cloud-init log on cap-fire — §21.3 step 3 still pending; SSM-on-shutdown-down race making post-mortem impossible; defer command capturing actual stderr).
+
+## 25. 8-GPU 100-image measurement run 2026-05-30 (#229 follow-up T13 attempt 6 — BLOCKED: 3 compound bugs uncovered)
+
+**Run ID:** `1780154608`
+**Plan:** `docs/superpowers/plans/2026-05-29-gpu-measurement-harness.md` Task 13 attempt 6.
+**Status:** BLOCKED. **d87916c (phase-7 polling fix) held — defer enqueued cleanly, job_id=11 emitted.** Three new layers surfaced simultaneously: (1) phase-8 polling SSM command has its own quoting bug, (2) phase-9 fetch path is wrong, (3) `worker_events` table missing on RDS so SAM job swallowed all marker errors and short-circuited to empty success.
+
+### 25.1 Run header
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | main / `d87916c` |
+| AMI | `ami-092ae5880cb9cf957` (DLAMI base, vendor `505e1cb` at bake) |
+| Launch template | `qpress-sam-gpu-worker` v25 (re-published by `measure-run.sh` phase 3) |
+| Instance | `i-0e91580814a715bd8` — `g6e.48xlarge` spot in us-east-2 |
+| Launch ts (UTC) | 2026-05-30T15:23:33Z (`launch_ts=1780154613`) |
+| SSM online (UTC) | 2026-05-30T15:24:54Z (boot_s = 81) |
+| User-data done (UTC) | 2026-05-30T15:31:31Z (cold install ~6m37s — well under 25m cap) |
+| Phase 7 result | **PASS — defer enqueued, `job_id=11` emitted** ✅ |
+| Phase 8 result | **FAIL — polling SSM cmd had quoting bug, `status=` empty for entire loop** |
+| Phase 9 result | not reached (phase 8 hung) |
+| Wall billed | ~14 min (manual terminate at $1.67) |
+| Cost (estimated) | **~$1.67** (us-east-2 spot ~$4.78/hr × 0.232 hr) |
+
+### 25.2 What happened — three bugs in compound
+
+**Phases 1–7 sailed through cleanly.** Orchestrator log shows the d87916c phase-7 polling fix held:
+
+```
+[phase=6] user-data done — worker active
+[phase=7] push defer launcher + run
+[phase=7] deferred job_id=11
+[phase=8] polling loop (tick=30s, wall_cap=60m, cost_cap=$5)
+[phase=8] elapsed=520s proj_cost=$1.04 status=
+[phase=8] elapsed=551s proj_cost=$1.11 status=
+... (10 more iterations, all empty status) ...
+[phase=8] elapsed=833s proj_cost=$1.67 status=
+```
+
+PM ran an independent SSM probe at elapsed≈770s and found:
+
+- The orchestrator's polling SSM command was returning Status=Failed every iteration with `psql: error: invalid integer value "$SAA_DB_PORT" for connection option "port"`. The shell-escape sequence in `commands=[...]` collapses `\\\$VAR` to literal `$VAR` before psql sees it.
+- A correctly-quoted manual SSM probe revealed **job 11 was already `succeeded` since 15:32:12Z** — i.e., phase 8 spent the entire 5+ minutes spinning while the work was already done.
+- The actual job result was `{'images': 0, 'masks_total': 0, 'errors': 0, 'per_image': {}}` — completed in 3.479s, processed zero images.
+- Worker journalctl revealed that all 5 marker emits failed with `psycopg.errors.UndefinedTable: relation "worker_events" does not exist` — the `markers.py` module catches and continues (logs ERROR, doesn't raise). The `run_sam` task itself returned an empty success in 3.479 s, not actually loading the SAM model or processing images.
+
+PM terminated the instance manually to stop the spin; orchestrator trap EXIT confirmed kill (idempotent terminate).
+
+### 25.3 Bug 1 — phase-8 polling SSM command has shell-quoting bug
+
+`scripts/sam/measure-run.sh:283-290`:
+
+```bash
+cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+    --document-name AWS-RunShellScript \
+    --parameters "commands=[\"sudo bash -c 'set -a; . /etc/flake-analysis-worker.env; set +a; PGPASSWORD=\\\"\\\$SAA_DB_PASSWORD\\\" psql -h \\\$SAA_DB_HOST -p \\\$SAA_DB_PORT -U \\\$SAA_DB_USER -d \\\$SAA_DB_NAME -tAc \\\"SELECT status FROM procrastinate_jobs WHERE id=$JOB_ID\\\"'\"]" \
+    --query "Command.CommandId" --output text)
+sleep 5
+s=$(aws_q ssm get-command-invocation \
+    --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+    --query "StandardOutputContent" --output text 2>/dev/null | tr -d '[:space:]')
+log 8 "elapsed=${elapsed_s}s proj_cost=\$$proj_cost status=$s"
+```
+
+Two compounding issues:
+- **Quoting**: through bash → JSON → SSM agent → remote bash, `\\\$VAR` collapses to literal `$VAR`. psql receives `-p '$SAA_DB_PORT'` and fails immediately. Reproduced: every poll iteration's `Status=Failed`, `StandardErrorContent="psql: error: invalid integer value \"$SAA_DB_PORT\" for connection option \"port\""`.
+- **Race (same as old phase 7)**: the `sleep 5` before reading StdOut is a fixed wait, not the polling loop d87916c introduced. Even if the quoting were fixed, a 5s wait might be insufficient for psql to RDS through the bastion-less SG.
+
+The `s=` variable is empty either because StdOut is empty (cmd Failed) or cmd is still InProgress at 5s. Either way the log just shows `status=` and the case statement never matches `succeeded` or `failed`, so the loop spins until cost-cap or wall-cap fires.
+
+### 25.4 Bug 2 — phase-9 fetch path mismatch
+
+`scripts/sam/measure-run.sh:307`:
+
+```bash
+cmd_id=$(aws_q ssm send-command ... \
+    --parameters "commands=[\"cat /opt/sam/runs/${RUN_ID}/sam/per_image_results.json\"]" ...)
+```
+
+Worker actually writes to `/opt/sam/runs/${RUN_ID}/07_sam/`. PM verified directly via SSM:
+
+```
+$ ls -la /opt/sam/runs/1780154608/
+drwxr-xr-x 2 ubuntu ubuntu 4096 May 30 15:32 07_sam       ← actual
+
+$ ls -la /opt/sam/runs/1780154608/sam/
+(does not exist)
+```
+
+Phase 9 would have failed even if phase 8 had succeeded. (Convention: the `07_` prefix is from the legacy pipeline's stage numbering — should probe both paths or have orchestrator accept the prefix from `summary.json`.)
+
+### 25.5 Bug 3 — `worker_events` table missing on RDS; markers swallowed; SAM job no-op'd
+
+Worker journalctl showed all 5 expected markers errored:
+
+```
+2026-05-30 15:32:09 ERROR flake_analysis.worker.markers emit_marker failed: run_id=1780154608 event=sam_task_start
+psycopg.errors.UndefinedTable: relation "worker_events" does not exist
+LINE 1: INSERT INTO worker_events (run_id, event, payload) VALUES ($...
+```
+
+…and four more (model_load_start, processing_start, processing_end, sam_task_end). `src/flake_analysis/worker/markers.py:77` catches and logs ERROR without raising, so the task continued — but the task itself returned `{'images': 0}` in 3.479s, meaning no SAM model was loaded and no images processed at all. (Either `run_sam` skipped processing because something failed silently elsewhere, or the dataset enumeration produced 0 — needs a follow-up to clarify.)
+
+Two distinct sub-bugs:
+- (a) The DB migration that creates `worker_events` was never applied to prod RDS (T9/T10 plan dependency, not visible in attempt 1-5 because they failed before reaching SAM execution).
+- (b) `run_sam` should fail loudly when it can't emit markers OR when it processes 0 images, instead of returning `Success: {'images': 0}`. As-is, even if phase 8's polling were fixed, it would have reported `succeeded` to the orchestrator with no actual measurement.
+
+### 25.6 Why §18-§24 didn't surface these
+
+- §18-§23: failed before phase 7. Never reached SAM execution at all.
+- §24 attempt 5: failed at phase 7's `sleep 10` race (now fixed in d87916c). Phase 8/9 never executed; `run_sam` never ran; the missing `worker_events` table was therefore invisible.
+- §25 (this): first attempt where phase 7 cleanly enqueued the job AND `run_sam` actually executed on the worker. Three latent bugs all surfaced together.
+
+### 25.7 Costs and cumulative
+
+| Attempt | Section | Outcome | Cost |
+|---|---|---|---|
+| 1 (§18) | cloud-init main checkout | BLOCKED | $0.92 |
+| 2 (§19) | defer DB config | BLOCKED | $1.26 |
+| 3 (§20) | /proc/PID/environ | BLOCKED + 53m idle | $7.09 |
+| 4 (§21) | 15-min phase-6 cap | BLOCKED | $1.31 |
+| 5 (§21.2) | phase-6 polling cap | BLOCKED | (rolled into §21) |
+| 6 (§22) | git submodule mismatch | BLOCKED | $1.85 |
+| 7 (§23) | cuda-drivers replace DLAMI | BLOCKED | $0.95 |
+| 8 (§24) | phase-7 polling race | BLOCKED | $0.75 |
+| 9 (§25, this) | phase-8 quoting + phase-9 path + missing migration | BLOCKED | **~$1.67** |
+| **Total** | | **0 measurements** | **~$15.94** |
+
+**$100 cap remaining: ~$84.06**
+
+### 25.8 Status and proposed fixes for attempt 7
+
+BLOCKED. **Do NOT retry without all three patches below.**
+
+1. **Phase 8 polling — orchestrator** (`scripts/sam/measure-run.sh:283-296`): replace shell-escape soup with either (a) a small helper script baked into the AMI (`/usr/local/bin/saa-job-status JOB_ID` → echoes status) and just call that, or (b) a heredoc-based `commands=[...]` that uses single-quoted body. Then apply the same SSM-status polling pattern as d87916c (poll `Status` until `Success`, then read StdOut). Recommended: option (a), because it's reusable and avoids the JSON/shell layering hell entirely.
+
+2. **Phase 9 path — orchestrator** (`scripts/sam/measure-run.sh:307`): change `${RUN_ID}/sam/` to `${RUN_ID}/07_sam/`, OR have phase 9 first read `summary.json` to discover the actual subdirectory.
+
+3. **DB migration — db-specialist**: apply the `worker_events` table migration to prod RDS. Verify with: `\dt worker_events` returning the relation. (PM should also confirm whether this migration exists in `alembic/versions/` or needs to be authored — T9/T10 plan tasks cover marker emission but the table creation is a dependency.)
+
+4. **`run_sam` should fail loudly — algo-engineer or api-developer**: when `run_sam` would return `images=0`, raise instead so procrastinate flips the job to `failed` and the orchestrator (with bug 1 fixed) can detect the bad state. Also: marker emit failures should at minimum be loud enough that the orchestrator sees them in worker logs — current behavior of catching and logging makes the failure mode silent.
+
+Time/cost of fixes: 1 = 30-60 min (write helper script, bake into AMI or push via user-data, update orchestrator); 2 = 5 LoC; 3 = 1 alembic command; 4 = ~10 LoC. Each spot launch with cumulative fixes is ~$1.50-2.00 if it cleanly progresses through phases 7-11. With remaining ~$84.06 cap, ~40 more attempts feasible. Realistic estimate: 1-3 more attempts to land if no further hidden bugs surface.
+
+PM observation: each attempt has revealed exactly one or two new layers because each prior failure mode masked the next. Recommend BEFORE attempt 7 doing a focused dry-run of phase 8/9/10 SSM commands manually (no live measurement, just the SSM-cmd shape) on a smaller cheaper instance to flush remaining quoting/path bugs.
