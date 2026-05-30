@@ -220,12 +220,38 @@ else
         --document-name AWS-RunShellScript \
         --parameters "commands=[\"echo $payload_b64 | base64 -d > /tmp/measure-defer.py\",\"chmod +x /tmp/measure-defer.py\",\"sudo /opt/sam/stand-alone-analyzer/.venv/bin/python3 /tmp/measure-defer.py --weights-uri '$WEIGHTS' --dataset-dir /opt/sam/dataset/$(basename '$DATASET' | tr -d '/') --analysis-folder /opt/sam/runs/$RUN_ID --run-id $RUN_ID --scan-id $SCAN_ID\"]" \
         --query "Command.CommandId" --output text)
-    sleep 10
+    # Poll the SSM command Status until it leaves InProgress. Cold-start
+    # measure-defer.py (uv venv import + RDS connect + procrastinate
+    # enqueue) takes 12–25s; a fixed sleep raced and read empty stdout
+    # while the command was still InProgress (T13 attempt 5).
+    DEFER_WAIT_S=180
+    defer_deadline=$(( $(date -u +%s) + DEFER_WAIT_S ))
+    while :; do
+        if (( $(date -u +%s) >= defer_deadline )); then
+            echo "defer poll timed out after ${DEFER_WAIT_S}s" >&2
+            exit 4
+        fi
+        sleep 5
+        invo=$(aws_q ssm get-command-invocation \
+            --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+            --query "[Status,StandardOutputContent,StandardErrorContent]" \
+            --output text 2>/dev/null || echo "Pending				")
+        defer_status=$(awk -F'\t' 'NR==1 {print $1}' <<< "$invo")
+        case "$defer_status" in
+            InProgress|Pending|Delayed) continue;;
+            Success) break;;
+            Failed|Cancelled|TimedOut)
+                echo "defer command status=$defer_status" >&2
+                echo "$invo" >&2
+                exit 4
+                ;;
+        esac
+    done
     out=$(aws_q ssm get-command-invocation \
         --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
         --query "StandardOutputContent" --output text)
     JOB_ID=$(grep -oE 'job_id=[0-9]+' <<< "$out" | head -1 | cut -d= -f2 || true)
-    [[ -n "$JOB_ID" ]] || { echo "defer failed: $out" >&2; exit 4; }
+    [[ -n "$JOB_ID" ]] || { echo "defer success but no job_id in stdout: $out" >&2; exit 4; }
     log 7 "deferred job_id=$JOB_ID"
 fi
 
