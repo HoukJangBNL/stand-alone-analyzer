@@ -2401,3 +2401,142 @@ This mirrors the §17.3 / #228 contract (delegate driver to AWS) and only instal
 **Option A is the immediate unblock.** Option B is the long-term fix and overlaps with the §17.3 spec for "fast cold launch."
 
 Awaiting PM decision. No retry without owner sign-off on the patch path.
+
+## 24. 8-GPU 100-image measurement run 2026-05-30 (#229 follow-up T13 attempt 5 — BLOCKED at phase 7 defer: orchestrator polling race)
+
+**Run ID:** `1780153225`
+**Plan:** `docs/superpowers/plans/2026-05-29-gpu-measurement-harness.md` Task 13 attempt 5.
+**Status:** BLOCKED at phase 7 (defer). **5c2adaa fix held — 8 GPUs enumerated correctly.** New layer surfaced: orchestrator's phase-7 SSM-result wait is too short for a fresh `python3 measure-defer.py` invocation.
+
+### 24.1 Run header
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | main / `5c2adaa` (pushed to origin before launch — verified user-data picks it up via `git reset --hard origin/main`) |
+| AMI | `ami-092ae5880cb9cf957` (DLAMI base, vendor `505e1cb` at bake; user-data step 2 5c2adaa preserves DLAMI driver, step 4 2b8d568 resets to origin/main HEAD) |
+| Launch template | `qpress-sam-gpu-worker` v24 (re-published by `measure-run.sh` phase 3) |
+| Instance | `i-0a6bc375758dde1c3` — `g6e.48xlarge` spot in `us-east-2a` (`sir-v7yfgsch`) |
+| Launch ts (UTC) | 2026-05-30T15:00:30Z |
+| SSM online (UTC) | 2026-05-30T15:01:50Z (boot_s = 80) |
+| User-data done (UTC) | 2026-05-30T15:09:14Z (cold install ~7m24s — well under 25m cap) |
+| Pre-flight result | **PASS — `nvidia-smi -L \| wc -l == 8`, vendor present, env present, dataset count == 100** ✅ |
+| Phase 7 result | **FAIL — defer SSM command empty stdout after 10s wait → exit 4** |
+| Wall billed | ~9m 10s (launch 15:00:30Z → terminate 15:09:40Z) |
+| Cost (estimated) | **~$0.75** (us-east-2a spot ~$4.78/hr × 0.153 hr) |
+
+### 24.2 What happened
+
+`measure-run.sh` ran cleanly through phase 6:
+
+```
+[phase=4] instance=i-0a6bc375758dde1c3 launch_ts=1780153230
+[phase=5] ssm online — boot_s=80
+[phase=6] wait for user-data completion (max 25m)
+[phase=6] still booting (boot=0 env=0 active=0)        ← 14× × ~32s = ~7m28s
+...
+[phase=6] user-data done — worker active
+[phase=7] push defer launcher + run
+defer failed:                                          ← empty stdout
+[phase=11] terminating i-0a6bc375758dde1c3 (trap EXIT)
+```
+
+Pre-flight diagnostics fetched post-hoc via SSM `5eae2cbc-...` (Success at 15:09:22Z):
+
+```
+8                                                                  ← nvidia-smi -L | wc -l (was 2 in §23)
+/opt/sam/stand-alone-analyzer/vendor/QPress-SAM-Flake/run_amg_v2.py
+/etc/flake-analysis-worker.env
+10558                                                              ← worker PID
+100                                                                ← dataset image count
+```
+
+**The 5c2adaa fix held: all 8 L40S enumerated, the previous failure mode (driver replacement reducing visible GPUs to 2) did not recur.** Pre-flight passed, phase 7 dispatched the defer SSM command (`c2363945-6d96-4351-8423-27ed466c723b` at 15:09:28Z), then the orchestrator did `sleep 10` and called `get-command-invocation` once at 15:09:38Z — the command was still `InProgress` so `StandardOutputContent` came back empty. `JOB_ID` was empty, the script printed `defer failed:` (empty) and exited 4. The trap fired terminate at 15:09:40Z. The defer command continued running on the instance but was killed by termination ~10s later.
+
+### 24.3 Root cause — orchestrator phase-7 polling race
+
+`scripts/sam/measure-run.sh:217-228`:
+
+```bash
+cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+    --document-name AWS-RunShellScript \
+    --parameters "commands=[\"echo $payload_b64 | base64 -d > /tmp/measure-defer.py\",\"chmod +x /tmp/measure-defer.py\",\"sudo /opt/sam/stand-alone-analyzer/.venv/bin/python3 /tmp/measure-defer.py --weights-uri ...\"]" \
+    --query "Command.CommandId" --output text)
+sleep 10
+out=$(aws_q ssm get-command-invocation \
+    --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+    --query "StandardOutputContent" --output text)
+JOB_ID=$(grep -oE 'job_id=[0-9]+' <<< "$out" | head -1 | cut -d= -f2 || true)
+[[ -n "$JOB_ID" ]] || { echo "defer failed: $out" >&2; exit 4; }
+```
+
+`sleep 10` is a single fixed wait, not a polling loop. The defer command needs to (a) base64-decode and write `/tmp/measure-defer.py`, (b) `chmod`, (c) launch the project's uv venv Python, (d) import procrastinate + SQLAlchemy + project app, (e) connect to RDS via the worker's env, (f) enqueue the job, (g) print `job_id=N`. Cold venv import alone routinely takes 8-15s; total 12-25s is realistic. SSM also imposes its own scheduling/agent overhead (typically 5-15s before the command starts on the box).
+
+Confirmed via `aws ssm list-commands --instance-id i-0a6bc375758dde1c3` post-hoc — the defer command (`c2363945-...`) was still `InProgress` 13+ minutes later (only because the instance shut down before the agent could finish/report). The phase 6 polling loop (which DOES poll properly with a deadline) does not have this bug; phase 7 was written without polling.
+
+### 24.4 Why §18-§23 didn't surface this
+
+- §18-§20 / §22 / §23: failed before reaching phase 7. §18 cloud-init checkout, §19 defer DB env (SOFT race — defer ran but failed; orchestrator received the python error in stdout), §20 `/proc/PID/environ` (same), §22 user-data step 4, §23 user-data step 2. None reached the "command-still-in-flight" race because either the command failed instantly (DB error printed in stdout immediately) or the script bailed before phase 7.
+- §21: failed at phase 6 cap.
+- §24 (this): first attempt where phase 6 succeeded AND defer was fast enough to dispatch but slow enough to still be running at 10s. The new failure layer is the orchestrator itself, not the worker.
+
+### 24.5 Costs and total
+
+| Attempt | Instance | Market | Duration | Cost | Outcome |
+|---|---|---|---|---|---|
+| §18 | `i-015f7e90f34ec2eec` | spot | 14 min | $0.92 | cloud-init `git checkout main` failed |
+| §19 | `i-0fa4925d3bf3d340e` | spot | 19 min | $1.26 | defer DB config missing |
+| §20 | `i-0e0d5d103fe4dd57f` | on-demand | 59 min | $7.09 | `/proc/PID/environ` insufficient + 53 min idle |
+| §21 attempt 1 | `i-08f95adc57c08b7e0` | spot | ~1 min | $0.14 | phase 6 race — fixed in `1a3c4d7` |
+| §21 attempt 2 | `i-0d167e2b072640cd1` | spot | 16 min | $1.31 | phase 6 polling cap fired |
+| §22 attempt 3 | `i-0ec88d80aeeef16bf` | spot | 25 min | $1.85 | user-data step 4 git submodule fail |
+| §23 attempt 4 | `i-0a326075c2fc624d3` | spot | 13 min | $0.95 | userdata step 2 driver install enumerated 2/8 GPUs |
+| §24 attempt 5 (this) | `i-0a6bc375758dde1c3` | spot | 9 min | **~$0.75** | phase-7 polling race — `sleep 10` then single read |
+| **Total** | | | **156 min** | **~$14.27** | **0 measurements completed** |
+
+**$100 cap remaining: ~$85.73**
+
+### 24.6 Status and proposed fix
+
+BLOCKED. **Do NOT retry without the orchestrator patch below.**
+
+Proposed fix (`scripts/sam/measure-run.sh:217-228`) — replace fixed `sleep 10` with a polling loop similar to phase 6's structure:
+
+```bash
+cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+    --document-name AWS-RunShellScript \
+    --parameters "commands=[...]" \
+    --query "Command.CommandId" --output text)
+
+defer_deadline=$(( $(date -u +%s) + 120 ))   # 2-minute cap on defer
+JOB_ID=""
+out=""
+while (( $(date -u +%s) < defer_deadline )); do
+    sleep 5
+    inv=$(aws_q ssm get-command-invocation \
+        --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+        --query "[Status,StandardOutputContent,StandardErrorContent]" --output text 2>/dev/null || echo "Pending")
+    status=$(awk '{print $1}' <<< "$inv")
+    case "$status" in
+        Success)
+            out=$(aws_q ssm get-command-invocation --command-id "$cmd_id" --instance-id "$INSTANCE_ID" --query "StandardOutputContent" --output text)
+            JOB_ID=$(grep -oE 'job_id=[0-9]+' <<< "$out" | head -1 | cut -d= -f2 || true)
+            break
+            ;;
+        Failed|TimedOut|Cancelled)
+            err=$(aws_q ssm get-command-invocation --command-id "$cmd_id" --instance-id "$INSTANCE_ID" --query "StandardErrorContent" --output text)
+            echo "defer failed (status=$status): $err" >&2
+            exit 4
+            ;;
+        *)  # Pending|InProgress|Delayed
+            ;;
+    esac
+done
+[[ -n "$JOB_ID" ]] || { echo "defer failed: did not return job_id within 2m (status=$status, last_out=$out)" >&2; exit 4; }
+log 7 "deferred job_id=$JOB_ID"
+```
+
+This mirrors phase 6's polling pattern, gives defer up to 2 min (vs the 10s race), distinguishes "still running" from "failed", and on Failed/TimedOut prints the actual stderr from the box instead of empty.
+
+Time/cost cost of fix: ~5 LoC change, single commit, push, then re-launch. Each spot launch with the cumulative fixes is ~$0.75-1.30 if it cleanly progresses through phases 7-11. With remaining $85.73 cap, ~30-50 more attempts feasible — but no expectation of needing more than 1-2 if no further hidden races surface.
+
+Awaiting PM decision: apply patch and re-launch attempt 6, or batch additional safety items first (e.g., capture cloud-init log on cap-fire — §21.3 step 3 still pending; SSM-on-shutdown-down race making post-mortem impossible; defer command capturing actual stderr).
