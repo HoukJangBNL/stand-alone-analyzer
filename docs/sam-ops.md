@@ -2685,3 +2685,255 @@ BLOCKED. **Do NOT retry without all three patches below.**
 Time/cost of fixes: 1 = 30-60 min (write helper script, bake into AMI or push via user-data, update orchestrator); 2 = 5 LoC; 3 = 1 alembic command; 4 = ~10 LoC. Each spot launch with cumulative fixes is ~$1.50-2.00 if it cleanly progresses through phases 7-11. With remaining ~$84.06 cap, ~40 more attempts feasible. Realistic estimate: 1-3 more attempts to land if no further hidden bugs surface.
 
 PM observation: each attempt has revealed exactly one or two new layers because each prior failure mode masked the next. Recommend BEFORE attempt 7 doing a focused dry-run of phase 8/9/10 SSM commands manually (no live measurement, just the SSM-cmd shape) on a smaller cheaper instance to flush remaining quoting/path bugs.
+
+---
+
+## 26. 8-GPU 100-image manual measurement run 2026-05-31 (#229 follow-up — BLOCKED)
+
+**Outcome: BLOCKED.** Drove the §15 manual SSH/SSM pattern to skip the
+broken `measure-run.sh` orchestrator. Got past every orchestration bug
+the prior 6 attempts uncovered (cleanly deferred procrastinate jobs
+with the right `model_meta` payload, alembic migrated `worker_events`
+to head, all 8 GPUs visible, dataset staged) — only to discover **two
+new latent bugs** in AMI v25 that prior attempts never reached because
+they died earlier in the pipeline:
+
+| Attempt | Job | RUN_ID | Code path | Wall | Failure |
+|---|---|---|---|---|---|
+| 1 (spot)         | n/a | n/a        | n/a | 11 min | spot-evicted at boot+9min (`instance-terminated-no-capacity` in `us-east-2a`) |
+| 2 (on-demand) #1 | 12 | 1780258765 | merged_m3 (`build_sam2_from_yaml`) | 11.0 s task | `KeyError: 'model'` in `sam2._load_checkpoint` |
+| 2 (on-demand) #2 | 13 | 1780259009 | lora-runtime (`build_sam2_finetuned` + peft) | 22.5 s task | `RuntimeError: CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH` |
+
+**Total cost ≈ $4.74**, instance ≈ 32 min on-demand + ≈ 11 min spot,
+session wall ≈ 33 min. Within both the $5 operator cost cap and the
+60-min wall cap. Both instances terminated cleanly (no manual
+cleanup outstanding).
+
+### 26.1 What worked (the §15 manual pattern proved correct)
+
+Validated the manual SSH/SSM pattern is **the right approach** for
+exploratory measurement work — the orchestrator (`measure-run.sh`)
+and `measure-defer.py` are not on the critical path, only the
+worker-side procrastinate defer + cluster-side SAM is.
+
+Concrete pieces that worked first-try this run:
+
+1. **Direct `ec2 run-instances` from launch template** with the
+   spot fall-through to on-demand. LT v25 user-data is solid:
+   boot-finished + worker.env + worker `active` + 8 GPUs + 100
+   images all gated cleanly with one polling loop. On-demand wall
+   from `run-instances` to user-data-done = **8 min 50 s** (73 s
+   to SSM Online + ~7.6 min waiting for the M3 dataset/weights
+   download via user-data step 5d).
+
+2. **Defer pattern via base64-encoded shell uploaded to `/tmp/` then
+   `sudo bash`**. The plan's inline `sudo bash -c '<heredoc>'` SSM
+   payload broke on shell quoting (single-quote in JSON `"commands"`
+   array vs single-quoted shell payload). Workaround: `base64`-encode
+   the script locally, push via SSM as
+   `echo $B64 | base64 -d > /tmp/X.sh && sudo bash /tmp/X.sh`. This
+   sidesteps every quoting trap simultaneously and produced clean
+   stdout/stderr capture for both attempts.
+
+3. **Alembic migration `0007_worker_events`** applied to prod RDS
+   first try (`Running upgrade 0006_procrastinate_init -> 0007_worker_events`).
+   Plan's inline `CREATE TABLE` was fragile (had `connect_args={"ssl": True}`
+   which RDS rejected with `SSLCertVerificationError: self-signed
+   certificate in certificate chain`); switched to using the URL-form
+   `?ssl=require` (matching `src/flake_analysis/db/url.py` line 61)
+   and ran via `.venv/bin/alembic upgrade head`. Cleaner and reuses
+   the existing migration that's already in the tree.
+
+4. **Procrastinate defer via `app.tasks["run_sam"].defer_async()`**
+   inside `async with app.open_async()` worked verbatim. Got
+   `JOB_ID=12` and `JOB_ID=13` cleanly and the worker picked up both
+   within ~25 s of defer.
+
+5. **Job-status polling via psql against `procrastinate_jobs`** cleanly
+   surfaced `failed` status within one poll cycle for both attempts.
+   No race; no need for Procrastinate's `wait_for_jobs_listener`
+   complexity.
+
+### 26.2 Bug 1 — `merged_m3.pt` checkpoint format mismatch
+
+**Path taken:** `_resolve_merged_m3_path()` returned
+`/opt/sam/weights/merged_m3.pt` (because user-data sets
+`SAM_MERGED_M3_PATH` and the file was on disk), so
+`_run_sam_multi_gpu` set `config["use_original_sam2"] = True`,
+`config["checkpoint"] = "/opt/sam/weights/merged_m3.pt"` and the
+vendor's `worker_process_images` called
+`build_sam2_from_yaml(yaml, ckpt)` per child, which in turn calls
+SAM2's `_load_checkpoint` (`.venv/.../sam2/build_sam.py:166`):
+
+```python
+sd = torch.load(ckpt_path, map_location="cpu", weights_only=True)["model"]
+```
+
+But on AMI v25 `merged_m3.pt` introspects as:
+
+```
+top-level type: dict
+top-level keys (2): ['model_config', 'model_state_dict']
+```
+
+— same structure as the §13 `merged.pt` introspection in §13.3 line 902.
+The merger that produced `merged_m3.pt` outputs `{model_config,
+model_state_dict}`, but vanilla SAM2 (`pip install sam2`) expects
+`{model: {...}}`. Job 12 dies in <11 s with `KeyError: 'model'`.
+
+This had been **invisible in §15** because that earlier run did not
+have `SAM_MERGED_M3_PATH` set in the worker systemd env (verified by
+re-reading §15.3 — only `SAM_WEIGHTS_PATH` and `SAM_M3_DIR` were
+exported then). At some point between the §15 AMI and v25, user-data
+started exporting `SAM_MERGED_M3_PATH=/opt/sam/weights/merged_m3.pt`,
+which forces the merged_m3 routing branch in
+`src/flake_analysis/core/pipeline/sam.py:380-386` regardless of
+whether the checkpoint is in the right format for SAM2's loader.
+
+**Workaround applied this run:** renamed
+`/opt/sam/weights/merged_m3.pt → merged_m3.pt.disabled` so
+`_resolve_merged_m3_path()` returns None (its `path.is_file()` check
+on line 235 fails), forcing the LoRA-runtime fallback. That hit bug
+2 below.
+
+**Permanent fix options (algo-engineer territory):**
+
+- (A) Update `_resolve_merged_m3_path()` to inspect the checkpoint
+  before returning it — return None if the dict doesn't have a `model`
+  key. Cheapest, but masks the real problem.
+- (B) Patch `src/flake_analysis/core/pipeline/sam.py:_run_sam_multi_gpu`
+  to reshape the loaded dict (`sd = sd.get("model_state_dict", sd.get("model", sd))`)
+  before vendor sees it — either via a `_load_checkpoint` monkey-patch
+  alongside the existing `load_training_args` patch on line 369, or a
+  pre-load step that materializes a SAM2-compatible `.pt` next to
+  the merged_m3 input.
+- (C) Re-mint `merged_m3.pt` with the SAM2 format (top-level `model`
+  key holding the state_dict). Punts to whoever produced the artifact;
+  same shape as §13.5 option 3.
+- (D) Drop the merged_m3 routing entirely and stay on the LoRA-runtime
+  path (the path §15 actually exercised). But then bug 2 below has to
+  be fixed first.
+
+### 26.3 Bug 2 — cuDNN sublibrary version mismatch (AMI v25)
+
+After disabling merged_m3 to force the LoRA-runtime path, the run made
+real progress: vendor `run_multi_process` correctly spawned 8 child
+processes, each `Applied LoRA modules` (rank=16, 14.4M trainable
+params), each picked up its image shard (13/13/13/13/12/12/12/12),
+and the first few images logged `[N/100] [GPU K] Processing: ...`.
+
+Then within 1 s of starting per-image inference, every child died
+with the same fatal CUDA error:
+
+```
+File ".../torch/nn/modules/conv.py:560", in _conv_forward
+    return F.conv2d(input, weight, ...)
+RuntimeError: CUDNN_BACKEND_TENSOR_DESCRIPTOR cudnnFinalize failed
+ptrDesc->finalize() cudnn_status: CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH
+```
+
+**Environment introspection (AMI v25, on-demand `g6e.48xlarge`):**
+
+| Component | Version |
+|---|---|
+| NVIDIA driver | `580.159.04` |
+| Driver-reported CUDA | `13.0` |
+| `torch` | `2.12.0+cu130` |
+| `torch.version.cuda` | `13.0` |
+| `torch.backends.cudnn.version()` | `92000` (cuDNN 9.20.00) |
+| Bundled cuDNN libs | `.venv/.../site-packages/nvidia/cudnn/lib/libcudnn*.so.9` |
+
+cuDNN 9.20.00 is the version PyTorch's `cu130` wheel bundles. The
+"sublibrary version mismatch" string means at runtime, when conv2d
+tries to construct a backend tensor descriptor, the precompiled
+engines library reports a different sublibrary version than the
+header library it links against. This typically happens when:
+
+1. The system has a different `libcudnn` available (e.g., from a
+   global `cudnn-cuda-13` apt package) that gets `LD_PRELOAD`/
+   `LD_LIBRARY_PATH` precedence over the venv's bundled one in the
+   spawned multiprocessing child — but the engines runtime-compiled
+   library was already paged in from the venv path during parent
+   imports, creating a torn pair.
+2. The torch wheel was built against a cuDNN ABI variant that
+   doesn't match what the DLAMI driver registered against.
+
+The fact that **model load and LoRA application succeeded** (those
+also run conv2d/linear ops indirectly via parameter init) and only
+the *first inference forward* tripped the check is consistent with
+a fork/spawn-time loader divergence — child processes inherit the
+already-mapped libs but resolve dynamic backend symbols freshly.
+
+**This is an AMI bake fix, not a runtime workaround.** Options:
+
+- Pin to torch 2.10.x or 2.11.x with `cu124`/`cu126` (proven stable
+  on §15's AMI); this means re-pinning the inference uv lockfile
+  and rebaking. Aligns with the §15 driver tier (the `Applied LoRA
+  modules` log lines on §15 show no cuDNN errors at the same
+  forward).
+- Run `uv pip install --force-reinstall` of `torch` against the
+  exact CUDA version on the driver, with explicit `--index-url
+  https://download.pytorch.org/whl/cu130` — but this likely just
+  reinstalls the same broken wheel. Still worth trying once.
+- Replace the DLAMI base with a newer one whose cuDNN sublib
+  version matches `torch 2.12.0+cu130`. Means rebaking the AMI from
+  a different parent.
+
+### 26.4 What this proves and what it doesn't
+
+**Proves:** the §15 manual SSH/SSM pattern is the right pattern.
+Every step from instance-launch through procrastinate-defer worked
+cleanly. The 4+ orchestrator bugs catalogued in §22-§25 are real
+but they're not on the critical path — once you bypass them you
+get to the actual SAM compute layer in <12 minutes.
+
+**Doesn't prove:** that the SAM compute layer *itself* works on
+AMI v25. The §15 PARTIAL run (1975/3648, 1.521 s/img aggregate)
+was on a different AMI. Bug 2 in particular means we cannot trust
+that AMI v25 will produce a clean measurement *even with the
+orchestrator removed*.
+
+### 26.5 Recommendation
+
+**Halt 100-image measurement attempts on AMI v25** until the cuDNN
+sublib mismatch is resolved at bake time. Two parallel tracks:
+
+1. **algo-engineer**: pick (B) from §26.2 to get merged_m3 routing
+   working again on a future AMI (this is what the §15 PARTIAL run
+   *should* have used per #209's intent). Estimated 30-60 min.
+
+2. **devops-engineer**: rebake AMI with one of the cuDNN fixes from
+   §26.3 — preferred order: (a) downgrade torch to a tier matching
+   §15's working stack, (b) full driver+cudnn alignment via newer
+   DLAMI parent. Estimated 1-2 h on first attempt because
+   measurement validation requires another G6e launch.
+
+After both fixes land, re-run this exact §26 manual procedure (one
+spot launch + one defer + one poll + one terminate) on the new AMI
+to validate end-to-end. Expected next-attempt cost ~$1-2 if it
+either succeeds or hits a new bug within 5 min.
+
+### 26.6 Artifacts captured
+
+- `claudedocs/measurement-1780259009/worker.log` — 217-line journal
+  with both job 12 and job 13 tracebacks + LoRA `Applied LoRA modules`
+  evidence + per-GPU image shards.
+- `claudedocs/measurement-1780259009/summary.json` — structured run
+  metadata (machine-readable for later regression tracking).
+- `claudedocs/measurement-1780259009/worker_events.tsv` — empty (table
+  exists, no markers emitted because both jobs failed before reaching
+  the `marker:processing_start` emit on
+  `src/flake_analysis/core/pipeline/sam.py:411`).
+
+These are gitignored under `claudedocs/` per project convention; not
+in this commit.
+
+### 26.7 Cleanup performed
+
+- Spot instance `i-0712bd016651714f6` — already terminated by AWS
+  (spot reclaim, `us-east-2a`) at `2026-05-31T20:03:36Z`.
+- On-demand instance `i-0c8fc6a6e4c165e26` — manually terminated at
+  `2026-05-31T20:25:33Z` after cuDNN diagnosis confirmed.
+- No EBS volumes orphaned (all root-only, terminate-on-shutdown).
+- No S3 staging to clean up (input dataset and weights are part of
+  the long-lived `internal/sam/` prefix, not run-scoped).
