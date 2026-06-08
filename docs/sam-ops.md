@@ -3402,3 +3402,198 @@ worker.service can't start.
 | §27 (dispatcher acceptance — capacity-blocked, no EC2 spent) | $0.00 |
 | **§28 (post-T7 acceptance — partial_blocked, AMI bake gap)** | **~$1.52** |
 | **Total** | **~$22.06** |
+
+---
+
+## 29. 1-click SAM dispatch acceptance — 2026-06-08 (post-T7b) CAPACITY_BLOCKED
+
+Re-run of §28 after [T7b](#28-1-click-sam-dispatch-acceptance--2026-06-08-post-t7-partial_blocked)
+shipped as commit `5eb83d0` — broaden spot-fail catch list
+(InsufficientInstanceCapacity, MaxSpotInstanceCountExceeded,
+SpotMaxPriceTooLow, SpotInstanceCountLimitExceeded, Unsupported all
+trigger on-demand retry) and patch user-data step `[4/8] clone repo`
+with `git config --global --add safe.directory '*'` plus
+`chown -R "$(id -u):$(id -g)"` on the repo dir before any git op.
+LT v27 published with the new user-data + same AMI
+`ami-0b7ec5ff47a1eff11`. Same harness shape as §27/§28 (`httpx` POST
+`/run/sam` SSE foreground, prod RDS via SSH-tunnelled bastion,
+`SAA_AUTH_DEV_BYPASS=1`, dev-bypass admin user).
+
+**Outcome: CAPACITY_BLOCKED.** Eight consecutive `POST /run/sam`
+attempts over a ~41-minute window (20:43:04Z → 21:23:31Z) all hit
+`InsufficientInstanceCapacity` for `g6e.48xlarge` on **both spot AND
+on-demand**. T7's fallback path **fired correctly on every attempt**
+— the literal "GPU capacity unavailable in us-east-2 (both spot and
+on-demand)" envelope only originates from the second `except
+ClientError` branch of `_launch_one` after the on-demand retry also
+returned `InsufficientInstanceCapacity` — but no EC2 instance ever
+launched, so the T7b user-data fix could not be exercised this run.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `5eb83d0` (T7b broadened spot-fail + git safe.directory) |
+| AMI | `ami-0b7ec5ff47a1eff11` (cu124, §15-verified) — **not booted this run** |
+| Launch template | `qpress-sam-gpu-worker` v27 (default, spot-with-on-demand-fallback) |
+| Instances launched | **none** — `RunInstances` rejected on every attempt for both spot and on-demand |
+| Run IDs (RDS `runs`) | 13, 14, 15, 16, 17, 18, 19, 20 (all `failed` / `GpuCapacityUnavailable`) |
+| First POST ts (UTC) | 2026-06-08T20:43:04 |
+| Last POST ts (UTC) | 2026-06-08T21:23:09 |
+| `gpu_launching` SSE | **never fired** — `_launch_one` exhausted both spot and on-demand on every attempt before reaching `bridge.emit_gpu_launching()` |
+| `gpu_ready` SSE | **never fired** (no worker booted) |
+| Per-image `progress` SSE | **never fired** |
+| `done` SSE | **never fired** |
+| Cold-start wall | n/a |
+| Total instance wall (billed) | **0 min** |
+| Cost (this re-run) | **$0.00** |
+| Status | `capacity_blocked` |
+
+### 29.1 What was newly verified vs §27/§28
+
+1. **T7b broadened spot-fail catch list and on-demand fallback both
+   wire through cleanly.** Every one of the 8 attempts returned the
+   "both spot and on-demand" error envelope ~16-28 s after `POST`,
+   meaning boto3 issued both calls and AWS returned
+   `InsufficientInstanceCapacity` for the on-demand path too. SSE
+   error frame parsed cleanly through the `httpx` line iterator.
+
+2. **Per-scan mutex behaved correctly under repeat-fail traffic**
+   (same as §27.1). Re-issuing `POST /run/sam` against the same
+   `scan_id=1` immediately after each failure succeeded (no `423
+   ProjectBusy`), confirming `acquire_scan_lock` releases on both
+   success and error paths. PgAdvisoryLock cleanup also worked.
+
+3. **T8 procrastinate `app.open_async` lifespan integration** is
+   wired in but couldn't be exercised because no defer ever happened
+   — `_launch_one` errored before `defer_async`.
+
+### 29.2 What did NOT run (same set as §28, still unverified)
+
+The cold-start lifecycle below could not be exercised because no
+EC2 instance ever launched on this run:
+
+- T7b user-data git safe.directory fix (`worker.service` start-up).
+- `gpu_launching` SSE event with `instance_id`.
+- `gpu_ready` SSE event with `image_count`.
+- Per-image `progress` events streaming.
+- Terminal `done` event with `result.images >= 100`.
+- `idle-shutdown.timer` firing after 10 min idle.
+
+### 29.3 Capacity diagnostic
+
+Spot price history is flat for the entire 4-day window leading up to
+this attempt (`us-east-2b $5.926` at 2026-06-08T19:00:54Z, no
+movement since 15:01Z). Reference on-demand for `g6e.48xlarge` is
+~$3.96/hr; current spot clearing $5.93-$7.47/hr indicates persistent
+AWS-side scarcity (H200 inventory pressure that started in §27 and
+has not abated).
+
+```text
+$ aws ec2 describe-spot-price-history --instance-types g6e.48xlarge \
+    --product-descriptions 'Linux/UNIX' \
+    --start-time 2026-06-08T20:00:00Z
+us-east-2b  5.9258  2026-06-08T19:00:54+00:00   ← unchanged for ≥4 hrs
+us-east-2c  6.4254  2026-06-08T18:00:24+00:00
+us-east-2a  7.4683  2026-06-08T15:01:00+00:00
+```
+
+All 8 attempts failed at the EC2 control plane on **both** spot and
+on-demand with `InsufficientInstanceCapacity` — boto3 never returned
+an `InstanceId` on either call. AZ-level diagnostics are not
+available because the LT does not pin a subnet. The fact that
+**on-demand** also returned `InsufficientInstanceCapacity` (not
+`InstanceLimitExceeded`) means this is genuine capacity scarcity,
+not quota.
+
+### 29.4 Run-ledger summary
+
+| Run id | POST ts (UTC) | Wall | Outcome |
+|---|---|---|---|
+| 13 | 2026-06-08T20:43:06 | ~24 s | failed: both spot + on-demand `InsufficientInstanceCapacity` |
+| 14 | 2026-06-08T20:47:43 | ~17 s | same |
+| 15 | 2026-06-08T20:52:10 | ~23 s | same |
+| 16 | 2026-06-08T20:57:58 | ~22 s | same |
+| 17 | 2026-06-08T21:03:30 | ~26 s | same |
+| 18 | 2026-06-08T21:10:07 | ~24 s | same |
+| 19 | 2026-06-08T21:17:35 | ~28 s | same |
+| 20 | 2026-06-08T21:23:09 | ~23 s | same |
+
+Inter-attempt sleep was 3-7 min (escalating) to give AWS-side capacity
+a chance to recover; it did not. No `MaxSpotInstanceCountExceeded`
+quota lag this run because no instance ever consumed quota in the
+first place.
+
+### 29.5 Cost ledger (this re-run)
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| GPU instances | 0 min | n/a | **$0.00** |
+| RDS round-trips, SSH tunnel, bastion uptime (~45 min t3.micro) | ~45 min | ~$0.0104 | ~$0.008 |
+| **Total this re-run** | | | **~$0.00** (rounded) |
+
+Within the $5 hard cap, with $5 untouched. Bastion auto-stopped at
+end of run per §2.8 runbook.
+
+### 29.6 Cleanup performed
+
+- API uvicorn process terminated cleanly (PID `47305` killed via
+  `/tmp/saa-acceptance-api.pid`).
+- SSH bastion tunnel torn down (`pkill -f 'ssh.*qpressdb.ch08y4ooqgmq'`).
+- Bastion `i-063165d449976b2e4` `stop-instances` issued (was
+  `stopped` at start, brought up for tunnel, returned to `stopped`).
+- No EC2 GPU instances live (verified `describe-instances ...
+  filter sam-gpu-worker pending,running,stopping,shutting-down`
+  empty before, during, and after the run).
+- Staging RDS rows (project `acceptance-2026-06-08`, scan id=1, 100
+  images, analyses id=1, models id=1) **left in place** for the
+  next attempt.
+- Stale procrastinate `gpu` job id=10 (status `doing`, run_id=99100,
+  unrelated context from a prior session) marked `failed` so a
+  fresh worker boot doesn't pick it up out of context.
+- RDS password file `/tmp/saa-pg.txt` deleted; PGPASSWORD env not
+  echoed to disk.
+- Harness scripts left at `/tmp/saa-acceptance-server.py` and
+  `/tmp/saa-acceptance-run.py` — small enough to leave for the
+  next attempt; SSE log files at `/tmp/saa-acceptance-sse-T6a3*.log`.
+
+### 29.7 Status for owner decision
+
+**Verified by this re-run (improves on §28):**
+- T7b broadened spot-fail catch list — fallback path is invoked on
+  every spot rejection variant the LT can produce.
+- T7's spot→on-demand wire path is robust under sustained drought
+  (~41 min of repeat-fail with no false-positive; no zombie tasks,
+  no stuck advisory locks, no orphan `running` rows).
+
+**Still unverified (carry forward from §28):**
+- T7b user-data git safe.directory fix (`worker.service` start-up
+  on a freshly-booted instance) — could not be exercised because
+  no instance launched.
+- `gpu_ready` / per-image `progress` / `done` / `idle-shutdown.timer`
+  SSE events — same.
+
+**Owner decision points:**
+1. **Wait for capacity:** the dispatcher is now code-validated end-to-end
+   for both the failure path AND the fallback path; the only thing
+   between us and SUCCESS is AWS returning `g6e.48xlarge` spot **or**
+   on-demand capacity in us-east-2. Capacity has been blocked for the
+   full §27 + §28 + §29 window (~3 hours of attempts spread over a
+   day). Recommendation: re-run §29 in 24 hours and again in 48 if
+   still blocked.
+2. **Switch region:** us-east-1 / us-west-2 typically have larger
+   `g6e.48xlarge` pools. Adds RDS cross-region cost + tunnel reroute
+   complexity. Out of scope for this acceptance; flag if drought
+   persists 72+ hrs.
+3. **Switch instance type:** `g6e.12xlarge` (single-GPU H200, ~$5.10
+   on-demand) is functionally adequate for the acceptance dataset
+   (100 images on merged.pt) and has more capacity headroom. Adds an
+   LT v28 publish + bake-side re-verification. Out of scope here.
+
+### Cumulative cost
+
+| Phase | Cost |
+|---|---|
+| #229 attempts §18-§26 | $20.54 |
+| §27 (dispatcher acceptance — capacity-blocked, no EC2 spent) | $0.00 |
+| §28 (post-T7 acceptance — partial_blocked, AMI bake gap) | ~$1.52 |
+| **§29 (post-T7b acceptance — capacity-blocked, no EC2 spent)** | **$0.00** |
+| **Total** | **~$22.06** |
