@@ -345,3 +345,188 @@ async def test_run_sam_writes_runs_row(tmp_path, monkeypatch, pg_session, active
     assert row.metrics["images"] == 2
     assert row.metrics["masks_total"] == 7
     assert row.metrics["errors"] == 0
+
+
+# ---------------------------------------------------------------------------
+# GPU Dispatcher Task 2 — _ensure_gpu_worker / _defer_sam_job / driver loop
+#
+# These tests cover the cold-start UX wiring on the API side:
+#   - _ensure_gpu_worker now returns LaunchResult (was None)
+#   - _defer_sam_job optionally takes a ProgressBridge and emits
+#     gpu_launching when a fresh boot fired
+#   - run_sam driver loop has a non-terminal gpu_ready branch that
+#     forwards image_count from the worker NOTIFY payload
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_defer_sam_job_emits_gpu_launching_when_action_is_launched(monkeypatch):
+    """When _ensure_gpu_worker returns LaunchResult(action='launched'),
+    _defer_sam_job calls bridge.emit_gpu_launching with the instance_id."""
+    from flake_analysis.api.routes import run as run_module
+    from flake_analysis.api.sse import ProgressBridge
+    from flake_analysis.worker.launcher import LaunchResult
+
+    captured: list[tuple[str, str]] = []
+
+    bridge = ProgressBridge()
+    # Wrap the bridge's method to capture instead of relying on queue drain.
+    bridge.emit_gpu_launching = lambda iid: captured.append(("gpu_launching", iid))
+
+    async def _fake_ensure():
+        return LaunchResult(action="launched", instance_id="i-test123")
+
+    monkeypatch.setattr(run_module, "_ensure_gpu_worker", _fake_ensure)
+
+    # Pre-import tasks so its @app.task decorators run against the real
+    # app, BEFORE we monkeypatch the app symbol. _defer_sam_job's later
+    # `from flake_analysis.worker import tasks` will then be a no-op
+    # (module already in sys.modules).
+    import flake_analysis.worker.tasks  # noqa: F401
+
+    # Replace app.tasks["run_sam"] with a no-op defer_async
+    class _FakeTask:
+        async def defer_async(self, **kw):
+            pass
+
+    class _FakeApp:
+        tasks = {"run_sam": _FakeTask()}
+
+    monkeypatch.setattr("flake_analysis.worker.app.app", _FakeApp())
+
+    await run_module._defer_sam_job(
+        run_id=1,
+        raw_images_dir="/x",
+        analysis_folder="/y",
+        weights_path="/z.pt",
+        device=None,
+        bridge=bridge,
+    )
+
+    assert ("gpu_launching", "i-test123") in captured
+
+
+@pytest.mark.asyncio
+async def test_defer_sam_job_skips_gpu_launching_when_action_is_noop(monkeypatch):
+    """When _ensure_gpu_worker returns LaunchResult(action='noop'),
+    _defer_sam_job does NOT call emit_gpu_launching."""
+    from flake_analysis.api.routes import run as run_module
+    from flake_analysis.api.sse import ProgressBridge
+    from flake_analysis.worker.launcher import LaunchResult
+
+    captured: list[tuple[str, str]] = []
+
+    bridge = ProgressBridge()
+    bridge.emit_gpu_launching = lambda iid: captured.append(("gpu_launching", iid))
+
+    async def _fake_ensure():
+        return LaunchResult(action="noop", reason="worker_already_running")
+
+    monkeypatch.setattr(run_module, "_ensure_gpu_worker", _fake_ensure)
+
+    class _FakeTask:
+        async def defer_async(self, **kw):
+            pass
+
+    class _FakeApp:
+        tasks = {"run_sam": _FakeTask()}
+
+    monkeypatch.setattr("flake_analysis.worker.app.app", _FakeApp())
+
+    await run_module._defer_sam_job(
+        run_id=2,
+        raw_images_dir="/x",
+        analysis_folder="/y",
+        weights_path="/z.pt",
+        device=None,
+        bridge=bridge,
+    )
+
+    assert captured == []
+
+
+@pytest.mark.asyncio
+async def test_defer_sam_job_works_without_bridge_kwarg(monkeypatch):
+    """Backwards-compat: _defer_sam_job(...) without bridge= still works.
+    Existing call sites that haven't been updated must keep functioning."""
+    from flake_analysis.api.routes import run as run_module
+    from flake_analysis.worker.launcher import LaunchResult
+
+    async def _fake_ensure():
+        return LaunchResult(action="launched", instance_id="i-test")
+
+    monkeypatch.setattr(run_module, "_ensure_gpu_worker", _fake_ensure)
+
+    class _FakeTask:
+        async def defer_async(self, **kw):
+            pass
+
+    class _FakeApp:
+        tasks = {"run_sam": _FakeTask()}
+
+    monkeypatch.setattr("flake_analysis.worker.app.app", _FakeApp())
+
+    # No bridge= kwarg — must not raise.
+    await run_module._defer_sam_job(
+        run_id=3,
+        raw_images_dir="/x",
+        analysis_folder="/y",
+        weights_path="/z.pt",
+        device=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_sam_driver_loop_routes_gpu_ready_payload(
+    tmp_path, monkeypatch, _client_app
+):
+    """When _stream_sam_events yields a gpu_ready payload, the driver
+    loop emits an SSE 'gpu_ready' frame with image_count and continues
+    (non-terminal — the subsequent completed payload is the actual
+    terminator).
+
+    Asserts at the SSE wire-frame level (matching the existing patterns
+    in this file, which also assert via wire frames) — bridge.emit_gpu_ready
+    routes through _put_progress, so it surfaces as `event: gpu_ready`.
+    """
+    _setup_project(tmp_path, monkeypatch, pid="p_sam_gpu_ready", sid=SID)
+
+    fake_payloads = [
+        {"type": "gpu_ready", "image_count": 100},
+        {
+            "type": "completed",
+            "result": {"images": 2, "masks_total": 7, "errors": 0, "per_image": {}},
+        },
+    ]
+
+    _stub_session_dep(_client_app)
+    with _runs_audit_patches(), patch(
+        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+    ), patch(
+        "flake_analysis.api.routes.run._stream_sam_events",
+        side_effect=_fake_stream_factory(fake_payloads),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=_client_app), base_url="http://test"
+        ) as client:
+            resp = await client.post(
+                f"/api/v1/projects/p_sam_gpu_ready/scans/{SID}/run/sam",
+                json={"weights_path": "/tmp/fake_weights.pt"},
+            )
+            assert resp.status_code == 200
+            body = resp.text
+
+    # Wire-frame assertions: gpu_ready frame appears, followed by done.
+    assert "event: gpu_ready\ndata: " in body
+    assert "event: done\ndata: " in body
+    # Order: gpu_ready frame must come before the done frame (driver
+    # continues after gpu_ready instead of treating it as terminal).
+    assert body.index("event: gpu_ready") < body.index("event: done")
+    # Payload must include image_count.
+    gpu_ready_line_idx = body.index("event: gpu_ready")
+    # The data: line is the next line after the event: line.
+    data_after = body[gpu_ready_line_idx:].split("\n", 2)[1]
+    assert data_after.startswith("data: ")
+    payload = json.loads(data_after[len("data: "):])
+    assert payload["type"] == "gpu_ready"
+    assert payload["image_count"] == 100

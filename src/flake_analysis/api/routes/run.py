@@ -1,6 +1,7 @@
 """Compute run endpoints (SSE) per backend design §1.2."""
 from __future__ import annotations
 import asyncio
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +27,8 @@ from flake_analysis.pipeline.background import run_background_step
 from flake_analysis.pipeline.domain_proximity import run_domain_proximity_step
 from flake_analysis.pipeline.domain_stats import run_domain_stats_step
 from flake_analysis.pipeline.thumbnails import run_thumbnails_step
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/projects/{project_id}/scans/{scan_id}/run", tags=["run"]
@@ -283,11 +286,18 @@ async def run_domain_stats(
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-async def _ensure_gpu_worker() -> None:
+async def _ensure_gpu_worker():
     """Boot a GPU worker EC2 instance if none is live (P4.4).
 
-    Module-level seam so tests can monkeypatch with a no-op. The
-    production implementation calls ``ensure_worker_running`` from
+    Returns the :class:`flake_analysis.worker.launcher.LaunchResult`
+    so the caller (e.g. :func:`_defer_sam_job`) can decide whether to
+    emit a ``gpu_launching`` SSE frame. ``action == "launched"``
+    means we just kicked off a fresh spot boot and ``instance_id`` is
+    populated; ``action == "noop"`` means a worker was already live.
+
+    Module-level seam so tests can monkeypatch with a no-op or a
+    canned ``LaunchResult``. The production implementation calls
+    ``ensure_worker_running`` from
     :mod:`flake_analysis.worker.launcher`, which checks the EC2 fleet
     and (optionally) launches a single spot instance via the
     ``qpress-sam-gpu-worker`` launch template.
@@ -297,7 +307,7 @@ async def _ensure_gpu_worker() -> None:
         ensure_worker_running,
     )
 
-    await ensure_worker_running(advisory_lock=PgAdvisoryLock())
+    return await ensure_worker_running(advisory_lock=PgAdvisoryLock())
 
 
 async def _defer_sam_job(
@@ -307,23 +317,49 @@ async def _defer_sam_job(
     analysis_folder,
     weights_path,
     device: str | None,
+    bridge: ProgressBridge | None = None,
 ) -> None:
     """Push a SAM job onto the procrastinate ``gpu`` queue.
 
     Before deferring, ensures a GPU worker exists (P4.4). If the fleet
     is empty, this kicks off a spot launch via the
-    ``qpress-sam-gpu-worker`` launch template. The defer itself does not
-    wait for the worker to come online — the SSE stream stays open and
-    the worker drains the procrastinate queue once it boots (3-5 min
-    cold start).
+    ``qpress-sam-gpu-worker`` launch template and — when a ``bridge``
+    is supplied — emits a non-terminal ``gpu_launching`` SSE frame so
+    the frontend can render the cold-start wait (~60-90s spot
+    allocation + boot). When a worker is already live (``action ==
+    "noop"``), no frame is emitted and the defer proceeds immediately.
+
+    The defer itself does not wait for the worker to come online — the
+    SSE stream stays open and the worker drains the procrastinate
+    queue once it boots (3-5 min cold start total).
 
     Defined as a module-level seam so tests can monkeypatch this symbol
     with a no-op rather than requiring an InMemoryConnector or real
     queue. The real implementation imports the production app lazily so
     test files that only patch ``_stream_sam_events`` don't pay the
     psycopg-pool open cost.
+
+    The ``bridge`` parameter is keyword-only and defaults to ``None``
+    for backwards compatibility with call sites (or tests) that don't
+    care about cold-start UX.
     """
-    await _ensure_gpu_worker()
+    launch_result = await _ensure_gpu_worker()
+
+    # Emit gpu_launching ONLY when we know we just kicked off a fresh
+    # boot and have an instance_id to report. Defensive try/except —
+    # an SSE emit failure must never cancel the actual defer.
+    if (
+        bridge is not None
+        and launch_result is not None
+        and getattr(launch_result, "action", None) == "launched"
+        and getattr(launch_result, "instance_id", None) is not None
+    ):
+        try:
+            bridge.emit_gpu_launching(launch_result.instance_id)
+        except Exception:  # noqa: BLE001 — never let SSE emit failures cancel defer
+            logger.exception(
+                "gpu_launching emit failed for run_id=%s", run_id,
+            )
 
     # Importing the tasks module registers @app.task decorators on the
     # production App. The connector pool is opened lazily by procrastinate
@@ -407,6 +443,7 @@ async def run_sam(
                 analysis_folder=manifest.analysis_folder,
                 weights_path=params.weights_path,
                 device=params.device,
+                bridge=bridge,
             )
 
             terminal_seen = False
@@ -416,6 +453,13 @@ async def run_sam(
                     bridge.emit_progress(
                         float(payload.get("progress", 0.0)),
                         str(payload.get("message", "")),
+                    )
+                elif ptype == "gpu_ready":
+                    # Non-terminal: worker just picked up the job and is
+                    # about to load the SAM model. Frontend flips from
+                    # "Launching..." to "GPU ready, processing N images".
+                    bridge.emit_gpu_ready(
+                        int(payload.get("image_count", 0) or 0)
                     )
                 elif ptype == "completed":
                     result = payload.get("result", {}) or {}
