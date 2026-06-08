@@ -313,3 +313,120 @@ def test_run_sam_emits_task_end_on_failure(monkeypatch):
     end = next(c for c in captured if c["event"] == "sam_task_end")
     assert end["payload"]["status"] == "failed"
     assert end["payload"]["exc"] == "_Boom"
+
+
+def test_run_sam_emits_gpu_ready_at_task_entry(monkeypatch, tmp_path):
+    """run_sam emits gpu_ready as the FIRST progress event, BEFORE
+    sam_task_start emit_marker, so the frontend cold-start UX flips
+    from 'launching' to 'ready' before any other work."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    progress_payloads: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_payloads.append(payload),
+    )
+    monkeypatch.setattr(worker_tasks, "emit_marker", lambda **kw: None)
+
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    for n in ("a.png", "b.png", "c.png"):
+        (images_dir / n).touch()
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "run_sam_step",
+        lambda **kw: {"images": 3, "masks_total": 0, "errors": 0, "per_image": {}},
+    )
+
+    worker_tasks.run_sam(
+        run_id=42,
+        raw_images_dir=str(images_dir),
+        analysis_folder=str(tmp_path / "out"),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    types = [p.get("type") for p in progress_payloads]
+    assert types[0] == "gpu_ready"
+    assert progress_payloads[0]["image_count"] == 3
+
+
+def test_run_sam_gpu_ready_image_count_zero_when_dir_unreadable(monkeypatch, tmp_path):
+    """If the images dir is missing, gpu_ready still fires with
+    image_count=0 — the UX should still flip from 'launching' to 'ready'."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    progress_payloads: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_payloads.append(payload),
+    )
+    monkeypatch.setattr(worker_tasks, "emit_marker", lambda **kw: None)
+    monkeypatch.setattr(
+        worker_tasks,
+        "run_sam_step",
+        lambda **kw: {"images": 0, "masks_total": 0, "errors": 0, "per_image": {}},
+    )
+
+    worker_tasks.run_sam(
+        run_id=43,
+        raw_images_dir=str(tmp_path / "does_not_exist"),
+        analysis_folder=str(tmp_path / "out"),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    types = [p.get("type") for p in progress_payloads]
+    assert types[0] == "gpu_ready"
+    assert progress_payloads[0]["image_count"] == 0
+
+
+def test_run_sam_gpu_ready_filters_non_image_extensions(monkeypatch, tmp_path):
+    """The image count must match the full suffix set from
+    core/pipeline/sam.py::_list_images (sam.py:136):
+    png/jpg/jpeg/bmp/tif/tiff/webp. Other files (txt/json/random) and
+    directories are skipped. Pin the canonical 7-element set here so a
+    narrowed mirror in tasks.py would fail this test."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    progress_payloads: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_payloads.append(payload),
+    )
+    monkeypatch.setattr(worker_tasks, "emit_marker", lambda **kw: None)
+
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    # One file per supported extension — must match sam.py:136 exactly.
+    supported_exts = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp")
+    for i, ext in enumerate(supported_exts):
+        (images_dir / f"img{i}{ext}").touch()
+    # Mixed-case suffixes are normalized via .lower() in the count.
+    (images_dir / "upper.PNG").touch()
+    (images_dir / "weird.WebP").touch()
+    # Non-image files and directories must be skipped.
+    (images_dir / "manifest.json").touch()
+    (images_dir / "notes.txt").touch()
+    (images_dir / "raw.dat").touch()
+    (images_dir / "subdir").mkdir()
+
+    monkeypatch.setattr(
+        worker_tasks,
+        "run_sam_step",
+        lambda **kw: {"images": 9, "masks_total": 0, "errors": 0, "per_image": {}},
+    )
+
+    worker_tasks.run_sam(
+        run_id=44,
+        raw_images_dir=str(images_dir),
+        analysis_folder=str(tmp_path / "out"),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    gpu_ready = [p for p in progress_payloads if p.get("type") == "gpu_ready"]
+    assert len(gpu_ready) == 1
+    # 7 canonical extensions + 2 mixed-case = 9 images counted.
+    assert gpu_ready[0]["image_count"] == 9

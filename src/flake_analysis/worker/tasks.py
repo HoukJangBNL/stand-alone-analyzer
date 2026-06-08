@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
 import psycopg
@@ -51,6 +52,12 @@ from flake_analysis.worker.app import app
 from flake_analysis.worker.markers import emit_marker
 
 logger = logging.getLogger(__name__)
+
+# Image extensions matched by core/pipeline/sam.py::_list_images (the
+# `exts` local at sam.py:136). Mirrored here so the gpu_ready preview
+# count agrees with what the SAM step actually iterates. If sam.py's
+# whitelist changes, update this set in lockstep.
+_IMG_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".webp"}
 
 
 def _channel_name(run_id: int) -> str:
@@ -118,6 +125,27 @@ def run_sam(
     These let offline analysis derive total wall time without joining
     against ``procrastinate_jobs``.
     """
+    # Announce the cold-start handoff to the SSE consumer. The frontend
+    # flips from 'Launching GPU…' to 'GPU ready, processing N images'
+    # on this event, so it must be the FIRST emit in the task body —
+    # before sam_task_start. Image count is best-effort: the SAM step
+    # lists the directory again precisely once it starts.
+    try:
+        n_imgs = sum(
+            1
+            for p in Path(raw_images_dir).iterdir()
+            if p.is_file() and p.suffix.lower() in _IMG_SUFFIXES
+        )
+    except Exception:  # noqa: BLE001 — count failure must not block the run
+        n_imgs = 0
+    try:
+        _emit_progress(
+            run_id=run_id,
+            payload={"type": "gpu_ready", "image_count": int(n_imgs)},
+        )
+    except Exception:  # noqa: BLE001 — never let SSE emit failures cancel the job
+        logger.exception("gpu_ready emit failed for run_id=%s", run_id)
+
     emit_marker(
         run_id=run_id,
         event="sam_task_start",
