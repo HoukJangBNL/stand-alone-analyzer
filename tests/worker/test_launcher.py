@@ -499,3 +499,87 @@ def test_launch_one_propagates_non_capacity_client_errors():
     # Failed on first attempt; no on-demand retry
     assert ec2.attempt == 1
     assert exc_info.value.response["Error"]["Code"] == "UnauthorizedOperation"
+
+
+def test_launch_one_falls_back_to_on_demand_on_max_spot_count_exceeded():
+    """Owner directive 2026-06-08: any spot failure → automatic
+    on-demand. MaxSpotInstanceCountExceeded happens when AWS still
+    holds the spot quota from a recent terminate (~10 min release
+    delay). Without this, every back-to-back run fails."""
+    from botocore.exceptions import ClientError
+    from flake_analysis.worker.launcher import _launch_one
+
+    quota_err = ClientError(
+        {"Error": {"Code": "MaxSpotInstanceCountExceeded",
+                   "Message": "Spot instance count limit reached"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            if self.attempt == 1:
+                raise quota_err
+            return {"Instances": [{"InstanceId": "i-on-demand-after-quota"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+    assert instance_id == "i-on-demand-after-quota"
+    assert ec2.attempt == 2
+
+
+def test_launch_one_falls_back_to_on_demand_on_unsupported_spot():
+    """`Unsupported` is returned for spot when an instance type isn't
+    available as spot in a given subnet. Should also retry on-demand."""
+    from botocore.exceptions import ClientError
+    from flake_analysis.worker.launcher import _launch_one
+
+    unsupported_err = ClientError(
+        {"Error": {"Code": "Unsupported",
+                   "Message": "spot not supported in this AZ"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            if self.attempt == 1:
+                raise unsupported_err
+            return {"Instances": [{"InstanceId": "i-on-demand-after-unsupported"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+    assert instance_id == "i-on-demand-after-unsupported"
+    assert ec2.attempt == 2
+
+
+def test_launch_one_falls_back_on_spot_max_price_too_low():
+    """SpotMaxPriceTooLow is also a spot-only failure."""
+    from botocore.exceptions import ClientError
+    from flake_analysis.worker.launcher import _launch_one
+
+    err = ClientError(
+        {"Error": {"Code": "SpotMaxPriceTooLow",
+                   "Message": "bid below current price"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            if self.attempt == 1:
+                raise err
+            return {"Instances": [{"InstanceId": "i-od-after-low-bid"}]}
+
+    ec2 = _FakeEc2()
+    assert _launch_one(ec2) == "i-od-after-low-bid"
+    assert ec2.attempt == 2

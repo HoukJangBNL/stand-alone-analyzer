@@ -260,20 +260,42 @@ def _has_live_worker(ec2: Any) -> bool:
     return False
 
 
+# Spot-only failure modes that mean "no spot for you right now" but
+# don't indicate a fundamental problem with the request. All of these
+# warrant an immediate on-demand retry — owner directive 2026-06-08:
+# "spot fail 하면 자동으로 ondemand 로 넘어가게 해".
+#
+# - InsufficientInstanceCapacity: AWS has no spot capacity right now.
+# - MaxSpotInstanceCountExceeded: our spot quota is full (often a
+#   recent terminate hasn't released the spot request yet — it stays
+#   `active/fulfilled` for ~10 min after instance termination).
+# - SpotMaxPriceTooLow: our bid is below the current spot price.
+# - SpotInstanceCountLimitExceeded: alternate name AWS sometimes returns.
+# - Unsupported: returned for spot when an instance type isn't
+#   available as spot in a given subnet/AZ at this moment.
+_SPOT_FAILURE_CODES = frozenset({
+    "InsufficientInstanceCapacity",
+    "MaxSpotInstanceCountExceeded",
+    "SpotMaxPriceTooLow",
+    "SpotInstanceCountLimitExceeded",
+    "Unsupported",
+})
+
+
 def _launch_one(ec2: Any) -> str:
     """Synchronous boto3 call: boot exactly one worker.
 
     Tries spot first (via the LT's default ``InstanceMarketOptions``).
-    If AWS returns ``InsufficientInstanceCapacity`` for the spot
-    request, retries once with ``InstanceMarketOptions={}`` to
-    override the LT's spot setting and dispatch as on-demand.
-    On-demand is more expensive ($7.23/hr vs $3.96/hr for
-    g6e.48xlarge in us-east-2 as of 2026-06-08) but reliably
-    available during spot droughts.
+    If AWS returns any of :data:`_SPOT_FAILURE_CODES`, retries once
+    with ``InstanceMarketOptions={}`` to override the LT's spot
+    setting and dispatch as on-demand. On-demand is more expensive
+    ($7.23/hr vs $3.96/hr for g6e.48xlarge in us-east-2 as of
+    2026-06-08) but reliably available during spot droughts and
+    after recent terminates that haven't released the spot quota.
 
-    Translates ``InsufficientInstanceCapacity`` (after both attempts
-    fail) into :class:`GpuCapacityUnavailable`. All other
-    ClientErrors propagate without retry.
+    Translates ``InsufficientInstanceCapacity`` from the on-demand
+    attempt into :class:`GpuCapacityUnavailable`. Other ClientErrors
+    on either attempt propagate without retry.
     """
     try:
         resp = ec2.run_instances(
@@ -286,12 +308,14 @@ def _launch_one(ec2: Any) -> str:
         )
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
-        if code != "InsufficientInstanceCapacity":
+        if code not in _SPOT_FAILURE_CODES:
             raise
-        # Spot drought: retry as on-demand. Empty InstanceMarketOptions
-        # overrides the LT's MarketType=spot.
+        # Spot failure mode — retry as on-demand. Empty
+        # InstanceMarketOptions overrides the LT's MarketType=spot.
         logger.info(
-            "spot capacity unavailable; retrying as on-demand (LT %s, $7.23/hr)",
+            "spot launch failed (code=%s); retrying as on-demand "
+            "(LT %s, $7.23/hr)",
+            code,
             LAUNCH_TEMPLATE_NAME,
         )
         try:

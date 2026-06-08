@@ -151,6 +151,20 @@ fi
 if ! done_stamp repo; then
   echo "[4/8] clone repo + submodule"
   mkdir -p "${WORK_ROOT}"
+
+  # AMI ami-0b7ec5ff47a1eff11 was baked with the repo owned by `ubuntu`
+  # (the bake-time RUN_USER), but cloud-init's user-data runs as root.
+  # git 2.35+ refuses cross-user repo access with:
+  #   fatal: detected dubious ownership in repository at '/opt/sam/...'
+  # Two-belt fix: (1) chown the repo dir to root before any git op so
+  # ownership matches the running uid, and (2) declare the repo a safe
+  # directory for git globally so future cross-user invocations also
+  # work. Both are idempotent — safe to run on every cold launch.
+  git config --global --add safe.directory '*'
+  if [[ -d "${REPO_DIR}/.git" ]]; then
+    chown -R "$(id -u):$(id -g)" "${REPO_DIR}"
+  fi
+
   if [[ ! -d "${REPO_DIR}/.git" ]]; then
     git clone "${REPO_URL}" "${REPO_DIR}"
   fi
