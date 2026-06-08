@@ -2,7 +2,8 @@
 /**
  * useStepProgress hook per integrated design §6 (extended for Plan 2 to
  * surface the 'done' event's result payload). W3.1 — also fires toast.error
- * on SSE error events.
+ * on SSE error events. Task 4 (gpu-dispatcher) — also surfaces gpu_launching
+ * and gpu_ready SSE events so callers can render cold-start UX badges.
  */
 import { useState, useCallback, useRef } from 'react'
 import { toast } from 'sonner'
@@ -10,6 +11,7 @@ import { parseEventStream } from '@/lib/sse'
 import { postSseRun } from '@/api/sseRun'
 
 type StepStatus = 'idle' | 'running' | 'done' | 'error'
+type GpuStatus = 'idle' | 'launching' | 'ready'
 
 export function useStepProgress<P = unknown, R = unknown>(
   projectId: string,
@@ -20,6 +22,9 @@ export function useStepProgress<P = unknown, R = unknown>(
   const [pct, setPct] = useState(0)
   const [message, setMessage] = useState('')
   const [result, setResult] = useState<R | null>(null)
+  const [gpuStatus, setGpuStatus] = useState<GpuStatus>('idle')
+  const [gpuInstanceId, setGpuInstanceId] = useState<string | null>(null)
+  const [gpuImageCount, setGpuImageCount] = useState<number | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
 
   const start = useCallback(
@@ -29,6 +34,12 @@ export function useStepProgress<P = unknown, R = unknown>(
       setPct(0)
       setMessage('')
       setResult(null)
+      // Reset GPU cold-start state — a fresh run may launch again or hit a
+      // still-warm worker; the next gpu_launching / gpu_ready event will
+      // re-populate.
+      setGpuStatus('idle')
+      setGpuInstanceId(null)
+      setGpuImageCount(null)
 
       try {
         const response = await postSseRun(
@@ -45,6 +56,17 @@ export function useStepProgress<P = unknown, R = unknown>(
           if (event.type === 'progress') {
             setPct(event.data.pct)
             setMessage(event.data.msg || '')
+          } else if (event.type === 'gpu_launching') {
+            setGpuStatus('launching')
+            setGpuInstanceId(
+              typeof event.data?.instance_id === 'string'
+                ? event.data.instance_id
+                : null
+            )
+          } else if (event.type === 'gpu_ready') {
+            setGpuStatus('ready')
+            const ic = event.data?.image_count
+            setGpuImageCount(typeof ic === 'number' ? ic : null)
           } else if (event.type === 'done') {
             setResult((event.data?.result ?? null) as R | null)
             setStatus('done')
@@ -77,5 +99,15 @@ export function useStepProgress<P = unknown, R = unknown>(
     abortControllerRef.current?.abort()
   }, [])
 
-  return { status, pct, message, result, start, cancel }
+  return {
+    status,
+    pct,
+    message,
+    result,
+    gpuStatus,
+    gpuInstanceId,
+    gpuImageCount,
+    start,
+    cancel,
+  }
 }

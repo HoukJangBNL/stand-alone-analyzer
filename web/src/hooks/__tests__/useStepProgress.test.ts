@@ -205,3 +205,93 @@ describe('useStepProgress.toast on SSE error', () => {
     expect(errSpy).toHaveBeenCalledWith('background step crashed')
   })
 })
+
+describe('useStepProgress GPU cold-start', () => {
+  // Task 4 (gpu-dispatcher): hook must surface gpu_launching / gpu_ready SSE
+  // events as gpuStatus / gpuInstanceId / gpuImageCount so SamRunPanel can
+  // render cold-start badges before per-image progress takes over.
+  function streamFromSSE(body: string) {
+    const encoder = new TextEncoder()
+    return new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(body))
+        controller.close()
+      },
+    })
+  }
+
+  function mockFetchWithSSE(body: string) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        new Response(streamFromSSE(body), {
+          status: 200,
+          headers: { 'content-type': 'text/event-stream' },
+        })
+      )
+    )
+  }
+
+  it('exposes gpuStatus="launching" + gpuInstanceId on gpu_launching event', async () => {
+    const sseBody = [
+      'event: gpu_launching\ndata: {"instance_id":"i-abc123"}\n\n',
+      'event: done\ndata: {"result":{"images":0}}\n\n',
+    ].join('')
+    mockFetchWithSSE(sseBody)
+
+    const { result } = renderHook(() =>
+      useStepProgress<unknown, { images: number }>('p', 1, 'sam')
+    )
+
+    await act(async () => {
+      await result.current.start({})
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('done'))
+    expect(result.current.gpuStatus).toBe('launching')
+    expect(result.current.gpuInstanceId).toBe('i-abc123')
+  })
+
+  it('flips gpuStatus to "ready" + captures imageCount on gpu_ready event', async () => {
+    const sseBody = [
+      'event: gpu_launching\ndata: {"instance_id":"i-abc123"}\n\n',
+      'event: gpu_ready\ndata: {"image_count":100}\n\n',
+      'event: done\ndata: {"result":{"images":100}}\n\n',
+    ].join('')
+    mockFetchWithSSE(sseBody)
+
+    const { result } = renderHook(() =>
+      useStepProgress<unknown, { images: number }>('p', 1, 'sam')
+    )
+
+    await act(async () => {
+      await result.current.start({})
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('done'))
+    expect(result.current.gpuStatus).toBe('ready')
+    expect(result.current.gpuInstanceId).toBe('i-abc123')
+    expect(result.current.gpuImageCount).toBe(100)
+  })
+
+  it('default gpu state is idle/null when no gpu_* events fire', async () => {
+    const sseBody = [
+      'event: progress\ndata: {"pct":0.5,"msg":"half"}\n\n',
+      'event: done\ndata: {"result":{"images":1}}\n\n',
+    ].join('')
+    mockFetchWithSSE(sseBody)
+
+    const { result } = renderHook(() =>
+      useStepProgress<unknown, { images: number }>('p', 1, 'sam')
+    )
+
+    await act(async () => {
+      await result.current.start({})
+    })
+
+    await waitFor(() => expect(result.current.status).toBe('done'))
+    expect(result.current.gpuStatus).toBe('idle')
+    expect(result.current.gpuInstanceId).toBeNull()
+    expect(result.current.gpuImageCount).toBeNull()
+  })
+})

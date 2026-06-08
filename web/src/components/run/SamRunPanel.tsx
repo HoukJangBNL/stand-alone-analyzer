@@ -35,10 +35,17 @@ function isErrorMessage(msg: string): boolean {
 }
 
 export function SamRunPanel({ projectId, scanId }: SamRunPanelProps) {
-  const { status, pct, message, result, start, cancel } = useStepProgress<
-    SamParams,
-    SamResult
-  >(projectId, scanId, 'sam')
+  const {
+    status,
+    pct,
+    message,
+    result,
+    gpuStatus,
+    gpuInstanceId,
+    gpuImageCount,
+    start,
+    cancel,
+  } = useStepProgress<SamParams, SamResult>(projectId, scanId, 'sam')
 
   // Vite injects env vars on import.meta.env. The project doesn't ship a
   // vite-env.d.ts, so funnel through `unknown` to satisfy strict TS.
@@ -78,6 +85,26 @@ export function SamRunPanel({ projectId, scanId }: SamRunPanelProps) {
         >
           Cancel
         </button>
+      )}
+
+      {/* Cold-start UX (Task 4): show GPU launch + ready badges before
+          per-image progress takes over. The launching badge surfaces the
+          EC2 instance id so users know a cold spot-up is in flight. */}
+      {gpuStatus === 'launching' && gpuInstanceId && (
+        <div
+          data-testid="sam-progress-gpu-launching"
+          style={{ marginTop: '8px', fontSize: '0.9em', color: '#1d4ed8' }}
+        >
+          Launching GPU instance ({gpuInstanceId})…
+        </div>
+      )}
+      {gpuStatus === 'ready' && gpuImageCount !== null && (
+        <div
+          data-testid="sam-progress-gpu-ready"
+          style={{ marginTop: '8px', fontSize: '0.9em', color: '#15803d' }}
+        >
+          ✓ GPU ready, processing {gpuImageCount} images
+        </div>
       )}
 
       {isRunning && (

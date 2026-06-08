@@ -24,6 +24,9 @@ function setHook(overrides: {
   pct?: number
   message?: string
   result?: SamResult | null
+  gpuStatus?: 'idle' | 'launching' | 'ready'
+  gpuInstanceId?: string | null
+  gpuImageCount?: number | null
   start?: ReturnType<typeof vi.fn>
   cancel?: ReturnType<typeof vi.fn>
 }) {
@@ -34,6 +37,9 @@ function setHook(overrides: {
     pct: overrides.pct ?? 0,
     message: overrides.message ?? '',
     result: overrides.result ?? null,
+    gpuStatus: overrides.gpuStatus ?? 'idle',
+    gpuInstanceId: overrides.gpuInstanceId ?? null,
+    gpuImageCount: overrides.gpuImageCount ?? null,
     start,
     cancel,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -124,5 +130,45 @@ describe('SamRunPanel', () => {
 
     const msg = screen.getByTestId('compute-sam-msg')
     expect(msg.style.color).toBe('red')
+  })
+})
+
+describe('SamRunPanel cold-start badges', () => {
+  // Task 4 (gpu-dispatcher): SamRunPanel renders two badges as the GPU comes
+  // online: gpu_launching → "Launching GPU instance (i-…)…", then gpu_ready →
+  // "GPU ready, processing N images". These show before per-image progress.
+  it('renders Launching badge when gpuStatus is "launching"', () => {
+    setHook({
+      status: 'running',
+      gpuStatus: 'launching',
+      gpuInstanceId: 'i-abc123',
+    })
+    render(<SamRunPanel projectId="p1" scanId={42} />)
+
+    const badge = screen.getByTestId('sam-progress-gpu-launching')
+    expect(badge).not.toBeNull()
+    expect(badge.textContent).toMatch(/launching gpu instance.*i-abc123/i)
+  })
+
+  it('renders Ready badge when gpuStatus is "ready"', () => {
+    setHook({
+      status: 'running',
+      gpuStatus: 'ready',
+      gpuInstanceId: 'i-abc123',
+      gpuImageCount: 100,
+    })
+    render(<SamRunPanel projectId="p1" scanId={42} />)
+
+    const badge = screen.getByTestId('sam-progress-gpu-ready')
+    expect(badge).not.toBeNull()
+    expect(badge.textContent).toMatch(/gpu ready.*processing 100 images/i)
+  })
+
+  it('does not render either badge when gpuStatus is "idle"', () => {
+    setHook({ status: 'idle', gpuStatus: 'idle' })
+    render(<SamRunPanel projectId="p1" scanId={42} />)
+
+    expect(screen.queryByTestId('sam-progress-gpu-launching')).toBeNull()
+    expect(screen.queryByTestId('sam-progress-gpu-ready')).toBeNull()
   })
 })
