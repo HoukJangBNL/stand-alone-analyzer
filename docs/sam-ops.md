@@ -3139,3 +3139,266 @@ error → recorded run). The **success path is not verified** because
 AWS spot capacity in us-east-2 was exhausted for `g6e.48xlarge`
 during the acceptance window. Re-run when capacity returns; until
 then, dispatcher is "code-validated, capacity-pending".
+
+> **Update 2026-06-08 evening:** §27's recommended `_launch_one`
+> on-demand fallback shipped as commit `edf8bd3` (T7) and the
+> acceptance was re-run; see §28 for the post-T7 result. Two further
+> latent bugs surfaced (procrastinate `AppNotOpen` at defer + AMI
+> "dubious ownership" at user-data) that block the SAM success path
+> independently of capacity.
+
+---
+
+## 28. 1-click SAM dispatch acceptance — 2026-06-08 (post-T7) PARTIAL_BLOCKED
+
+Re-run of §27 after [T7 on-demand fallback](#274-production-risk-surfaced)
+shipped as commit `edf8bd3`. Same harness shape as §27 (`httpx` POST
+`/run/sam` SSE foreground, prod RDS via SSH-tunnelled bastion,
+`SAA_AUTH_DEV_BYPASS=1`, dev-bypass admin user).
+
+**Outcome: PARTIAL_BLOCKED.** T7's spot-drought→on-demand fallback
+**fired and is verified at the AWS API level** — but the SAM success
+path remained unreached due to two independent latent bugs surfaced
+in this run:
+
+1. **API-side `procrastinate.AppNotOpen` at `defer_async`** — first
+   visible the moment T7 was effective and capacity returned. Patched
+   in this same commit cycle (T8).
+2. **Worker-side `git config safe.directory` failure in user-data** —
+   visible after T8 patch landed and a worker booted. The pre-baked
+   repo at `/opt/sam/stand-alone-analyzer` is owned by user `ubuntu`
+   while `cloud-init` runs as `root`, so step `[4/8] clone repo +
+   submodule` aborts immediately with `fatal: detected dubious
+   ownership` and `worker.service` is never started. Out of scope for
+   this acceptance; documented as follow-up T9.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD at start | `main` / `edf8bd3` (T7 spot→on-demand fallback) |
+| Branch / HEAD after T8 | `main` / `<sha-after-T8-commit>` (procrastinate `app.open_async` in lifespan) |
+| AMI | `ami-0b7ec5ff47a1eff11` (cu124, §15-verified) |
+| Launch template | `qpress-sam-gpu-worker` v26 (default, spot-only) |
+| Instances launched | `i-0dd944abe7d9e432a` (spot, 19:33:46→19:35:22Z, ~96 s, terminated user-init), `i-0c30c170080222749` (spot, 19:46:54→20:00:38Z, ~13.7 min, terminated user-init) |
+| Run IDs (RDS `runs`) | 6, 7 (capacity-blocked / GpuCapacityUnavailable) · 8 (AppNotOpen) · 9, 10 (MaxSpotInstanceCountExceeded post-terminate quota lag) · 11, 12 (instances launched but worker.service never started — terminated as orphans) |
+| First POST ts (UTC) | 2026-06-08T19:26:19 |
+| Last POST ts (UTC) | 2026-06-08T19:55:12 |
+| `gpu_launching` SSE | **fired once**, attempt 3, `instance_id=i-0dd944abe7d9e432a`, ~1 s after POST |
+| `gpu_ready` SSE | **never fired** (worker.service never started on either instance) |
+| Per-image `progress` SSE | **never fired** |
+| `done` SSE | **never fired** |
+| Cold-start wall (instance pending→running) | ~13 min on `i-0c30c170080222749` (19:46:54 launch → 19:47:56 cloud-init final → user-data immediate fail) |
+| Total instance wall (billed) | ~14.5 min |
+| Cost (this re-run) | **~$1.52** (2 spot launches at ~$5.96/hr Linux us-east-2b, both manually terminated; idle-shutdown.timer was never reached because worker.service never came up) |
+| Status | `partial_blocked` |
+
+### 28.1 What was newly verified vs §27
+
+1. **T7 spot-drought→on-demand fallback executed correctly.** Attempts
+   1 and 2 (19:26 and 19:30) both surfaced the new T7 error envelope
+   *exactly* once each:
+
+   ```json
+   {"type":"error","error":{"code":"pipeline_failed",
+    "message":"GPU capacity unavailable in us-east-2 (both spot and on-demand). Retry in a few minutes.",
+    "details":{"exc_type":"GpuCapacityUnavailable"}, ...}}
+   ```
+
+   That literal message string only originates from the second
+   `except ClientError` branch of `_launch_one` after the on-demand
+   retry also returns `InsufficientInstanceCapacity`
+   (`src/flake_analysis/worker/launcher.py:309-313`). i.e. the
+   fallback boto3 call **was issued** and AWS returned
+   `InsufficientInstanceCapacity` for the on-demand path too. Spot
+   prices at the moment: `us-east-2b $5.926`, `us-east-2c $6.425`,
+   `us-east-2a $7.468` — same drought as §27 (clearing well above
+   on-demand $3.96/hr reference).
+
+2. **Capacity returned mid-run.** Attempt 3 (19:33:44) succeeded at
+   the EC2 control plane: spot instance `i-0dd944abe7d9e432a` allocated
+   in `pending` and the dispatcher emitted the first-ever
+   `gpu_launching` SSE event with the instance_id. This is the **first
+   `gpu_launching` ever observed in production** — closing the §27.2
+   "what did not run" hole at least up to the launch step.
+
+3. **`gpu_launching` SSE wire payload validated.** The frame parsed
+   cleanly through the harness (`httpx` line iterator) into the
+   `instance_id`-carrying summary block. `event=gpu_launching` not
+   `event=message` — the route's `bridge.emit_gpu_launching()` writes
+   the named-event channel correctly.
+
+### 28.2 Latent bugs surfaced (each blocked the next phase)
+
+#### 28.2.1 `procrastinate.AppNotOpen` at defer (T8 patched in this cycle)
+
+The moment T7 was effective and `_launch_one` succeeded, the *next*
+line `await app.tasks["run_sam"].defer_async(...)` raised:
+
+```
+App was not open. Procrastinate App needs to be opened using:
+- ``app.open()``,
+- ``await app.open_async()``,
+...
+```
+
+`procrastinate>=3.8` requires the App to be explicitly opened before
+deferring. The existing `flake_analysis/worker/app.py` constructs the
+`App(connector=PsycopgConnector(...))` at import time but never opens
+the connector pool — the docstring's claim of "lazy-open on first
+defer" is true for the worker process (whose `procrastinate worker`
+CLI calls `open_async()` itself) but not for the API process.
+
+**Fix (T8):** opened the procrastinate pool in `flake_analysis.api.main`
+lifespan:
+
+```python
+from flake_analysis.worker.app import app as procrastinate_app
+await procrastinate_app.open_async()
+try:
+    yield
+finally:
+    await procrastinate_app.close_async()
+```
+
+After T8, attempts 5 and 6 actually deferred the SAM job (rows
+`procrastinate_jobs.id=11..12`, queue=`gpu`, status `succeeded` —
+i.e. the job was claimed by the worker, even though the SAM
+inference itself never ran).
+
+#### 28.2.2 AMI bake "dubious ownership" — worker.service never starts (T9 follow-up)
+
+Once T8 unblocked defer, the dispatcher launched `i-0c30c170080222749`
+cleanly. SSM came online at 19:47:56Z. But user-data step `[4/8]
+clone repo + submodule` aborted at start-of-script:
+
+```
+fatal: detected dubious ownership in repository at '/opt/sam/stand-alone-analyzer'
+To add an exception for this directory, call:
+  git config --global --add safe.directory /opt/sam/stand-alone-analyzer
+2026-06-08 19:48:06,892 - cc_scripts_user.py[WARNING]: Failed to run module scripts_user (scripts in /var/lib/cloud/instance/scripts)
+2026-06-08 19:48:06,893 - log_util.py[WARNING]: Running module scripts_user ... failed
+Cloud-init v. 25.3-0ubuntu1~22.04.1 finished at Mon, 08 Jun 2026 19:48:06 +0000.
+```
+
+The pre-baked repo at `/opt/sam/stand-alone-analyzer` is owned by
+user `ubuntu` (the AMI's default-user) while `cloud-init` runs as
+`root`. Git 2.35+ refuses cross-user repo operations by default. The
+user-data script never recovers — every subsequent `[5..8]` step (peft
+install, weights download, dataset stage, worker.service enable)
+silently doesn't run because the script body is in a single
+top-to-bottom block that already aborted.
+
+`worker.service` was confirmed `inactive` via SSM after the instance
+came up:
+
+```text
+$ systemctl is-active worker.service
+inactive
+$ systemctl is-active idle-shutdown.timer
+inactive
+$ ls /opt/sam/weights/
+merged.pt    # ← from a prior bake; stale, not refreshed by this user-data
+```
+
+`merged.pt` was present (it's pre-baked into the AMI), but with
+`worker.service` never started, the procrastinate `gpu`-queue job
+sits in `todo` forever and the LISTEN/NOTIFY channel never sees a
+`gpu_ready` frame. The harness `httpx` SSE stream consequently hangs
+indefinitely waiting for a terminal event.
+
+**Suspected fixes (T9 — not in this acceptance):**
+
+- Bake-side: `chown -R root:root /opt/sam/stand-alone-analyzer` after
+  the pre-bake clone, OR
+- User-data side: `git config --global --add safe.directory '*'` as
+  the very first line of the script (before any git op).
+- Either way: add a smoke check that `worker.service is-active` →
+  `active` 5 min after instance reaches `running`, and fail the bake
+  CI if not.
+
+### 28.3 Run-ledger summary
+
+| Run id | POST ts | Outcome | What surfaced |
+|---|---|---|---|
+| 6 | 2026-06-08T19:26:19 | failed | both spot + on-demand `InsufficientInstanceCapacity` (T7 fallback verified) |
+| 7 | 2026-06-08T19:30:17 | failed | same as run 6 (capacity drought confirmed across two attempts) |
+| 8 | 2026-06-08T19:33:44 | failed | spot launch **succeeded** (`i-0dd944abe7d9e432a`), but `defer_async` raised `AppNotOpen` |
+| (T8 patch landed: `app.open_async` in API lifespan) | | | |
+| 9 | 2026-06-08T19:37:58 | failed | `MaxSpotInstanceCountExceeded` — terminated `i-0dd944abe7d9e432a` was still consuming the 192 vCPU G/VT spot quota during AWS-side request decommission |
+| 10 | 2026-06-08T19:44:28 | failed | same as run 9 (quota lag persists ~10 min after terminate; cancelling the spot request explicitly via `cancel-spot-instance-requests` accelerated the unlock) |
+| 11 | 2026-06-08T19:46:30 (orphan, harness cancelled mid-fire) | running→failed (post-hoc fixup) | spot launch succeeded `i-0c30c170080222749` but cloud-init aborted at git safe.directory; worker.service never started |
+| 12 | 2026-06-08T19:55:12 | running→failed (post-hoc fixup) | reused worker `i-0c30c170080222749`, defer succeeded, but the worker.service was inactive so the procrastinate job sat in `todo` and the SSE stream hung — manually terminated at 60-min wall cap |
+
+(Runs 11 and 12 were left at `status='running'` after manual instance
+termination; the post-hoc cleanup `UPDATE runs SET status='failed',
+completed_at=now()` reflects the truth that the procrastinate worker
+never claimed them. Note runs 11 and 12 were attempted against
+**different** instances — run 11 expected `i-0c30c170080222749` to
+boot, run 12 found that same instance "live" via `_has_live_worker`
+and skipped the launch step. Neither got a `gpu_ready` because
+`worker.service` was inactive on that instance.)
+
+Procrastinate jobs 14 and 15 were left in `todo` and were manually
+deleted post-run (`DELETE FROM procrastinate_jobs WHERE id IN (14,
+15) AND status='todo'`) so a future worker boot doesn't pick them up
+out of context.
+
+### 28.4 Cost ledger (this re-run)
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| `i-0dd944abe7d9e432a` (spot, us-east-2b) | 19:33:46→19:35:22 ≈ 1.6 min | $5.96 | $0.16 |
+| `i-0c30c170080222749` (spot, us-east-2b) | 19:46:54→20:00:38 ≈ 13.7 min | $5.96 | $1.36 |
+| RDS round-trips, SSH tunnel | n/a | n/a | $0.00 |
+| **Total this re-run** | | | **~$1.52** |
+
+Within the §27 / T6 standing-approval expected envelope ($1.50-$2)
+and well below the $5 hard cap on this run.
+
+### 28.5 Cleanup performed
+
+- `i-0dd944abe7d9e432a` (terminated 19:35:22Z; spot request `sir-xmm7g9dg`
+  manually `cancel-spot-instance-requests` to clear the 192 vCPU G/VT
+  spot quota — without that the next attempt fails for ~10 min with
+  `MaxSpotInstanceCountExceeded` even though the instance is gone).
+- `i-0c30c170080222749` (terminated 20:00:38Z; spot request
+  `sir-avqzkj9h` cancelled).
+- Both verified `terminated` via `aws ec2 wait instance-terminated`.
+- Procrastinate `todo` jobs 14, 15 deleted (would otherwise be picked
+  up by the next dispatcher launch out-of-context).
+- `runs` rows 11, 12 fixed up from stuck-`running` to `failed` with a
+  truthful error string.
+- API uvicorn process killed (PID file `/tmp/saa-acceptance-api.pid`).
+- SSH bastion tunnel torn down (`pkill -f 'ssh.*qpressdb.ch08y4ooqgmq'`).
+- Bastion `i-063165d449976b2e4` stopped per default runbook (§2.8).
+
+### 28.6 Status for owner decision
+
+**Verified by this re-run (improves on §27):**
+- T7 spot→on-demand fallback wire path (boto3 issues both calls; both
+  refusals translate cleanly to `GpuCapacityUnavailable` SSE error).
+- `gpu_launching` SSE event payload (first observation in prod).
+- T8 procrastinate `app.open_async` lifespan integration (now defers
+  succeed; previously every defer raised `AppNotOpen`).
+
+**Still unverified pending T9 (AMI bake fix):**
+- `gpu_ready` SSE event.
+- Per-image `progress` SSE events.
+- `done` SSE event with `result.images>=100`.
+- `idle-shutdown.timer` self-terminate.
+
+**Recommended T9 (next cycle, owner decision):** patch the AMI bake
+script (or the LT user-data) to set `git config --global --add
+safe.directory` before the first git op, AND add a SSM-side smoke
+check that asserts `worker.service is-active == active` ≤ 5 min after
+the instance enters `running`. Without this, every 1-click is dead
+on arrival; spot capacity returning has no value while
+worker.service can't start.
+
+### Cumulative cost
+
+| Phase | Cost |
+|---|---|
+| #229 attempts §18-§26 | $20.54 |
+| §27 (dispatcher acceptance — capacity-blocked, no EC2 spent) | $0.00 |
+| **§28 (post-T7 acceptance — partial_blocked, AMI bake gap)** | **~$1.52** |
+| **Total** | **~$22.06** |

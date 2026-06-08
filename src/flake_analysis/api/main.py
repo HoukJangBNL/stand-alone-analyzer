@@ -14,15 +14,36 @@ from flake_analysis.api.routes import (
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan hook: startup banner + shutdown cleanup."""
+    """Lifespan hook: startup banner + procrastinate pool open/close.
+
+    Procrastinate 3.x requires the App's connector pool to be explicitly
+    opened before ``defer_async`` will succeed; otherwise it raises
+    ``AppNotOpen`` ("App was not open. Procrastinate App needs to be
+    opened using ``app.open_async()``..."). The API process defers SAM
+    jobs from :mod:`flake_analysis.api.routes.run`, so we open the pool
+    once at startup and close it on shutdown. The connector itself is
+    constructed at import time in :mod:`flake_analysis.worker.app` and
+    only the pool round-trip happens here.
+    """
     try:
         from flake_analysis import __version__
     except ImportError:
         __version__ = "unknown"
 
     print(f"Stand-Alone Analyzer API v{__version__} starting...")
-    yield
-    print("Stand-Alone Analyzer API shutting down...")
+    # Open procrastinate pool. Importing tasks via the App's
+    # ``import_paths`` is automatic on first defer; here we just need
+    # the connection pool live.
+    from flake_analysis.worker.app import app as procrastinate_app
+    await procrastinate_app.open_async()
+    try:
+        yield
+    finally:
+        print("Stand-Alone Analyzer API shutting down...")
+        try:
+            await procrastinate_app.close_async()
+        except Exception:  # noqa: BLE001 — never block shutdown on cleanup
+            pass
 
 def create_app() -> FastAPI:
     """FastAPI app factory."""
