@@ -52,6 +52,28 @@ class ProgressBridge:
         event = {"type": "progress", "pct": pct, "msg": msg}
         self._loop.call_soon_threadsafe(self._put_progress, event)
 
+    def emit_gpu_launching(self, instance_id: str) -> None:
+        """Non-terminal cold-start event. Worker not yet running.
+
+        Drops silently if the SSE consumer has fallen behind — same
+        semantics as emit_progress. Frontend renders this as the
+        'Launching GPU instance...' badge during the ~60-90s spot
+        allocation + boot window.
+        """
+        event = {"type": "gpu_launching", "instance_id": str(instance_id)}
+        self._loop.call_soon_threadsafe(self._put_progress, event)
+
+    def emit_gpu_ready(self, image_count: int) -> None:
+        """Non-terminal cold-start event. Worker has picked up the
+        procrastinate job and is about to load the SAM model.
+
+        Drops silently if the SSE consumer has fallen behind — same
+        semantics as emit_progress. Frontend flips from 'launching'
+        to 'GPU ready, processing N images' on this event.
+        """
+        event = {"type": "gpu_ready", "image_count": int(image_count)}
+        self._loop.call_soon_threadsafe(self._put_progress, event)
+
     def emit_done(self, result: dict) -> None:
         """Emit terminal 'done' event. Guaranteed delivery."""
         event = {"type": "done", "result": result}
