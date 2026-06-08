@@ -2937,3 +2937,205 @@ in this commit.
 - No EBS volumes orphaned (all root-only, terminate-on-shutdown).
 - No S3 staging to clean up (input dataset and weights are part of
   the long-lived `internal/sam/` prefix, not run-scoped).
+
+## 27. 1-click SAM dispatch acceptance — 2026-06-08 (CAPACITY_BLOCKED)
+
+End-to-end automated acceptance for the GPU dispatcher prod path
+defined by `docs/superpowers/specs/2026-06-08-gpu-dispatcher-design.md`.
+Direct `POST /run/sam` from `httpx` against a local FastAPI process
+talking to prod RDS via SSH-tunneled bastion → SSE wire stream parsed
+→ dispatcher attempts spot launch → **AWS returns
+`InsufficientInstanceCapacity` on every attempt** → dispatcher
+correctly translates to `pipeline_failed` SSE error frame and
+records `runs.status='failed'`.
+
+**Outcome: CAPACITY_BLOCKED.** Four consecutive `POST /run/sam`
+attempts over a ~25-minute window all hit
+`InsufficientInstanceCapacity` for `g6e.48xlarge` spot in `us-east-2`.
+No EC2 instance ever launched. Cold-start lifecycle (`gpu_launching`
+→ `gpu_ready` → per-image progress → `done` → idle terminate) was
+**not exercised** because the spot allocation never succeeded. The
+dispatcher's failure path **was** fully validated end-to-end.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `f55bf96` (T1-T4 merged + LT v26 published) |
+| AMI | `ami-0b7ec5ff47a1eff11` (cu124 stack, §15-verified) — **not booted this run** |
+| Launch template | `qpress-sam-gpu-worker` v26 (default), `g6e.48xlarge` spot |
+| Instance | none — RunInstances rejected |
+| Run IDs (RDS `runs`) | 1 (canceled-by-client), 2-4 (capacity_unavailable) |
+| Scan ID | 1 (`acceptance-100`, project `acceptance-2026-06-08`) |
+| First POST ts (UTC) | 2026-06-08T18:26:40 |
+| Last POST ts (UTC) | 2026-06-08T18:52:00 |
+| `gpu_launching` SSE | **never fired** (no successful RunInstances) |
+| `gpu_ready` SSE | **never fired** (no worker booted) |
+| Cold-start wall | n/a |
+| Processing wall | n/a |
+| Total instance wall (billed) | **0 min** |
+| Cost (this run) | **$0.00** |
+| Status | `capacity_blocked` |
+
+### 27.1 What worked (dispatcher code path validated)
+
+1. **API ↔ RDS via SSH tunnel.** Local `uvicorn` with
+   `SAA_DB_HOST=127.0.0.1`, `SAA_DB_PORT=5433` tunneled to
+   `qpressdb.ch08y4ooqgmq.us-east-2.rds.amazonaws.com:5432` through
+   the bastion (`i-063165d449976b2e4`). Required patching
+   `flake_analysis.db.url._LOCAL_HOSTS` to force `ssl=require` (RDS
+   has `rds.force_ssl=1` and the tunnel terminates at 127.0.0.1
+   which the production code treats as local-no-SSL by default).
+   Acceptance harness (`/tmp/saa-acceptance-server.py`) re-binds
+   `_require_ssl` on every importer of the symbol.
+
+2. **`POST /run/sam` returns `200 text/event-stream` within ~1.0 s**
+   across all four attempts. Auth via `SAA_AUTH_DEV_BYPASS=1`
+   resolved cleanly; `usage_events` row inserted; per-scan mutex
+   acquired; `runs.id` allocated; SSE headers flushed. Wire format
+   matches existing single-step routes byte-for-byte.
+
+3. **Dispatcher reaches `_ensure_gpu_worker` → `ensure_worker_running`
+   → `_launch_one`** and propagates `boto3` `ClientError(code=
+   "InsufficientInstanceCapacity")` to `GpuCapacityUnavailable` per
+   `src/flake_analysis/worker/launcher.py:281`. The conversion is
+   surfaced as a clean SSE `error` envelope:
+
+   ```json
+   {
+     "type": "error",
+     "error": {
+       "code": "pipeline_failed",
+       "message": "GPU spot capacity unavailable in us-east-2. Retry in a few minutes.",
+       "details": {"exc_type": "GpuCapacityUnavailable"},
+       "request_id": "<uuid>"
+     }
+   }
+   ```
+
+   Each request emitted exactly **one** error frame ~13-16 s after
+   `POST` (the time AWS takes to fail the spot request), then closed
+   the stream cleanly. No hangs, no zombie tasks.
+
+4. **`runs` rows recorded correctly.** All three capacity-blocked
+   POSTs landed `status='failed'` rows (ids 2/3/4) with the full
+   error message in `runs.error`. The first attempt (id 1, status
+   `failed`, error `canceled by client`) reflects an early `curl`
+   smoke test that disconnected before the defer completed; the
+   driver task's exception handler caught the cancellation and
+   wrote the failed row. No orphaned `running` rows, no stuck
+   advisory locks.
+
+5. **Per-scan mutex behaves correctly under repeat-fail traffic.**
+   Re-issuing `POST /run/sam` against the same `scan_id=1`
+   immediately after each failure succeeded (no `423 ProjectBusy`),
+   confirming `acquire_scan_lock` releases on both success and
+   error paths.
+
+6. **PgAdvisoryLock cleanup** worked — `pg_try_advisory_lock(7)`
+   acquired on each attempt and released cleanly (verified by the
+   next attempt succeeding immediately, not waiting for a stale
+   lock).
+
+### 27.2 What did not run (pending capacity)
+
+The cold-start lifecycle below could not be exercised because no
+EC2 instance ever launched:
+
+- `gpu_launching` SSE event with `instance_id` (T1 deliverable)
+- `gpu_ready` SSE event with `image_count` (T3 deliverable)
+- Per-image `step_progress` events streaming
+- Terminal `step_completed` / `done` event with `result.images >= 100`
+- `idle-shutdown.timer` firing after 10 min idle and instance reaching
+  `terminated` state
+
+These are unblocked the moment `g6e.48xlarge` spot capacity returns
+to us-east-2; the same harness can re-run without code changes.
+
+### 27.3 Capacity diagnostic
+
+```text
+$ aws ec2 describe-spot-price-history --instance-types g6e.48xlarge
+us-east-2c  6.4254  2026-06-08T18:00:24+00:00
+us-east-2b  5.9641  2026-06-08T15:01:00+00:00
+us-east-2a  7.4683  2026-06-08T15:01:00+00:00
+```
+
+Reference on-demand for `g6e.48xlarge` is ~$3.96/hr; current spot
+clearing $5.96-$7.47/hr indicates AWS-side scarcity (H200 inventory
+pressure). All four attempts failed at the EC2 control plane with
+`InsufficientInstanceCapacity` — boto3 never returned an
+`InstanceId`. AZ-level diagnostics are not available because the
+LT does not pin a subnet; AWS routes the request internally.
+
+### 27.4 Production risk surfaced
+
+The dispatcher LT (v26) is **spot-only** with no on-demand fallback.
+When us-east-2 spot capacity for `g6e.48xlarge` is tight (as it was
+on 2026-06-08), every `POST /run/sam` returns `pipeline_failed`
+within ~15 s, regardless of how many users click the button. The
+existing manual measurement runbook (§26) handles this by issuing a
+direct `ec2 run-instances --instance-market-options 'MarketType=on-demand'`
+override; the prod dispatcher has no such hatch.
+
+**Recommendation for follow-up (owner decision):** add an on-demand
+fallback to `_launch_one` — on `InsufficientInstanceCapacity`,
+re-issue `RunInstances` without `InstanceMarketOptions` (i.e.
+on-demand) and tag the result so cost reporting can distinguish
+spot-vs-on-demand wall. Out of scope for this acceptance; flagged
+in `docs/project-status.md` for the next planning cycle.
+
+### 27.5 Staging artifacts (RDS)
+
+Created in prod RDS for this acceptance — left in place so the
+re-run can use the same `(project_id, scan_id)`:
+
+- `projects` row `acceptance-2026-06-08` (`name='sam-dispatcher-acceptance'`,
+  owner = existing admin user `6410dbb8-...`)
+- `models` row `id=1` (`name='acceptance-merged-pt'`, placeholder —
+  worker resolves real `weights_path` at runtime)
+- `scans` row `id=1` (`name='acceptance-100'`, material `graphene`,
+  status `ready`, `image_count=100`)
+- `images` rows `id=1..100` referencing
+  `s3://qpress-uploads/internal/sam/scan6-100/<sha>.png`
+- `analyses` row `id=1` (`scan_id=1`, `model_id=1`)
+- Local manifest: `/tmp/saa-analysis/acceptance-2026-06-08/1/manifest.json`
+  with `raw_images_dir=/opt/sam/dataset/scan6-100` and
+  `analysis_folder=/opt/sam/runs/acceptance-2026-06-08-scan-1`
+
+Re-running the acceptance is `cd /tmp && uv run --project
+/Users/houkjang/projects/stand-alone-analyzer python
+/tmp/saa-acceptance-run.py --url <api>/api/v1/projects/acceptance-2026-06-08/scans/1/run/sam`
+plus the `nohup uv run python /tmp/saa-acceptance-server.py` launch
+with the env exports below — but the harness scripts in `/tmp/`
+are ephemeral; future re-runs should regenerate them or check
+`docs/superpowers/plans/2026-06-08-gpu-dispatcher.md` Task 6 for the
+recipe.
+
+### 27.6 Cleanup performed
+
+- API uvicorn process terminated cleanly (PID killed via `/tmp/saa-acceptance-api.pid`).
+- SSH bastion tunnel torn down (`pkill -f 'ssh.*qpressdb.ch08y4ooqgmq'`).
+- Bastion `i-063165d449976b2e4` left **running** (owner can stop;
+  default behavior is the cron `abs-cap-terminate` runbook handles it).
+- No EC2 GPU instances live (verified `describe-instances ... values=pending,running,
+  stopping,shutting-down` empty).
+- No EBS, no S3 staging needed (acceptance dataset already in
+  `internal/sam/scan6-100/`).
+- Staging RDS rows left in place for next attempt; idempotent SQL
+  (`/tmp/saa-acceptance-stage.sql`, `/tmp/saa-acceptance-images.sql`)
+  can re-create them if dropped.
+
+### Cumulative cost
+
+| Phase | Cost |
+|---|---|
+| #229 attempts §18-§26 | $20.54 |
+| **§27 (dispatcher acceptance — capacity-blocked, no EC2 spent)** | **$0.00** |
+| **Total** | **$20.54** |
+
+### 27.7 Status for follow-up
+
+GPU dispatcher's **failure path is verified** (capacity error → SSE
+error → recorded run). The **success path is not verified** because
+AWS spot capacity in us-east-2 was exhausted for `g6e.48xlarge`
+during the acceptance window. Re-run when capacity returns; until
+then, dispatcher is "code-validated, capacity-pending".
