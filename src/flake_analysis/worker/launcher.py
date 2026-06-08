@@ -261,10 +261,19 @@ def _has_live_worker(ec2: Any) -> bool:
 
 
 def _launch_one(ec2: Any) -> str:
-    """Synchronous boto3 call: boot exactly one spot worker.
+    """Synchronous boto3 call: boot exactly one worker.
 
-    Translates ``InsufficientInstanceCapacity`` into
-    :class:`GpuCapacityUnavailable`. All other ClientErrors propagate.
+    Tries spot first (via the LT's default ``InstanceMarketOptions``).
+    If AWS returns ``InsufficientInstanceCapacity`` for the spot
+    request, retries once with ``InstanceMarketOptions={}`` to
+    override the LT's spot setting and dispatch as on-demand.
+    On-demand is more expensive ($7.23/hr vs $3.96/hr for
+    g6e.48xlarge in us-east-2 as of 2026-06-08) but reliably
+    available during spot droughts.
+
+    Translates ``InsufficientInstanceCapacity`` (after both attempts
+    fail) into :class:`GpuCapacityUnavailable`. All other
+    ClientErrors propagate without retry.
     """
     try:
         resp = ec2.run_instances(
@@ -277,11 +286,32 @@ def _launch_one(ec2: Any) -> str:
         )
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
-        if code == "InsufficientInstanceCapacity":
-            raise GpuCapacityUnavailable(
-                "GPU spot capacity unavailable in us-east-2. Retry in a few minutes."
-            ) from e
-        raise
+        if code != "InsufficientInstanceCapacity":
+            raise
+        # Spot drought: retry as on-demand. Empty InstanceMarketOptions
+        # overrides the LT's MarketType=spot.
+        logger.info(
+            "spot capacity unavailable; retrying as on-demand (LT %s, $7.23/hr)",
+            LAUNCH_TEMPLATE_NAME,
+        )
+        try:
+            resp = ec2.run_instances(
+                LaunchTemplate={
+                    "LaunchTemplateName": LAUNCH_TEMPLATE_NAME,
+                    "Version": "$Default",
+                },
+                InstanceMarketOptions={},
+                MinCount=1,
+                MaxCount=1,
+            )
+        except ClientError as e2:
+            code2 = (e2.response.get("Error") or {}).get("Code", "")
+            if code2 == "InsufficientInstanceCapacity":
+                raise GpuCapacityUnavailable(
+                    "GPU capacity unavailable in us-east-2 (both spot "
+                    "and on-demand). Retry in a few minutes."
+                ) from e2
+            raise
 
     instances = resp.get("Instances") or []
     if not instances:

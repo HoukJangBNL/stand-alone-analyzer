@@ -396,3 +396,106 @@ async def test_default_factory_uses_boto3_ec2_client(monkeypatch):
     assert captured["name"] == "ec2"
     # us-east-2 is hard-coded as that's where qpress-sam-gpu-worker lives.
     assert captured["kwargs"].get("region_name") == "us-east-2"
+
+
+# ---------------------------------------------------------------------------
+# T7 — On-demand fallback when spot capacity is exhausted
+# ---------------------------------------------------------------------------
+
+
+def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable():
+    """When the LT's spot request hits InsufficientInstanceCapacity,
+    _launch_one retries once with InstanceMarketOptions={} (overrides
+    the LT's spot setting, dispatching as on-demand). The on-demand
+    attempt's response is what _launch_one returns."""
+    from flake_analysis.worker.launcher import _launch_one
+
+    capacity_err = ClientError(
+        {"Error": {"Code": "InsufficientInstanceCapacity",
+                   "Message": "Insufficient capacity"}},
+        "RunInstances",
+    )
+
+    calls: list[dict] = []
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            calls.append(kwargs)
+            if self.attempt == 1:
+                # First call (spot via LT default) — fails with capacity
+                raise capacity_err
+            # Second call (on-demand override) — succeeds
+            return {"Instances": [{"InstanceId": "i-on-demand-test"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+
+    assert instance_id == "i-on-demand-test"
+    assert len(calls) == 2
+
+    # First attempt — relied on LT default (no market override)
+    assert "InstanceMarketOptions" not in calls[0] \
+        or calls[0]["InstanceMarketOptions"] == {"MarketType": "spot"}
+
+    # Second attempt — explicit empty market options to override LT's spot
+    assert calls[1]["InstanceMarketOptions"] == {}
+
+
+def test_launch_one_raises_capacity_error_when_both_spot_and_on_demand_fail():
+    """If on-demand also returns InsufficientInstanceCapacity (rare but
+    possible during region-wide events), _launch_one raises
+    GpuCapacityUnavailable — same as the prior spot-only behavior, just
+    after both attempts."""
+    from flake_analysis.worker.launcher import _launch_one, GpuCapacityUnavailable
+
+    capacity_err = ClientError(
+        {"Error": {"Code": "InsufficientInstanceCapacity",
+                   "Message": "Insufficient capacity"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            raise capacity_err
+
+    ec2 = _FakeEc2()
+    with pytest.raises(GpuCapacityUnavailable):
+        _launch_one(ec2)
+
+    assert ec2.attempt == 2  # tried both spot and on-demand
+
+
+def test_launch_one_propagates_non_capacity_client_errors():
+    """Non-capacity ClientErrors (e.g. UnauthorizedOperation, IAM,
+    InvalidParameterValue) propagate directly without retry — they
+    won't go away by switching to on-demand."""
+    from flake_analysis.worker.launcher import _launch_one
+
+    iam_err = ClientError(
+        {"Error": {"Code": "UnauthorizedOperation", "Message": "Not allowed"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            raise iam_err
+
+    ec2 = _FakeEc2()
+    with pytest.raises(ClientError) as exc_info:
+        _launch_one(ec2)
+
+    # Failed on first attempt; no on-demand retry
+    assert ec2.attempt == 1
+    assert exc_info.value.response["Error"]["Code"] == "UnauthorizedOperation"
