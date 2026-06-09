@@ -4521,7 +4521,219 @@ the next layer.
 | §30 (post-T7b retry, capacity restored — userdata_blocked) | ~$1.19 |
 | §31 (post-T7c — userdata_blocked_2, submodule auth) | ~$0.62 |
 | §32 (post-vendor-revert — userdata_blocked_3) | ~$0.55 |
-| **§33 (post-T7e — userdata_blocked_4, fetch --all recurses)** | **~$0.65** |
-| **Total** | **~$25.07** |
+| §33 (post-T7e — userdata_blocked_4, fetch --all recurses) | ~$0.65 |
+| **§34 (post-T7f — userdata_blocked_5, --no-recurse insufficient on first cold-init fetch)** | **~$0.75** |
+| **Total** | **~$25.82** |
 
-$100 cap remaining: ~$74.93.
+$100 cap remaining: ~$74.18.
+
+---
+
+## 34. 1-click SAM dispatch acceptance — 2026-06-09 (post-T7f) USERDATA_BLOCKED_5
+
+Re-run of §33 after T7f shipped as commit `cbd62ef` — added
+`--no-recurse-submodules` to user-data line 185's `git fetch --all
+--tags`. LT v31 published default with same AMI
+`ami-0b7ec5ff47a1eff11`. Same harness shape as §27-§33.
+
+**Outcome: USERDATA_BLOCKED_5.** `--no-recurse-submodules` was
+correctly placed on line 185 (verified bit-identical: instance's
+gunzipped user-data md5 == LT v31 user-data md5 ==
+`d115ce21ba48c3df898fa03a1b676ae4`). Yet cloud-init's first execution
+of `git fetch --all --tags --no-recurse-submodules` STILL recursed
+into the submodule and crashed with the same auth error as §31-§33:
+
+```text
+[4/8] clone repo + submodule
+Fetching origin
+From https://github.com/HoukJangBNL/stand-alone-analyzer
+   e2a2ede..cbd62ef  main       -> origin/main
+Fetching submodule vendor/QPress-SAM-Flake
+fatal: could not read Username for 'https://github.com'
+Errors during submodule fetch:
+	vendor/QPress-SAM-Flake
+error: Could not fetch origin
+```
+
+A subsequent **manual repro on the same live instance** with the
+same identical command **does not recurse** — even when the local
+state is reset to mimic first-cold-boot conditions (`git reset
+--hard e2a2ede` + `update-ref -d refs/remotes/origin/main` + delete
+local vendor dir, then re-run `git fetch --all --tags
+--no-recurse-submodules` as root with `set -euo pipefail`). The
+manual run produces clean `Fetching origin` output with no submodule
+attempt. Yet cloud-init's first run consistently triggers it.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `cbd62ef` (T7f --no-recurse-submodules on main fetch) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged from §28-§33) |
+| Launch template | `qpress-sam-gpu-worker` v31 (default) |
+| Instances launched | 1 — `i-004a4df739b7676d7` (g6e.48xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-09T19:41:03 |
+| `gpu_launching` SSE | **fired** at +3.51 s |
+| user-data step 4 line 169 — `git config --system` | **SUCCEEDED** (T7c, 5-for-5) |
+| user-data step 4 line 185 — `git fetch ... --no-recurse-submodules` | **STILL RECURSED** (anomaly — see §34.1) |
+| user-data step 4 lines 200+ — T7e SHA-skip | NEVER REACHED |
+| `worker.service` | never installed |
+| Total instance wall (billed) | ~7.5 min |
+| Cost (this re-run) | **~$0.75** |
+| Status | `userdata_blocked_5` |
+
+### 34.1 Root cause: submodule remote misconfiguration in baked AMI + git's recursion override anomaly
+
+Two compounding issues, discovered by SSM-driven introspection on
+the live failing instance:
+
+**(a) Baked submodule has WRONG `origin` remote.** SSM `git remote -v`
+inside `/opt/sam/stand-alone-analyzer/vendor/QPress-SAM-Flake/`:
+
+```text
+origin  https://github.com/HoukJangBNL/stand-alone-analyzer.git (fetch)
+origin  https://github.com/HoukJangBNL/stand-alone-analyzer.git (push)
+```
+
+The submodule's `origin` points at the **main repo URL** rather
+than `QPress-SAM-Flake.git`. This appears to be a bake-time
+artifact from how the AMI builder cloned things. `git submodule
+sync` (which reads `.gitmodules` and rewrites the submodule's
+`.git/config`) was not run during bake, leaving this mismatch
+baked in.
+
+**(b) Git 2.34.1 + `--all` overrides `--no-recurse-submodules` in
+some first-fetch case.** Empirically: cloud-init's cold execution
+recursed despite the flag, but every subsequent manual reproduction
+on the same instance (same command, same root context, same
+`set -euo pipefail`, fresh-state repro via local reset) does NOT
+recurse. The exact trigger is unclear — likely some combination of
+gitlink-change detection on the just-fetched main ref +
+`fetch.recurseSubmodules=on-demand` git default + unfetched-yet
+state on first run. Whatever the exact mechanism, the practical
+outcome is that **`--no-recurse-submodules` alone on `git fetch`
+is not a robust defense in this environment**.
+
+### 34.2 Recommended fix (T7g) — multi-belt suppression
+
+Three independent suppressions of submodule fetch at user-data step
+4. Any one of them should be sufficient on its own; combined they
+make the recursion physically impossible:
+
+```bash
+# Belt 1: explicit config flag scoped to this git invocation only.
+git -c fetch.recurseSubmodules=no fetch --all --tags --no-recurse-submodules
+
+# Belt 2: fix the submodule's broken remote BEFORE any fetch can
+# recurse into it. With origin pointing at the main repo URL
+# (current bake-time bug), a confused recursion would attempt
+# to find the submodule's gitlink SHA in the wrong repo. Even
+# with --no-recurse-submodules, this baked misconfig is fragile.
+# `git submodule sync` rewrites the submodule's .git/config from
+# .gitmodules — fast, idempotent, no fetch.
+if [[ -d vendor/QPress-SAM-Flake/.git ]]; then
+  git submodule sync --recursive
+fi
+
+# Belt 3: as a final safety net, narrow the fetch refspec so git
+# can't try to fetch arbitrary heads the way `--all` invites.
+# (Optional — Belt 1+2 should be enough.)
+git fetch origin "${REPO_REF}" --tags --no-recurse-submodules
+```
+
+Belt 1+2 is the recommended minimum. The `git submodule sync` is
+the most robust fix because it removes the broken-remote
+precondition that may be enabling the override anomaly. Belt 1's
+`-c fetch.recurseSubmodules=no` is per-invocation and stronger
+than the CLI flag alone.
+
+Publish as LT v32. AMI does NOT need rebake — the broken submodule
+remote is fixable with a single `git submodule sync` at runtime.
+
+### 34.3 What was newly verified vs §33
+
+1. **T7f `--no-recurse-submodules` flag IS in the user-data that
+   cloud-init runs** (md5-verified: instance-decoded user-data ==
+   LT v31 user-data, exact byte-for-byte match).
+2. **Manual repro of the exact same command on the same instance
+   does NOT recurse.** This narrows the failure to first-cold-boot
+   conditions, not the flag being ignored.
+3. **The submodule's `.git/config` has a wrong `origin` URL**
+   (points at main repo URL, not QPress-SAM-Flake.git). This is a
+   bake-time bug that has lurked behind every prior attempt.
+   `git submodule sync` would fix it.
+4. **T7c `git config --system` works for the fifth consecutive
+   cold boot.** Rock-solid.
+5. **`gpu_launching` SSE wire path** repeatable — fifth observation.
+
+### 34.4 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 19:41:03 | POST /run/sam |
+| 19:41:04 | HTTP 200, content-type=text/event-stream |
+| 19:41:07 | `event=gpu_launching` `instance_id=i-004a4df739b7676d7` |
+| 19:41:07 | EC2 `running` (spot, us-east-2a) |
+| ~19:42:35 | SSM Online; cloud-init enters scripts_user |
+| 19:42:35 | user-data start banner |
+| 19:42:35-39 | step 4: `git config --system` ✅, then `git fetch --all --tags --no-recurse-submodules` recursed despite flag → `fatal: could not read Username` |
+| 19:42:39 | cloud-init aborts |
+| 19:43:18 - 19:49:22 | SSE keepalive frames |
+| 19:48:30 | PM SSM diagnostic probes (manual repros pass cleanly) |
+| 19:50:45 | PM `terminate-instances` |
+| 19:51:00 | `cancel-spot-instance-requests sir-bk3zhapg` |
+
+### 34.5 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot | ~7.5 min | ~$5.96 | **~$0.75** |
+| Bastion + NAT overlap | ~10 min | ~$0.0104 | ~$0.002 |
+| **Total this re-run** | | | **~$0.75** |
+
+Within $5 cap. Wall ~10 min.
+
+### 34.6 Cleanup performed
+
+- API uvicorn — left running.
+- SSH bastion tunnel — left open.
+- GPU instance `i-004a4df739b7676d7` terminated; `sir-bk3zhapg`
+  explicitly cancelled.
+- Staging RDS rows preserved.
+- Harness SSE log: `/tmp/saa-acceptance-sse-T6a3-r13.log`.
+
+### 34.7 Status for owner decision
+
+**Verified again (no regression):**
+- T7c `git config --system` (5-for-5).
+- `gpu_launching` SSE (5-for-5).
+- Spot capacity in us-east-2a stable.
+
+**New diagnostic finding (this run is the first to surface it):**
+- The baked submodule's `.git/config` has the WRONG `origin` URL
+  (points at main repo, not the vendor's). This bake-time bug is
+  the structural reason `--no-recurse-submodules` is not enough —
+  the submodule remote configuration is in an inconsistent state.
+
+**Next action — T7g:**
+1. Patch user-data step 4 with multi-belt suppression (§34.2):
+   - `git submodule sync --recursive` BEFORE fetch (fixes
+     remote URL).
+   - `git -c fetch.recurseSubmodules=no` on the fetch invocation
+     (per-invocation config override, stronger than CLI flag).
+2. Publish LT v32.
+3. Re-run §34 acceptance.
+
+**Persistent heads-up to owner**: this is the fourth consecutive
+iteration on user-data step 4 (T7c → T7e → T7f → T7g). Each
+iteration cost ~$0.6-0.8 in spot wall while we converged on the
+right understanding. Steps 5/6/7/8 have STILL not been exercised
+on this AMI in this orchestration. The bake-time submodule-remote
+bug suggests the bake script (`scripts/aws/sam-bake-ami.sh`) may
+have other latent issues that surface only when downstream cold-init
+gets further. **A clean re-bake might be lower-cost than further
+iteration on the live AMI** — owner directive 2026-06-09 still
+guides ("한번 돌아가면 냅둬"), but T7g is hopefully the last patch
+on this layer. If T7h+ is needed, suggest re-baking instead.
+
+**Out of scope (still deferred):**
+- Region switch / instance-type switch.
+- T9 spot-request-cancel-on-terminate (operational improvement).
