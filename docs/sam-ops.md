@@ -4737,3 +4737,232 @@ on this layer. If T7h+ is needed, suggest re-baking instead.
 **Out of scope (still deferred):**
 - Region switch / instance-type switch.
 - T9 spot-request-cancel-on-terminate (operational improvement).
+
+---
+
+## 35. 1-click SAM dispatch acceptance — 2026-06-09 (post-T7g) BAKE_GITLINK_MISMATCH
+
+Re-run of §34 after T7g shipped as commit `19cd876` — added
+`git submodule sync --recursive` BEFORE fetch + per-call
+`git -c fetch.recurseSubmodules=no` override (multi-belt
+suppression per §34.2 recommendation). LT v32 published default
+with same AMI `ami-0b7ec5ff47a1eff11`.
+
+**Outcome: BAKE_GITLINK_MISMATCH.** **T7g WORKED — step 4's
+fetch and reset succeeded** for the first time since §28. The
+script then progressed to T7e's SHA-equality safety check and
+**correctly bailed** with the "AMI re-bake required" message:
+
+```text
+[4/8] clone repo + submodule
+Fetching origin
+From https://github.com/HoukJangBNL/stand-alone-analyzer
+   e2a2ede..19cd876  main       -> origin/main
+HEAD is now at 19cd876 fix(userdata): submodule sync + per-call recurse=no (T7g)
+FATAL: vendor SHA mismatch — gitlink wants 61eb37d34830531a8ba11e1593cde3d996b09aaf, AMI baked 2c69ebd7ea9f78c77f2b04778116ab38d1c4008a
+       AMI re-bake required to advance vendor SHA. PAT is bake-time only by design.
+```
+
+**This is T7e's safety guard firing exactly as designed**, not a new
+bug. The SHA mismatch is real and was masked behind the recursive-fetch
+auth failure on §31-§34. With T7g unblocking that, T7e correctly
+identifies that the vendor gitlink at `19cd876` (`61eb37d`) does not
+match the SHA actually baked into the AMI's
+`/opt/sam/stand-alone-analyzer/vendor/QPress-SAM-Flake/.git`
+(`2c69ebd`).
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `19cd876` (T7g multi-belt suppression) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged from §28-§34) |
+| Launch template | `qpress-sam-gpu-worker` v32 (default) |
+| Instances launched | 1 — `i-02d984bc2ec5c7776` (g6e.48xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-09T20:18:59 |
+| `gpu_launching` SSE | **fired** at +3.58 s (6-for-6) |
+| user-data line 169 — `git config --system` | **SUCCEEDED** (T7c, 6-for-6) |
+| user-data — `git submodule sync` (T7g Belt 1) | **SUCCEEDED** (first-ever exercise) |
+| user-data — `git -c fetch.recurseSubmodules=no fetch ...` (T7g Belt 2) | **SUCCEEDED** (no recursion, `e2a2ede..19cd876`) |
+| user-data — `git reset --hard origin/main` | **SUCCEEDED** |
+| user-data — T7e SHA-equality check | **CORRECTLY BAILED** with "AMI re-bake required" |
+| `worker.service` | not installed (script exited cleanly per T7e design) |
+| Total instance wall (billed) | ~6 min |
+| Cost (this re-run) | **~$0.60** |
+| Status | `bake_gitlink_mismatch` (operator-actionable, not a bug) |
+
+### 35.1 Root cause: gitlink in main HEAD ≠ vendor SHA actually baked
+
+The gitlink for `vendor/QPress-SAM-Flake` at `main` HEAD (`19cd876`)
+is `61eb37d`. The submodule SHA actually baked into the AMI is
+`2c69ebd` — one commit AHEAD of `61eb37d` (the diff is
+`fix(deps): correct sam2 → SAM-2 (uv strict name match)`).
+
+The owner's commit `6090d9c` ("revert(vendor): gitlink back to
+61eb37d (AMI bake-time SHA)") was based on the assumption that
+`61eb37d` was the AMI's bake-time vendor SHA. The actual baked
+SHA is `2c69ebd`. The "revert" moved the gitlink in the WRONG
+direction (further from baked SHA, not closer).
+
+This is exactly the structural mismatch T7e's safety guard exists
+to detect. T7g removed the upstream blocker (recursive fetch into
+private submodule), so T7e finally got to run.
+
+### 35.2 Recommended fix (T7h) — align gitlink to baked SHA
+
+Two options. Both are safe; Option A is faster.
+
+**Option A (preferred): bump main gitlink forward to `2c69ebd`.**
+The single commit `2c69ebd` (`fix(deps): correct sam2 → SAM-2`) is
+a uv package-name normalization fix that the AMI already has baked
+in. Bumping the gitlink to match the baked state:
+- Aligns documented dependency state with what's actually deployed.
+- Reverses `6090d9c`'s incorrect-direction revert.
+- One-commit change, ~30 s of owner time.
+
+```bash
+cd vendor/QPress-SAM-Flake
+git checkout 2c69ebd
+cd ../..
+git add vendor/QPress-SAM-Flake
+git commit -m "fix(vendor): align gitlink to AMI-baked SHA 2c69ebd
+
+  6090d9c reverted gitlink to 61eb37d on the assumption that was the
+  bake-time SHA. SSM probe on a live instance from §35 showed the
+  AMI actually has 2c69ebd baked. Revert direction was wrong by 1
+  commit. This realigns to ground truth.
+
+  Re-validates: T7e SHA-equality check now passes; cold-init step 4
+  completes; steps 5-8 finally exercise.
+"
+```
+
+No LT version bump required (user-data unchanged).
+
+**Option B: re-bake the AMI with vendor at `61eb37d`.** Owner directive
+("나중에 업데이트 시 새 AMI") would suggest this is the moment for a
+re-bake. But it's heavier: ~30 min build wall, costs ~$0.30, and
+the vendor delta (1 commit, deps name fix) is functionally trivial,
+so re-baking purely for that delta is overkill.
+
+**Recommendation**: Option A. Re-baking is cleaner if owner wants a
+fresh AMI for other reasons (e.g., to also pick up any latent
+bake-side fixes), but for moving past §35 it's unnecessary.
+
+### 35.3 What was newly verified vs §34
+
+This run is the FIRST end-to-end pass through user-data step 4
+(modulo the T7e safety bail at the end). Specifically:
+
+1. **T7g Belt 1 (`git submodule sync --recursive`) works** — repaired
+   the bake-time wrong-`origin` bug discovered in §34. Submodule's
+   `.git/config` `origin` URL is now correctly pointing at
+   `QPress-SAM-Flake.git` (rather than the main repo URL).
+2. **T7g Belt 2 (`git -c fetch.recurseSubmodules=no`) works** — the
+   per-invocation config override successfully suppressed the
+   recursion that `--no-recurse-submodules` CLI flag alone failed
+   to suppress in §34. Main repo `git fetch` advanced
+   `e2a2ede..19cd876` cleanly with no submodule fetch attempted.
+3. **`git reset --hard origin/main` works at runtime** — was always
+   expected to but never verified before because we crashed
+   upstream every time.
+4. **T7e SHA-equality check works as designed** — caught the
+   bake-vs-gitlink mismatch with a clear operator-actionable
+   error message and exit code 1.
+5. **T7c `git config --system`** — 6-for-6.
+6. **`gpu_launching` SSE wire path** — 6-for-6.
+
+### 35.4 What did NOT run
+
+- Step 5 (uv sync + SAM2 inference deps) — first-time exercise still
+  pending.
+- Step 6 (M3 multi-GPU asset bootstrap including peft pip).
+- Step 6c (vendor base-ckpt prod-path symlinks).
+- Step 7 (worker.service install + start).
+- Step 8 (idle-shutdown.timer install + enable).
+- `gpu_ready` / per-image `progress` / `done` SSE.
+
+After T7h, all of these get their first end-to-end exercise on
+`ami-0b7ec5ff47a1eff11` in the new orchestration.
+
+### 35.5 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 20:18:59 | POST /run/sam |
+| 20:19:00 | HTTP 200, content-type=text/event-stream |
+| 20:19:02 | `event=gpu_launching` `instance_id=i-02d984bc2ec5c7776` |
+| 20:19:02 | EC2 `running` (spot, us-east-2a) |
+| ~20:20:33 | SSM Online; cloud-init enters scripts_user |
+| 20:20:33 | user-data start banner |
+| 20:20:33-35 | step 4: `git config --system` ✅ |
+| 20:20:35-40 | T7g Belt 1 `submodule sync` ✅, Belt 2 `fetch -c recurse=no` ✅ (`e2a2ede..19cd876`), `reset --hard origin/main` ✅ |
+| 20:20:40 | T7e SHA-equality check: gitlink `61eb37d` ≠ baked `2c69ebd` → exit 1 with "AMI re-bake required" |
+| 20:21:02 - 20:25:17 | SSE keepalive frames (~17) |
+| 20:25:30 | PM `terminate-instances`, `cancel-spot sir-77h7jyig` |
+
+### 35.6 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot | ~6 min | ~$5.96 | **~$0.60** |
+| Bastion overlap | ~10 min | ~$0.0104 | ~$0.002 |
+| **Total this re-run** | | | **~$0.60** |
+
+Within $5 cap. Wall ~7 min.
+
+### 35.7 Cleanup performed
+
+- API uvicorn — left running.
+- SSH bastion tunnel — open on 5433.
+- GPU `i-02d984bc2ec5c7776` terminated; `sir-77h7jyig` cancelled.
+- Staging RDS rows preserved.
+- Harness SSE log: `/tmp/saa-acceptance-sse-T6a3-r14.log`.
+
+### 35.8 Status for owner decision
+
+**Verified (this run is the first pass through step 4 cleanly):**
+- T7g multi-belt suppression works on first cold-fetch.
+- T7e SHA-equality safety guard fires correctly when there's a
+  mismatch — exactly its designed behavior.
+- 5 prior fixes hold without regression: T7c (6-for-6), T7e (now
+  exercised), T7f (preserved), main-repo fetch + reset path.
+
+**Operator-actionable mismatch (not a code bug):**
+- Main HEAD's gitlink for `vendor/QPress-SAM-Flake` is `61eb37d`.
+- AMI bake actually has `2c69ebd` baked in (one commit ahead).
+- `6090d9c`'s revert was based on a wrong assumption about the
+  bake SHA.
+
+**Next action — T7h (1-line fix, no AMI rebake needed)**:
+1. Bump `vendor/QPress-SAM-Flake` gitlink in main to `2c69ebd`.
+2. Push to `origin/main`. (No LT bump — user-data unchanged.)
+3. Re-run §35 acceptance. Expected: step 4 completes,
+   `[5/8] uv sync` finally runs.
+
+**This is the FIRST iteration where the recommended fix is
+operator-side (gitlink bump) rather than code-side (user-data
+patch).** Cumulative §27-§35 dispatcher cost: ~$5.88 of $100 cap.
+Step 4 has had **5 patches now** (T7c → T7e → T7f → T7g → T7h),
+but T7h is just a gitlink commit, not a user-data change.
+
+**Heads-up to owner**: after T7h ships, steps 5/6/7/8 finally
+exercise on this AMI. Expect 1+ new layer to surface there.
+Spec for those layers is best-effort from §15 manual run — if
+the new harness shape exposes deltas, will document and recommend
+fixes the same way.
+
+### Cumulative cost (updated through §35)
+
+| Phase | Cost |
+|---|---|
+| #229 attempts §18-§26 | $20.54 |
+| §27-§29 (capacity drought) | $0.00 |
+| §28 (post-T7) | ~$1.52 |
+| §30 (post-T7b retry) | ~$1.19 |
+| §31 (post-T7c) | ~$0.62 |
+| §32 (post-vendor-revert) | ~$0.55 |
+| §33 (post-T7e) | ~$0.65 |
+| §34 (post-T7f) | ~$0.75 |
+| **§35 (post-T7g — first pass through step 4, T7e SHA-guard fires)** | **~$0.60** |
+| **Total** | **~$26.42** |
+
+$100 cap remaining: ~$73.58.
