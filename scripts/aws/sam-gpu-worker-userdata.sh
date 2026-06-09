@@ -153,14 +153,20 @@ if ! done_stamp repo; then
   mkdir -p "${WORK_ROOT}"
 
   # AMI ami-0b7ec5ff47a1eff11 was baked with the repo owned by `ubuntu`
-  # (the bake-time RUN_USER), but cloud-init's user-data runs as root.
-  # git 2.35+ refuses cross-user repo access with:
+  # (the bake-time RUN_USER), but cloud-init's user-data runs as root
+  # with an empty environment (no $HOME). git 2.35+ refuses cross-user
+  # repo access with:
   #   fatal: detected dubious ownership in repository at '/opt/sam/...'
-  # Two-belt fix: (1) chown the repo dir to root before any git op so
-  # ownership matches the running uid, and (2) declare the repo a safe
-  # directory for git globally so future cross-user invocations also
-  # work. Both are idempotent — safe to run on every cold launch.
-  git config --global --add safe.directory '*'
+  # Two-belt fix:
+  # (1) chown the repo dir to root before any git op so ownership
+  #     matches the running uid.
+  # (2) `git config --system` (writes /etc/gitconfig — no $HOME
+  #     dependency, applies to ALL users including root and ubuntu).
+  #     T7c: the prior `--global` form crashed cloud-init with
+  #     `fatal: $HOME not set` because cloud-init scripts_user runs
+  #     as root with an empty env block.
+  # Both are idempotent — safe to run on every cold launch.
+  git config --system --add safe.directory '*'
   if [[ -d "${REPO_DIR}/.git" ]]; then
     chown -R "$(id -u):$(id -g)" "${REPO_DIR}"
   fi
