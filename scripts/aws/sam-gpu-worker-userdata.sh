@@ -179,11 +179,36 @@ if ! done_stamp repo; then
   # Reset hard to remote ref — handles the case where AMI was baked from
   # an older SHA on the same branch and remote has advanced (T13 attempt 3:
   # AMI baked at 01ceb7f, main 341 commits ahead, vendor gitlink shifted).
-  # Also pull submodule URL/SHA changes via `submodule sync` before update.
   git reset --hard "origin/${REPO_REF}" 2>/dev/null \
     || git reset --hard "${REPO_REF}"
-  git submodule sync --recursive
-  git submodule update --init --recursive --force vendor/QPress-SAM-Flake
+
+  # vendor/QPress-SAM-Flake is a private submodule. The PAT to fetch it
+  # was used at AMI bake time only (security: don't bake credentials
+  # into AMIs). At cold launch we don't have the PAT, so we cannot
+  # `git submodule update --init` — that command runs an unconditional
+  # remote fetch even when local SHA already matches the gitlink.
+  #
+  # Owner directive 2026-06-09: "한번 돌아가면 냅둬, 나중에 업데이트
+  # 시 새 AMI 구워서 쓰자" — keep production stable on the working
+  # AMI; only re-bake when vendor needs to advance.
+  #
+  # Strategy: compare gitlink SHA against the SHA already checked out
+  # inside the baked vendor dir. Same → skip (the AMI's vendor dir
+  # is already authoritative). Different → abort with a loud message,
+  # operator re-bakes the AMI. This avoids the PAT-at-runtime path
+  # entirely.
+  expected_vendor_sha=$(git ls-tree HEAD vendor/QPress-SAM-Flake 2>/dev/null | awk '{print $3}')
+  actual_vendor_sha=$(git -C vendor/QPress-SAM-Flake rev-parse HEAD 2>/dev/null || echo "missing")
+  if [[ -z "${expected_vendor_sha}" ]]; then
+    echo "FATAL: main HEAD has no vendor/QPress-SAM-Flake gitlink" >&2
+    exit 1
+  fi
+  if [[ "${expected_vendor_sha}" != "${actual_vendor_sha}" ]]; then
+    echo "FATAL: vendor SHA mismatch — gitlink wants ${expected_vendor_sha}, AMI baked ${actual_vendor_sha}" >&2
+    echo "       AMI re-bake required to advance vendor SHA. PAT is bake-time only by design." >&2
+    exit 1
+  fi
+  echo "  vendor/QPress-SAM-Flake already at ${actual_vendor_sha} — skip submodule fetch"
   popd > /dev/null
   chown -R "${RUN_USER}:${RUN_USER}" "${WORK_ROOT}"
   stamp repo
