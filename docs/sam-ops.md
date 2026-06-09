@@ -3595,5 +3595,207 @@ end of run per §2.8 runbook.
 | #229 attempts §18-§26 | $20.54 |
 | §27 (dispatcher acceptance — capacity-blocked, no EC2 spent) | $0.00 |
 | §28 (post-T7 acceptance — partial_blocked, AMI bake gap) | ~$1.52 |
-| **§29 (post-T7b acceptance — capacity-blocked, no EC2 spent)** | **$0.00** |
-| **Total** | **~$22.06** |
+| §29 (post-T7b acceptance — capacity-blocked, no EC2 spent) | $0.00 |
+| **§30 (post-T7b retry, capacity restored — USERDATA_BLOCKED)** | **~$1.19** |
+| **Total** | **~$23.25** |
+
+---
+
+## 30. 1-click SAM dispatch acceptance — 2026-06-09 (post-T7b, capacity restored) USERDATA_BLOCKED
+
+Re-run of §29 after a PM live-launch probe at 2026-06-09 confirmed
+`g6e.48xlarge` spot capacity has returned to us-east-2a (probe instance
+`i-0b2b8d7d5e82aaf34`, 2-second allocation, immediately terminated).
+Same harness shape as §27/§28/§29 (`httpx` POST `/run/sam` SSE
+foreground, prod RDS via SSH-tunnelled bastion, `SAA_AUTH_DEV_BYPASS=1`,
+dev-bypass admin user).
+
+**Outcome: USERDATA_BLOCKED.** Spot launch SUCCEEDED on the first try
+(no on-demand fallback needed — capacity drought is over), instance
+reached `running` in ~3 s, SSM came online, but **cloud-init's
+`scripts_user` step crashed at user-data line 163** with:
+
+```text
+[4/8] clone repo + submodule
+fatal: $HOME not set
+2026-06-09 13:06:58 - cc_scripts_user.py[WARNING]: Failed to run module scripts_user
+```
+
+The failure is on the literal T7b fix itself: `git config --global
+--add safe.directory '*'` writes to `~/.gitconfig`, which requires
+`$HOME` to resolve. cloud-init's scripts_user module runs as root with
+an empty environment (no `$HOME`, no `$USER`), and `set -euo pipefail`
+on user-data line 5 turns the `git config` non-zero exit into a hard
+abort BEFORE the safe.directory entry is ever written and BEFORE the
+`chown` belt-2 fix runs (line 165). The original "dubious ownership"
+error this fix was meant to address never appears because we crash
+earlier.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `3082950` (T7b + §29 docs) |
+| AMI | `ami-0b7ec5ff47a1eff11` — booted, but cloud-init aborted at user-data step 4 |
+| Launch template | `qpress-sam-gpu-worker` v27 (default) |
+| Instances launched | 1 — `i-0453e6a88fa017783` (g6e.48xlarge spot, us-east-2a) |
+| Run ID (RDS `runs`) | next id assigned (worker_events still has entries; check after acceptance) |
+| POST ts (UTC) | 2026-06-09T13:05:19 |
+| `gpu_launching` SSE | **fired** at +3.28 s (success path) |
+| Instance `running` | +3 s after launch (no spot allocation lag — capacity present) |
+| SSM `Online` | ~+1 min after running |
+| cloud-init step 4 | **FAILED** — `fatal: $HOME not set` at line 163 |
+| `worker.service` | never installed — cloud-init aborted before step 5 |
+| `gpu_ready` SSE | never fired |
+| Per-image `progress` SSE | never fired |
+| `done` SSE | never fired |
+| Total instance wall (billed) | ~12 min (PM observed wedge, terminated manually) |
+| Cost (this re-run) | **~$1.19** (g6e.48xlarge spot @ ~$5.96/hr × 12 min) |
+| Status | `userdata_blocked` |
+
+### 30.1 Root cause: T7b fix is broken in the cloud-init environment
+
+T7b commit `5eb83d0` added two lines to `scripts/aws/sam-gpu-worker-userdata.sh`
+inside the `[4/8] clone repo` block (line 163, 165):
+
+```bash
+git config --global --add safe.directory '*'   # line 163 — CRASHES under cloud-init
+if [[ -d "${REPO_DIR}/.git" ]]; then
+  chown -R "$(id -u):$(id -g)" "${REPO_DIR}"   # line 165 — never reached
+fi
+```
+
+`git config --global` writes to `${HOME}/.gitconfig`. cloud-init
+`scripts_user` runs as root with an empty env — `$HOME` is unset —
+and git refuses with `fatal: $HOME not set` (exit 128). Combined with
+the user-data preamble's `set -euo pipefail`, this aborts the whole
+bootstrap. Step 5 (venv), 6 (M3 weights), 7 (worker.service) never run.
+
+The original "dubious ownership" error this fix was meant to address
+(observed in §28) cannot be confirmed/disconfirmed because we crash
+upstream of it.
+
+### 30.2 Recommended fix (T7c)
+
+Two-line change to user-data, both setting `HOME` for the git invocation
+and exposing the safe.directory entry to all callers via the system-wide
+config (no `$HOME` dependency):
+
+```bash
+# Replace line 163 with one of these belts:
+# (A) set HOME for the git invocation:
+HOME=/root git config --global --add safe.directory '*'
+
+# OR (B) write to system gitconfig directly (no HOME required):
+git config --system --add safe.directory '*'
+```
+
+Option B is preferable: `--system` writes to `/etc/gitconfig`, applies
+to every uid that ever touches the repo (root during cloud-init,
+ubuntu during worker.service), and avoids root creating a stray
+`/root/.gitconfig`. This also makes belt-2 chown (line 165) optional;
+keeping it doesn't hurt, but the `--system` config alone is sufficient
+to address "dubious ownership" for both root and ubuntu.
+
+A LT v28 publish (or v27 in-place revision via
+`create-launch-template-version`) is needed after the fix lands. AMI
+does not need re-baking — `ami-0b7ec5ff47a1eff11` stays.
+
+### 30.3 What was newly verified this run vs §28/§29
+
+1. **Capacity drought is over.** us-east-2a returned `g6e.48xlarge`
+   spot in 3 seconds. Spot price is back near on-demand reference,
+   inventory pressure has eased.
+2. **`gpu_launching` SSE fires correctly through the dispatcher's
+   success path** (first time observed end-to-end after T7b — §28
+   exercised the AMI-bake-gap path, §29 only the on-demand-fallback
+   path; this run is the first to show `gpu_launching` with a real
+   `instance_id` from a successful `RunInstances` call).
+3. **SSE heartbeat flow is healthy** — keepalive `event=message data=`
+   frames stream every 15 s while the worker boots, confirming the
+   `httpx` line iterator + uvicorn keepalive interplay holds for
+   ≥12 min of waiting (no premature stream close).
+
+### 30.4 What did NOT run
+
+- Step 5/6/7 of user-data (venv, M3 weights, worker.service install).
+- `worker.service` start-up.
+- `gpu_ready` SSE event with `image_count`.
+- Per-image `progress` events.
+- Terminal `done` event with `result.images >= 100`.
+- `idle-shutdown.timer` firing.
+
+### 30.5 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 13:05:19 | POST /run/sam from `/tmp/saa-acceptance-run.py` |
+| 13:05:20 | HTTP 200, content-type=text/event-stream |
+| 13:05:22 | `event=gpu_launching` SSE fired with `instance_id=i-0453e6a88fa017783` |
+| 13:05:22 | EC2 `running` state (spot, us-east-2a) |
+| ~13:06:25 | SSM agent online |
+| 13:06:57 | cloud-init `modules:final` enters scripts_user |
+| 13:06:58 | user-data step 4 — `git config --global` → `fatal: $HOME not set` |
+| 13:06:58 | cloud-init aborts; worker.service never installed |
+| 13:05:37 → 13:17:08 | SSE keepalive frames every ~15 s (~46 frames) |
+| 13:17:30 | PM observed wedge, ran `terminate-instances` |
+| 13:18:00 | SSE foreground process killed (`pkill saa-acceptance-run.py`) |
+| 13:18:30 | Instance `shutting-down` (auto-terminate from `idle-shutdown.timer` would not have fired anyway — timer was never installed) |
+
+### 30.6 Cost ledger (this re-run)
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot (us-east-2a, single instance) | ~12 min | ~$5.96 | **~$1.19** |
+| Bastion t3.micro (~10 min uptime overlap) | ~10 min | ~$0.0104 | ~$0.002 |
+| RDS round-trips, NAT GW data | negligible | | ~$0.001 |
+| **Total this re-run** | | | **~$1.19** |
+
+Within the $5 hard cap. Wall-time was 14 min (POST 13:05:19 → cleanup
+13:19), well within the 60-min cap. PM caught the wedge at the +12 min
+mark; auto-terminate from `idle-shutdown.timer` would not have fired
+because the timer was never installed (cloud-init aborted at step 4 of 8).
+
+### 30.7 Cleanup performed
+
+- API uvicorn process (`pid 44674`) — left running for next attempt
+  (no harm; bastion tunnel tied to its lifetime). Owner can kill via
+  `pkill -f saa-acceptance-server` after T7c lands.
+- SSH bastion tunnel still open on 127.0.0.1:5433 (for the imminent
+  T7c re-run; tunnel stays up).
+- Bastion `i-063165d449976b2e4` left **running** (next attempt is
+  hours away, not days; cost is ~$0.25/day for t3.micro — acceptable).
+- GPU instance `i-0453e6a88fa017783` `terminate-instances` issued at
+  13:17:30; verified `shutting-down` at 13:18.
+- No other live SAM instances (verified via tag-filtered
+  `describe-instances`).
+- Staging RDS rows (project `acceptance-2026-06-08`, scan id=1, 100
+  images, analyses id=1, models id=1) **left in place** for T7c re-run.
+- Harness scripts kept at `/tmp/saa-acceptance-{server,run,images,stage}*`
+  + SSE log `/tmp/saa-acceptance-sse-T6a3-r9.log`.
+
+### 30.8 Status for owner decision
+
+**Verified by this re-run (improves on §27/§28/§29):**
+- AWS spot capacity for `g6e.48xlarge` has returned to us-east-2a.
+- Dispatcher's success path through `_launch_one` → `bridge.emit_gpu_launching`
+  → SSE `gpu_launching` works end-to-end (first time observed).
+- SSE keepalive holds for ≥12 min.
+
+**New blocker surfaced (this run is the first to expose it):**
+- T7b's `git config --global` fix in user-data line 163 is broken
+  under cloud-init's empty-env root context — `fatal: $HOME not set`.
+
+**Next action — T7c:**
+1. Patch user-data line 163 from `git config --global` to
+   `git config --system` (preferred) or `HOME=/root git config --global`
+   (acceptable). Also strongly consider bringing `HOME=/root` into the
+   user-data preamble (line 5 area) so any future `--global` git
+   invocations don't re-trip this.
+2. Publish LT v28 (or revise v27 in-place via
+   `create-launch-template-version`).
+3. Re-run §30 acceptance — capacity is present, so a clean userdata
+   path should produce SUCCESS in ~5-12 min.
+
+**Out of scope for the next acceptance attempt** (defer until SUCCESS
+is reached at least once):
+- Region switch.
+- Instance-type switch (g6e.12xlarge alternative).
