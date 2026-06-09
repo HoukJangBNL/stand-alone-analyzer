@@ -3799,3 +3799,286 @@ because the timer was never installed (cloud-init aborted at step 4 of 8).
 is reached at least once):
 - Region switch.
 - Instance-type switch (g6e.12xlarge alternative).
+
+---
+
+## 31. 1-click SAM dispatch acceptance — 2026-06-09 (post-T7c) USERDATA_BLOCKED_2
+
+Re-run of §30 after [T7c](#302-recommended-fix-t7c) shipped as commit
+`d929ce3` — `git config --global` → `git config --system` (writes
+`/etc/gitconfig`, no `$HOME` dependency, applies to root and ubuntu).
+LT v28 published default with the patched user-data (same AMI
+`ami-0b7ec5ff47a1eff11`). Same harness shape as §27-§30 (`httpx` POST
+`/run/sam` SSE foreground, prod RDS via SSH-tunnelled bastion,
+`SAA_AUTH_DEV_BYPASS=1`, dev-bypass admin user).
+
+**Outcome: USERDATA_BLOCKED_2.** T7c fix worked exactly as designed —
+`git config --system` succeeded with empty env, `git fetch` advanced
+the main repo from `e2a2ede..d929ce3` cleanly, no "$HOME not set",
+no "dubious ownership". User-data step 4 then **crashed at the next
+sub-line**: `git submodule update --init --recursive --force
+vendor/QPress-SAM-Flake` failed with:
+
+```text
+fatal: could not read Username for 'https://github.com': No such device or address
+Errors during submodule fetch:
+	vendor/QPress-SAM-Flake
+error: Could not fetch origin
+```
+
+The submodule (`https://github.com/HoukJangBNL/QPress-SAM-Flake.git`)
+is private. The AMI was baked with a one-shot GH PAT exposed via
+`git -c http.extraHeader=...` (per #225 / #228), but at runtime no
+PAT is in the cloud-init environment. `git submodule update --force`
+re-fetches even when the working-tree submodule SHA already matches
+the gitlink, which it does (baked SHA `2c69ebd` matches the gitlink
+in `d929ce3` — `git log e2a2ede..d929ce3 -- vendor/QPress-SAM-Flake`
+returns empty).
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `d929ce3` (T7c: --global → --system) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged from §28-§30) |
+| Launch template | `qpress-sam-gpu-worker` v28 (default, T7c user-data) |
+| Instances launched | 2 — `i-04b80f4059a17f067` (g6e.48xlarge spot us-east-2a, primary) + 1 quota-blocked rejection at the 7-min mark after §30's terminate (see §31.1) |
+| Run ID (RDS `runs`) | (next in sequence; verify post-acceptance) |
+| First POST ts (UTC) | 2026-06-09T13:25:52 (rejected — see §31.1) |
+| Successful POST ts (UTC) | 2026-06-09T13:27:46 |
+| `gpu_launching` SSE | **fired** at +3.25 s on the second POST |
+| Instance `running` | +3 s after launch (spot, us-east-2a) |
+| SSM `Online` | +~1.5 min |
+| cloud-init step 4 — `git config --system` | **SUCCEEDED** (T7c verified) |
+| cloud-init step 4 — `git fetch origin` (main repo) | **SUCCEEDED** (`e2a2ede..d929ce3`) |
+| cloud-init step 4 — `git submodule update --force` | **FAILED** — private repo + no PAT at runtime |
+| `worker.service` | never installed (cloud-init aborted at submodule update) |
+| `gpu_ready` SSE | never fired |
+| Per-image `progress` SSE | never fired |
+| `done` SSE | never fired |
+| Total instance wall (billed) | ~6.2 min |
+| Cost (this re-run) | **~$0.62** (g6e.48xlarge spot @ ~$5.96/hr × 6.2 min) |
+| Status | `userdata_blocked_2` |
+
+### 31.1 First POST quota-lag false start
+
+The first `POST /run/sam` at 13:25:52Z was rejected in 3.8 s with
+`MaxSpotInstanceCountExceeded`. Root cause: §30's terminated instance
+`i-0453e6a88fa017783` left its spot request `sir-iv87j31j` in
+`active/fulfilled` state for ~10 min after instance termination
+(13:17:30 → ~13:27 release lag). The G/VT spot quota (192 vCPU = one
+g6e.48xlarge) was therefore still consumed at 13:25.
+
+`_launch_one`'s broadened catch list (T7b) includes
+`MaxSpotInstanceCountExceeded` and falls back to on-demand, but **the
+on-demand call was also rejected** with `MaxSpotInstanceCountExceeded`
+— AWS appears to count the lingering spot request against on-demand
+g6e quota too in this transient window. Per `_launch_one` lines
+332-338, code2 != IIC propagates raw, so the SSE got the boto3
+`ClientError.__str__` form.
+
+**Mitigation**: explicit `cancel-spot-instance-requests sir-iv87j31j`
+released the quota in <30 s (reported `cancelled`). Second POST at
+13:27:46 succeeded.
+
+This confirms the §28.3 known operational pattern — and motivates a
+T9 follow-up (out of acceptance scope): wire `_terminate_worker` (or
+its callers) to also `cancel-spot-instance-requests` whenever it
+terminates a spot instance, so the next launch isn't quota-blocked
+for ~10 min.
+
+### 31.2 Root cause: submodule update needs auth at runtime
+
+User-data line 180:
+```bash
+git submodule update --init --recursive --force vendor/QPress-SAM-Flake
+```
+
+`vendor/QPress-SAM-Flake` is `https://github.com/HoukJangBNL/QPress-SAM-Flake.git`
+(private). `--force` causes git to re-fetch even when the working-tree
+submodule SHA already matches the gitlink. With no PAT in the runtime
+env and no SSH key, git prompts for HTTPS credentials, which fails
+non-interactively with `fatal: could not read Username for
+'https://github.com': No such device or address`. `set -euo pipefail`
+turns this into a hard abort.
+
+This NEW failure mode was masked by §28-§30 because user-data crashed
+upstream (at line 163 `git config --global` → `$HOME not set`). T7c
+unblocked line 163-169, so line 180 is the first line that has
+actually run since the underlying issue (private submodule, no
+runtime PAT) was introduced.
+
+The baked submodule (at SHA `2c69ebd`) is already correct — `git log
+e2a2ede..d929ce3 -- vendor/QPress-SAM-Flake` returns empty across the
+T7c push, meaning no submodule changes are needed. The `--force`
+re-fetch is wasted work AND the cause of the failure.
+
+### 31.3 Recommended fix (T7d) — three options
+
+**Option A (preferred): drop `--force` and check first.** The baked
+submodule already matches the gitlink in 99% of cases (only fails when
+the main-repo HEAD bumps the submodule gitlink between bake and
+launch). Replace line 180 with:
+
+```bash
+# If the baked submodule SHA matches the gitlink, no fetch needed.
+expected_sha="$(cd "${REPO_DIR}" && git ls-tree HEAD vendor/QPress-SAM-Flake | awk '{print $3}')"
+actual_sha="$(cd "${REPO_DIR}/vendor/QPress-SAM-Flake" 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo none)"
+if [[ "${expected_sha}" != "${actual_sha}" ]]; then
+  # Need a runtime fetch — fail loudly with a clear message.
+  echo "FATAL: vendor/QPress-SAM-Flake gitlink (${expected_sha:0:8}) != baked SHA (${actual_sha:0:8})." >&2
+  echo "  AMI re-bake required (PAT not exposed at runtime by design)." >&2
+  exit 1
+fi
+echo "[4/8] vendor submodule already at ${actual_sha:0:8} (baked match) — skip fetch"
+```
+
+Pros: zero secrets at runtime; fails loudly when AMI re-bake IS
+needed; idempotent on every cold launch. Cons: requires AMI re-bake
+when the main-repo bumps the submodule gitlink (which is rare and
+already requires bake-side action for sam2 vendor pin anyway).
+
+**Option B: pass a runtime PAT via launch-template UserData
+substitution OR Secrets Manager.** Adds one-shot env-var injection
+during cloud-init (e.g.
+`git -c "http.extraHeader=Authorization: Bearer $(aws secretsmanager
+get-secret-value --secret-id qpress/gh-pat --query SecretString
+--output text)" submodule update ...`). Pros: keeps the `--force`
+re-fetch for safety. Cons: secret in IAM-readable scope, more moving
+parts, ongoing rotation burden.
+
+**Option C: Bake without the submodule and fetch fresh on every
+launch with PAT.** Reverses §16/§228 entirely. Out of scope.
+
+**Recommendation**: Option A. The baked AMI is already the source of
+truth for the submodule SHA; `--force` was always a belt-and-suspenders
+that introduced the secret-at-runtime requirement.
+
+### 31.4 What was newly verified vs §30
+
+1. **T7c `git config --system` works under cloud-init's empty-env
+   root context.** No `$HOME not set`, the `[safe.directory] *` entry
+   is written to `/etc/gitconfig`, and the subsequent `git fetch` on
+   the main repo succeeded (advanced from baked `e2a2ede` to
+   `d929ce3`). The original "dubious ownership" error this fix
+   targeted is fully suppressed.
+2. **Main repo `git fetch + reset --hard origin/main` works at
+   runtime** without PAT. (The main repo is public; only the
+   submodule is private.)
+3. **`gpu_launching` SSE again fires within +3.25 s** of POST,
+   matching §30's timing.
+4. **Spot+on-demand fallback after a recent terminate is brittle.**
+   The §28.3 known issue (lingering spot request blocks both spot AND
+   on-demand for ~10 min) reproduced exactly. Manual
+   `cancel-spot-instance-requests` resolves it in <30 s.
+
+### 31.5 What did NOT run (carry forward from §30)
+
+- Step 5/6/7 of user-data (venv, M3 weights install,
+  worker.service install).
+- `worker.service` start-up.
+- `gpu_ready` SSE event with `image_count`.
+- Per-image `progress` events.
+- Terminal `done` event with `result.images >= 100`.
+- `idle-shutdown.timer` firing.
+
+### 31.6 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 13:25:52 | POST #1 (7 min after §30 terminate) |
+| 13:25:55 | SSE error `MaxSpotInstanceCountExceeded` (spot quota lingering from §30 termination) |
+| 13:26:54 | PM identifies sir-iv87j31j active/fulfilled despite instance terminated |
+| 13:27:00 | `cancel-spot-instance-requests sir-iv87j31j` → `cancelled` |
+| 13:27:46 | POST #2 |
+| 13:27:48 | HTTP 200, content-type=text/event-stream |
+| 13:27:50 | `event=gpu_launching` `instance_id=i-04b80f4059a17f067` |
+| 13:27:50 | EC2 `running` (spot, us-east-2a) |
+| 13:29:13 | SSM agent online |
+| 13:29:23 | cloud-init `modules:final` enters scripts_user |
+| 13:29:23-25 | user-data step 4: `git config --system` ✅, `git fetch origin` ✅ (`e2a2ede..d929ce3`) |
+| 13:29:25-27 | `git submodule update --init --recursive --force vendor/QPress-SAM-Flake` → `fatal: could not read Username` |
+| 13:29:28 | cloud-init aborts at scripts_user |
+| 13:29:50 - 13:33:50 | SSE keepalive frames every 15 s (~16 frames) |
+| 13:34:00 | PM `terminate-instances i-04b80f4059a17f067` |
+| 13:34:30 | `cancel-spot-instance-requests sir-rftqjw5g` (proactive) |
+| 13:35:00 | SSE foreground process killed |
+
+### 31.7 Cost ledger (this re-run)
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot (us-east-2a, single instance, §31b) | ~6.2 min | ~$5.96 | **~$0.62** |
+| Bastion t3.micro (~10 min uptime overlap) | ~10 min | ~$0.0104 | ~$0.002 |
+| RDS round-trips, NAT GW data | negligible | | ~$0.001 |
+| **Total this re-run** | | | **~$0.62** |
+
+Within the $5 hard cap. Wall-time ~9 min (POST #1 13:25:52 → cleanup
+13:35), well within the 60-min cap. No `idle-shutdown.timer` to rely
+on (timer was never installed because cloud-init aborted at step 4).
+
+### 31.8 Cleanup performed
+
+- API uvicorn process — left running for next attempt (still tied to
+  bastion tunnel lifetime).
+- SSH bastion tunnel — left open on 127.0.0.1:5433 for T7d re-run.
+- Bastion `i-063165d449976b2e4` — left **running** (T7d landing is
+  hours, not days, away).
+- GPU instance `i-04b80f4059a17f067` `terminate-instances` issued at
+  ~13:34Z; verified `shutting-down`.
+- Both spot requests this run (`sir-iv87j31j` from §30,
+  `sir-rftqjw5g` from §31b) **explicitly cancelled** to release quota
+  immediately for the next attempt — avoids the §31.1 false-start
+  pattern.
+- No other live SAM instances (verified via tag-filtered
+  `describe-instances`).
+- Staging RDS rows (project `acceptance-2026-06-08`, scan id=1, 100
+  images, analyses id=1, models id=1) **left in place** for T7d.
+- Harness scripts kept at `/tmp/saa-acceptance-{server,run,images,stage}*`
+  + SSE logs `/tmp/saa-acceptance-sse-T6a3-r10*.log`.
+
+### 31.9 Status for owner decision
+
+**Verified by this re-run (improves on §30):**
+- T7c `git config --system` is the right shape for cloud-init's
+  empty-env root context — `safe.directory` entry applies and
+  subsequent main-repo `git fetch` runs cleanly.
+- `gpu_launching` SSE wire path is repeatable.
+- §28.3's quota-lag known issue is reproducible and remediable in
+  <30 s with explicit `cancel-spot-instance-requests`.
+
+**New blocker (this run is the first to expose it because §28-§30
+crashed upstream):**
+- User-data line 180 `git submodule update --init --recursive
+  --force vendor/QPress-SAM-Flake` requires runtime auth that no
+  longer exists (PAT is bake-time only). The `--force` re-fetch is
+  unnecessary because the baked submodule SHA already matches the
+  gitlink at every cold launch (gitlink only changes on intentional
+  bake-side bumps).
+
+**Next action — T7d:**
+1. Implement Option A (§31.3): replace user-data line 180 with a
+   bake-vs-gitlink SHA check that no-ops when they match and exits
+   loudly when they don't (which signals "AMI re-bake required" to
+   the operator).
+2. Publish LT v29 (or revise v28 in-place) with the patched user-data.
+3. Re-run §31 acceptance — capacity should be present (today's probes
+   succeeded), and a clean step-4 path should produce SUCCESS in
+   ~5-12 min.
+
+**Out of scope for the next acceptance attempt:**
+- Region switch / instance-type switch (still deferred).
+- T9 spot-request-cancel on terminate (operational improvement,
+  flagged for separate plan).
+
+### Cumulative cost update
+
+| Phase | Cost |
+|---|---|
+| #229 attempts §18-§26 | $20.54 |
+| §27 (capacity-blocked, no EC2 spent) | $0.00 |
+| §28 (post-T7 partial_blocked, AMI bake gap) | ~$1.52 |
+| §29 (post-T7b capacity-blocked, no EC2 spent) | $0.00 |
+| §30 (post-T7b retry, capacity restored — userdata_blocked) | ~$1.19 |
+| **§31 (post-T7c — userdata_blocked_2, submodule auth)** | **~$0.62** |
+| **Total** | **~$23.87** |
+
+$100 cap remaining: ~$76.13.
