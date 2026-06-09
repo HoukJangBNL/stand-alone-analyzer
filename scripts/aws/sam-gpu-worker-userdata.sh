@@ -175,7 +175,14 @@ if ! done_stamp repo; then
     git clone "${REPO_URL}" "${REPO_DIR}"
   fi
   pushd "${REPO_DIR}" > /dev/null
-  git fetch --all --tags
+  # `--no-recurse-submodules` is critical: modern git (>=2.9) defaults
+  # `fetch.recurseSubmodules=on-demand`, and `--all` widens the scope.
+  # Without this flag, the main-repo fetch auto-recurses into the
+  # vendor/QPress-SAM-Flake submodule and tries to authenticate to
+  # the private repo with a PAT we deliberately don't carry at
+  # runtime (T6 retry 6 / §33 evidence). Vendor is handled separately
+  # below via the SHA-equality skip (T7e), so suppress recursion here.
+  git fetch --all --tags --no-recurse-submodules
   # Reset hard to remote ref — handles the case where AMI was baked from
   # an older SHA on the same branch and remote has advanced (T13 attempt 3:
   # AMI baked at 01ceb7f, main 341 commits ahead, vendor gitlink shifted).
