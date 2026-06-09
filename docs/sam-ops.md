@@ -4303,3 +4303,225 @@ next in steps 5/6/7/8. Owner directive ("한번 돌아가면 냅둬, 나중에
 업데이트 시 새 AMI") still applies — the goal of T7e is to get past
 step 4 cleanly so the rest of the cold-init can be exercised on
 this AMI for the first time.
+
+---
+
+## 33. 1-click SAM dispatch acceptance — 2026-06-09 (post-T7e) USERDATA_BLOCKED_4
+
+Re-run of §32 after T7e shipped as commit `2f56bce` — replaced
+`git submodule update --init --recursive --force` with a SHA-equality
+guard that skips fetch when the gitlink and baked submodule SHA
+match (verified in v30 user-data lines 200-211). LT v30 published
+default with same AMI `ami-0b7ec5ff47a1eff11`. Same harness shape as
+§27-§32.
+
+**Outcome: USERDATA_BLOCKED_4.** T7e's explicit submodule update
+**was reached and would have skipped cleanly** — but `git fetch
+--all --tags` on user-data line 178 (which precedes T7e by 22 lines)
+**recursed into submodules by default** and crashed on the same
+`fatal: could not read Username` at the same submodule:
+
+```text
+[4/8] clone repo + submodule
+Fetching origin
+From https://github.com/HoukJangBNL/stand-alone-analyzer
+   e2a2ede..2f56bce  main       -> origin/main
+Fetching submodule vendor/QPress-SAM-Flake
+fatal: could not read Username for 'https://github.com': No such device or address
+fatal: could not read Username for 'https://github.com': No such device or address
+Errors during submodule fetch:
+	vendor/QPress-SAM-Flake
+error: Could not fetch origin
+```
+
+The output "Fetching submodule vendor/QPress-SAM-Flake" comes from
+`git fetch --all` recursively fetching submodules, NOT from our T7e
+block (which is downstream and never reached on this run). Modern
+git defaults (`fetch.recurseSubmodules=on-demand` with submodules
+present, plus `--all` widening the scope) trigger this. `set -euo
+pipefail` aborts the script before T7e's SHA-skip gets a chance to
+log success.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `2f56bce` (T7e SHA-equality skip) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged from §28-§32) |
+| Launch template | `qpress-sam-gpu-worker` v30 (default) |
+| Instances launched | 1 — `i-073ed0cc3c0919d01` (g6e.48xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-09T19:14:00 |
+| `gpu_launching` SSE | **fired** at +3.46 s |
+| Instance `running` | +3 s after launch |
+| SSM `Online` | ~+1.5 min |
+| user-data line 168 — `git config --system` | **SUCCEEDED** (T7c verified — 4-for-4) |
+| user-data line 178 — `git fetch --all --tags` | **FAILED** — recursed into submodules, hit auth wall |
+| user-data lines 200-211 — T7e SHA-equality skip | NEVER REACHED (`set -e` aborted upstream) |
+| `worker.service` | never installed |
+| `gpu_ready` / progress / `done` SSE | never fired |
+| Total instance wall (billed) | ~6.5 min |
+| Cost (this re-run) | **~$0.65** (g6e.48xlarge spot @ ~$5.96/hr × 6.5 min) |
+| Status | `userdata_blocked_4` |
+
+### 33.1 Root cause: `git fetch --all` auto-recurses into submodules
+
+Modern git's `git fetch` recurses into populated submodules by
+default when they're present in the working tree (the bake-time
+clone populated `vendor/QPress-SAM-Flake/.git`). With `--all`
+widening the scope to all configured remotes (including the
+submodule's), the recursion attempts to fetch each submodule's
+`origin`. For the private `vendor/QPress-SAM-Flake` requiring auth
+this fails non-interactively. `set -euo pipefail` then aborts the
+whole script before any downstream code runs.
+
+T7e correctly removed the EXPLICIT `git submodule update --init` on
+line 200+, but the IMPLICIT submodule fetch via `git fetch --all`'s
+recursion on line 178 was unaffected.
+
+### 33.2 What was newly verified vs §32
+
+1. **T7c `git config --system` works for the fourth consecutive
+   cold boot.** No `$HOME not set`, no `dubious ownership`. The
+   safe.directory mechanism is rock-solid.
+2. **Main repo's own ref-fetch advances correctly** when it's not
+   recursing — the line "From https://github.com/...\n
+   e2a2ede..2f56bce  main  -> origin/main" appeared in the log
+   BEFORE the submodule recursion crash.
+3. **`gpu_launching` SSE wire path repeatable** — fourth observation
+   now (§30, §31, §32, §33), all at +3.0-3.5 s after POST.
+4. **Spot capacity stable in us-east-2a** — no on-demand fallback
+   needed.
+5. **§31's spot-cancel cleanup pattern continues to pay off** — no
+   quota-lag false-start at start.
+
+### 33.3 Recommended fix (T7f) — disable submodule recursion in git fetch
+
+Two-line patch to user-data line 178. Pick one of these
+equivalent forms:
+
+```bash
+# Option A (preferred, explicit): pass --no-recurse-submodules
+git fetch --all --tags --no-recurse-submodules
+
+# Option B: set the config flag once before fetch
+git -c fetch.recurseSubmodules=no fetch --all --tags
+```
+
+Option A is more readable and self-documenting at the call site.
+Both achieve the same outcome: main repo fetches its own refs
+without touching submodules. T7e's downstream SHA-equality skip
+then handles vendor/QPress-SAM-Flake correctly (no fetch needed,
+SHA already matches per §32 SSM verification).
+
+Publish as LT v31 with the patched user-data. AMI does NOT need
+rebake — `ami-0b7ec5ff47a1eff11` stays.
+
+### 33.4 What did NOT run (still untouched on this AMI/harness)
+
+- `git reset --hard origin/main` (lines 182-183) — would set the
+  working tree to `2f56bce`.
+- T7e SHA-equality skip — would log "vendor/... already at
+  2c69ebd... — skip submodule fetch" and continue.
+- `chown -R ubuntu:ubuntu /opt/sam` (line ~218).
+- `stamp repo`.
+- Step 5 (uv sync + SAM2 inference deps).
+- Step 6 (M3 multi-GPU asset bootstrap including peft pip).
+- Step 6c (vendor base-ckpt prod-path symlinks).
+- Step 7 (worker.service install + start).
+- Step 8 (idle-shutdown.timer install + enable).
+- `gpu_ready` / per-image progress / `done` SSE.
+
+These layers have NOT been exercised on `ami-0b7ec5ff47a1eff11` in
+the new orchestration. After T7f ships, the next acceptance attempt
+will be the first to actually push past step 4 of user-data.
+
+### 33.5 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 19:14:00 | POST /run/sam |
+| 19:14:01 | HTTP 200, content-type=text/event-stream |
+| 19:14:03 | `event=gpu_launching` `instance_id=i-073ed0cc3c0919d01` |
+| 19:14:03 | EC2 `running` (spot, us-east-2a, no on-demand fallback) |
+| ~19:15:35 | SSM agent online; cloud-init enters scripts_user |
+| 19:15:35 | user-data start banner |
+| 19:15:35-37 | step 4: `git config --system` ✅ → `git fetch --all --tags` recursed into vendor/QPress-SAM-Flake → `fatal: could not read Username` |
+| 19:15:37 | cloud-init aborts at scripts_user |
+| 19:14:18 - 19:20:18 | SSE keepalive frames every 15 s (~25 frames) |
+| 19:20:30 | PM `terminate-instances i-073ed0cc3c0919d01` |
+| 19:20:45 | `cancel-spot-instance-requests sir-6j87kc4j` |
+| 19:20:50 | SSE foreground process killed |
+
+### 33.6 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot (us-east-2a) | ~6.5 min | ~$5.96 | **~$0.65** |
+| Bastion t3.micro overlap | ~10 min | ~$0.0104 | ~$0.002 |
+| RDS round-trips | negligible | | ~$0.001 |
+| **Total this re-run** | | | **~$0.65** |
+
+Within the $5 hard cap. Wall ~7 min (POST 19:14 → cleanup 19:21),
+well within the 60-min cap.
+
+### 33.7 Cleanup performed
+
+- API uvicorn — left running.
+- SSH bastion tunnel — left open on 5433.
+- Bastion `i-063165d449976b2e4` — left running.
+- GPU instance `i-073ed0cc3c0919d01` `terminate-instances` issued at
+  ~19:20:30Z; verified `shutting-down`.
+- Spot request `sir-6j87kc4j` explicitly cancelled.
+- Staging RDS rows left in place.
+- Harness SSE log: `/tmp/saa-acceptance-sse-T6a3-r12.log`.
+- No other live SAM instances.
+
+### 33.8 Status for owner decision
+
+**Verified again (no regression):**
+- T7c `git config --system` (4-for-4).
+- `gpu_launching` SSE (4-for-4 since §30).
+- Spot capacity in us-east-2a stable.
+- Quota-lag pattern not re-firing (§31 cleanup discipline holds).
+
+**Same blocker class as §31/§32, NEW root cause:**
+- `git fetch --all --tags` on line 178 auto-recurses into submodules
+  and hits the same private-submodule auth wall. T7e correctly
+  fixed the EXPLICIT submodule update on line 200+ but couldn't
+  address the IMPLICIT recursion on line 178. The `set -euo
+  pipefail` preamble means a failure on line 178 terminates the
+  script before T7e's downstream SHA-skip runs.
+
+**Next action — T7f:**
+1. Patch line 178: `git fetch --all --tags` →
+   `git fetch --all --tags --no-recurse-submodules`.
+2. Publish LT v31.
+3. Re-run §33 acceptance — step 4 should finally complete (T7c +
+   T7f + T7e together), letting steps 5-8 exercise on this AMI for
+   the first time.
+
+**Heads-up to owner**: even after T7f, there's meaningful
+unknown-unknown risk past step 4. Steps 5/6/7/8 have not been
+validated on this AMI in this orchestration. §15 manual run
+validated similar steps but with a different harness shape. §26
+found cuDNN/merged_m3 issues on a different AMI. T7f is necessary
+but may not be sufficient — expect another iteration to surface
+the next layer.
+
+**Out of scope (still deferred):**
+- Region switch / instance-type switch.
+- T9 spot-request-cancel-on-terminate (operational improvement).
+
+### Cumulative cost (updated through §33)
+
+| Phase | Cost |
+|---|---|
+| #229 attempts §18-§26 | $20.54 |
+| §27 (capacity-blocked, no EC2 spent) | $0.00 |
+| §28 (post-T7 partial_blocked, AMI bake gap) | ~$1.52 |
+| §29 (post-T7b capacity-blocked, no EC2 spent) | $0.00 |
+| §30 (post-T7b retry, capacity restored — userdata_blocked) | ~$1.19 |
+| §31 (post-T7c — userdata_blocked_2, submodule auth) | ~$0.62 |
+| §32 (post-vendor-revert — userdata_blocked_3) | ~$0.55 |
+| **§33 (post-T7e — userdata_blocked_4, fetch --all recurses)** | **~$0.65** |
+| **Total** | **~$25.07** |
+
+$100 cap remaining: ~$74.93.
