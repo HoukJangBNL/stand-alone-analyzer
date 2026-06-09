@@ -4078,7 +4078,228 @@ crashed upstream):**
 | §28 (post-T7 partial_blocked, AMI bake gap) | ~$1.52 |
 | §29 (post-T7b capacity-blocked, no EC2 spent) | $0.00 |
 | §30 (post-T7b retry, capacity restored — userdata_blocked) | ~$1.19 |
-| **§31 (post-T7c — userdata_blocked_2, submodule auth)** | **~$0.62** |
-| **Total** | **~$23.87** |
+| §31 (post-T7c — userdata_blocked_2, submodule auth) | ~$0.62 |
+| **§32 (post-vendor-revert — userdata_blocked_3, same line, gitlink revert insufficient)** | **~$0.55** |
+| **Total** | **~$24.42** |
 
-$100 cap remaining: ~$76.13.
+$100 cap remaining: ~$75.58.
+
+---
+
+## 32. 1-click SAM dispatch acceptance — 2026-06-09 (post-vendor-revert) USERDATA_BLOCKED_3
+
+Re-run of §31 after owner shipped commit `6090d9c`:
+`revert(vendor): gitlink back to 61eb37d (AMI bake-time SHA)` — the
+intent being "vendor gitlink == baked SHA, so `git submodule update
+--init --recursive --force` becomes a no-op fetch." LT v29 published
+default with same AMI `ami-0b7ec5ff47a1eff11` and unchanged user-data
+script (T7c content). Same harness shape as §27-§31.
+
+**Outcome: USERDATA_BLOCKED_3.** Cloud-init aborted at the **exact
+same line** as §31 (`git submodule update --init --recursive --force
+vendor/QPress-SAM-Flake`) with the **exact same error** (`fatal:
+could not read Username for 'https://github.com'`). Verified on the
+live instance via SSM:
+
+```text
+$ git ls-tree HEAD vendor/QPress-SAM-Flake
+160000 commit 2c69ebd7ea9f78c77f2b04778116ab38d1c4008a   vendor/QPress-SAM-Flake
+
+$ cd vendor/QPress-SAM-Flake && git rev-parse HEAD
+2c69ebd7ea9f78c77f2b04778116ab38d1c4008a
+```
+
+The gitlink `2c69ebd` matches the baked submodule SHA `2c69ebd`
+exactly. **Yet `git submodule update --init --recursive --force`
+still attempted a fetch** that requires GitHub auth and failed.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `6090d9c` (vendor gitlink revert) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged from §28-§31) |
+| Launch template | `qpress-sam-gpu-worker` v29 (default) |
+| Instances launched | 1 — `i-0efe1950cc6e6cc8f` (g6e.48xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-09T18:40:54 |
+| `gpu_launching` SSE | **fired** at +3.17 s |
+| Instance `running` | +3 s after launch |
+| SSM `Online` | ~+1.5 min |
+| cloud-init step 4 — `git config --system` | **SUCCEEDED** (T7c verified again) |
+| cloud-init step 4 — `git fetch` (main repo) | **SUCCEEDED** (`e2a2ede..6090d9c`) |
+| cloud-init step 4 — `git submodule update --init --force` | **FAILED** — same error as §31 despite matching gitlink |
+| `worker.service` | never installed (cloud-init aborted at step 4) |
+| `gpu_ready` / progress / `done` SSE | never fired |
+| Total instance wall (billed) | ~5.5 min |
+| Cost (this re-run) | **~$0.55** (g6e.48xlarge spot @ ~$5.96/hr × 5.5 min) |
+| Status | `userdata_blocked_3` |
+
+### 32.1 Root cause: `git submodule update --init` fetches unconditionally regardless of gitlink match
+
+The owner directive ("revert vendor gitlink → submodule update is
+no-op") rests on a faulty git-submodule-update model. Verified on
+the live instance:
+
+- The submodule's `.git` directory IS already initialized at AMI
+  bake time (it's not a freshly-cloned repo).
+- The submodule's local HEAD IS already `2c69ebd` (the gitlink
+  target).
+- Fetching to converge those two would be a true no-op.
+
+**But** `git submodule update --init --recursive --force` doesn't
+make that comparison. With `--init`, git unconditionally runs
+`git submodule sync` + a remote fetch on every invocation as part
+of the `init` step (this is by design — `--init` always re-binds
+the submodule's `origin` and pulls remote refs, regardless of
+local state). With `--force`, it then resets the working tree to
+the gitlink. The fetch happens BEFORE the reset, and the fetch
+fails because no PAT is in the runtime env.
+
+The fix is in user-data, not in the gitlink. The gitlink revert
+was orthogonal to this failure mode.
+
+### 32.2 What was confirmed (good news)
+
+1. **T7c continues to work.** `git config --system --add
+   safe.directory '*'` succeeded on a fresh boot for the second
+   time in a row. The `safe.directory` mechanism applies to root
+   in cloud-init's empty-env context.
+2. **Main repo fetch is healthy at runtime.** `e2a2ede..6090d9c`
+   advanced cleanly without auth (the main repo
+   `HoukJangBNL/stand-alone-analyzer` is public).
+3. **`gpu_launching` SSE wire path is repeatable** — three
+   successful observations now (§30, §31, §32), all at +3.0 - 3.3 s
+   after POST.
+4. **`g6e.48xlarge` spot capacity in us-east-2a is stable** as of
+   18:40Z 2026-06-09 — first-try spot allocation in 3 s, no
+   on-demand fallback needed.
+5. **No quota-lag false-start this run** — the §31 cleanup that
+   explicitly cancelled both spot requests prevented the §28.3
+   pattern from re-firing.
+
+### 32.3 Recommended fix (T7e) — back to §31.3 Option A
+
+The §31.3 Option A recommendation is the actual fix. Restating with
+slight refinement based on what we just learned:
+
+**Replace user-data lines 185-186** (currently
+`git submodule sync --recursive` + `git submodule update --init
+--recursive --force vendor/QPress-SAM-Flake`) with:
+
+```bash
+# Submodule fetch requires a runtime PAT, which we don't carry by
+# design (PAT is exposed only at AMI bake time per #225/#228). When
+# the gitlink and the baked submodule SHA already match — which they
+# always should on a freshly-baked AMI — the fetch is unnecessary
+# and we can skip it entirely. When they don't match, the operator
+# must rebake the AMI (no runtime fix possible).
+expected_sha="$(git ls-tree HEAD vendor/QPress-SAM-Flake | awk '{print $3}')"
+actual_sha="$(cd vendor/QPress-SAM-Flake 2>/dev/null && git rev-parse HEAD 2>/dev/null || echo none)"
+if [[ "${expected_sha}" != "${actual_sha}" ]]; then
+  echo "FATAL: vendor/QPress-SAM-Flake gitlink (${expected_sha:0:8}) != baked SHA (${actual_sha:0:8})." >&2
+  echo "  AMI re-bake required (PAT not exposed at runtime by design)." >&2
+  echo "  See docs/sam-ops.md §32 for context." >&2
+  exit 1
+fi
+echo "[4/8] vendor submodule already at ${actual_sha:0:8} (baked match) — skip fetch"
+```
+
+Pros:
+- Zero secrets at runtime.
+- Idempotent on every cold launch.
+- Fails loudly with operator-actionable message when AMI needs rebake.
+- The current §32 case (gitlink revert means SHAs match) becomes a
+  clean no-op, which IS what the owner wanted.
+
+Cons (vs current `--init --force` shape):
+- Loses the auto-recovery for the rare "main repo bumped submodule
+  gitlink between bake and launch" case. But that case requires a
+  bake-side action anyway (we don't ship submodule bumps in main
+  without a corresponding rebake), so this is not a real loss.
+
+Publish as LT v30 (or revise v29 in-place) with the patched user-data.
+AMI does not need rebake — `ami-0b7ec5ff47a1eff11` stays.
+
+### 32.4 What did NOT run (carry forward)
+
+- Step 5/6/7/8 of user-data (venv install, M3 weights, worker.service
+  install, idle-shutdown.timer install).
+- `worker.service` start-up.
+- `gpu_ready` SSE event with `image_count`.
+- Per-image `progress` events.
+- Terminal `done` event.
+- Auto-terminate via idle-shutdown.timer.
+
+These layers have not been exercised on a cold boot of
+`ami-0b7ec5ff47a1eff11` in the new harness. Steps 5/6/7/8 were
+validated in §15 with a different orchestration shape; the cuDNN /
+merged_m3 issues in §26 were on a different AMI (`ami-092ae5880cb9cf957`),
+so they may or may not apply here. **There is meaningful
+unknown-unknown risk past step 4 — fix T7e first, then expect the
+acceptance to surface whatever comes next.**
+
+### 32.5 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 18:40:54 | POST /run/sam |
+| 18:40:55 | HTTP 200, content-type=text/event-stream |
+| 18:40:58 | `event=gpu_launching` `instance_id=i-0efe1950cc6e6cc8f` |
+| 18:40:58 | EC2 `running` (spot, us-east-2a, no on-demand fallback) |
+| ~18:42:30 | SSM agent online (cloud-init started shortly after) |
+| 18:42:30 | user-data start banner |
+| 18:42:30-32 | step 4: `git config --system` ✅, `git fetch origin` ✅ (`e2a2ede..6090d9c`) |
+| 18:42:32 | `git submodule update --init --recursive --force` → `fatal: could not read Username` |
+| 18:42:32 | cloud-init aborts at scripts_user |
+| 18:41:58 - 18:45:13 | SSE keepalive frames every 15 s (~14 frames) |
+| 18:46:15 | PM `terminate-instances i-0efe1950cc6e6cc8f` |
+| 18:46:30 | `cancel-spot-instance-requests sir-ix1fhc8h` |
+| 18:46:35 | SSE foreground process killed |
+
+### 32.6 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot (us-east-2a) | ~5.5 min | ~$5.96 | **~$0.55** |
+| Bastion t3.micro overlap | ~10 min | ~$0.0104 | ~$0.002 |
+| RDS round-trips | negligible | | ~$0.001 |
+| **Total this re-run** | | | **~$0.55** |
+
+Within the $5 hard cap. Total wall ~6 min (POST 18:40:54 → cleanup
+~18:46:30), well within the 60-min cap.
+
+### 32.7 Cleanup performed
+
+- API uvicorn — left running.
+- SSH bastion tunnel — left open on 5433.
+- Bastion `i-063165d449976b2e4` — left running.
+- GPU instance `i-0efe1950cc6e6cc8f` `terminate-instances` issued at
+  ~18:46:15Z; verified `shutting-down`.
+- Spot request `sir-ix1fhc8h` explicitly cancelled to release quota
+  for next attempt.
+- Staging RDS rows left in place.
+- Harness SSE log: `/tmp/saa-acceptance-sse-T6a3-r11.log`.
+- No other live SAM instances.
+
+### 32.8 Status for owner decision
+
+**Verified again (no regression on prior fixes):**
+- T7c `git config --system` works.
+- `gpu_launching` SSE wire path repeatable.
+- Spot capacity stable in us-east-2a.
+
+**Same blocker as §31, NOT addressed by `6090d9c`:**
+- User-data line 186 `git submodule update --init --recursive --force`
+  attempts an unconditional remote fetch as part of `--init`,
+  regardless of gitlink-vs-baked-SHA equality. Vendor gitlink
+  revert was orthogonal to this failure mode.
+
+**Next action — T7e (the same as §31's T7d, restated for clarity):**
+1. Patch `scripts/aws/sam-gpu-worker-userdata.sh` lines 185-186 with
+   the SHA-equality-guarded skip pattern from §32.3.
+2. Publish LT v30.
+3. Re-run §32 acceptance.
+
+After T7e, expect the acceptance to surface whichever layer fails
+next in steps 5/6/7/8. Owner directive ("한번 돌아가면 냅둬, 나중에
+업데이트 시 새 AMI") still applies — the goal of T7e is to get past
+step 4 cleanly so the rest of the cold-init can be exercised on
+this AMI for the first time.
