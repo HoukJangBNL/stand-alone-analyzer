@@ -4962,7 +4962,268 @@ fixes the same way.
 | §32 (post-vendor-revert) | ~$0.55 |
 | §33 (post-T7e) | ~$0.65 |
 | §34 (post-T7f) | ~$0.75 |
-| **§35 (post-T7g — first pass through step 4, T7e SHA-guard fires)** | **~$0.60** |
-| **Total** | **~$26.42** |
+| §35 (post-T7g — first pass through step 4, T7e SHA-guard fires) | ~$0.60 |
+| **§36 (post-T7h — cloud-init fully complete, worker.service crash loop)** | **~$1.21** |
+| **Total** | **~$27.63** |
 
-$100 cap remaining: ~$73.58.
+$100 cap remaining: ~$72.37.
+
+---
+
+## 36. 1-click SAM dispatch acceptance — 2026-06-09 (post-T7h) WORKER_SERVICE_CRASH_LOOP
+
+Re-run of §35 after T7h shipped as commit `c7e2647` — operator-side
+gitlink alignment, moved vendor/QPress-SAM-Flake gitlink from
+`61eb37d` to `2c69ebd` (the SHA actually baked into AMI per §35 SSM
+probe). No user-data change, LT v32 unchanged (still default).
+
+**Outcome: WORKER_SERVICE_CRASH_LOOP.** **Cloud-init completed all
+8 steps successfully** for the first time since the new harness
+shape was introduced. Step 5 (uv sync), Step 6 (M3 weights download
+~700MB), Step 7 (DB env from SSM), Step 8 (systemd units install)
+all reached the `=== sam-gpu-worker-userdata done` banner at +92 s.
+
+But `flake-analysis-worker.service` then entered a **crash loop**:
+- `Started Flake Analysis procrastinate GPU worker (P4.4)` ×4
+- `Stopped Flake Analysis procrastinate GPU worker (P4.4)` ×3
+- (Each Start→Stop cycle ≈ 30 s, consistent with `Restart=on-failure
+  RestartSec=10`)
+- `procrastinate_workers` table in RDS: **empty** (worker never
+  registered — crashed before reaching `app.run_worker_async` registration)
+- procrastinate job 22 (run_id=28, queue=gpu, task=run_sam): stayed in
+  `todo` status, attempts=0 (worker never claimed it)
+- Around +10 min, `flake-analysis-idle-shutdown.timer` fired (default
+  `IDLE_TIMEOUT_S=600`, no work was happening), `idle-shutdown.service`
+  also failed at start (`Failed to start Self-terminate the worker
+  after idle timeout`), but the timer-driven shutdown proceeded anyway
+  → instance powered off at +12 min.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `c7e2647` (T7h vendor gitlink → 2c69ebd) |
+| AMI | `ami-0b7ec5ff47a1eff11` |
+| Launch template | `qpress-sam-gpu-worker` v32 (default, unchanged from §35) |
+| Instances launched | 1 — `i-06026a66780f96e89` (g6e.48xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-09T20:42:16 |
+| `gpu_launching` SSE | **fired** at +3.64 s (7-for-7) |
+| Instance `running` | +3 s after launch |
+| SSM `Online` | +~1.5 min |
+| user-data steps 1-4 | **ALL SUCCEEDED** (T7c, T7g multi-belt, T7e SHA-guard now PASSES via T7h alignment) |
+| user-data step 5 (uv sync) | **SUCCEEDED** (first-ever exercise) |
+| user-data step 6 (M3 weights ~700MB + dataset) | **SUCCEEDED** (first-ever exercise) |
+| user-data step 7 (DB env from SSM) | **SUCCEEDED** (first-ever exercise) |
+| user-data step 8 (systemd units) | **SUCCEEDED** (first-ever exercise) |
+| cloud-init `done` banner | 2026-06-09T20:44:21Z (+92 s after start) |
+| `flake-analysis-worker.service` | **CRASH LOOP** — 4 Starts / 3 Stops in console; never registered with procrastinate |
+| `flake-analysis-idle-shutdown.service` | "Failed to start" (also crashing — but timer-driven shutdown succeeded at +10 min) |
+| `procrastinate_workers` (RDS) | empty (no worker registered) |
+| procrastinate job 22 | `status=todo, attempts=0` (never claimed) |
+| `gpu_ready` SSE | never fired (worker never registered, never claimed job) |
+| Per-image `progress` SSE | never fired |
+| `done` SSE | never fired |
+| Auto-terminate via idle-shutdown.timer | **fired at ~+10 min** (default IDLE_TIMEOUT_S=600) |
+| Total instance wall (billed) | ~12 min |
+| Cost (this re-run) | **~$1.21** (g6e.48xlarge spot @ ~$5.96/hr × 12 min) |
+| Status | `worker_service_crash_loop` |
+
+### 36.1 Major progress: cloud-init now goes end-to-end
+
+This is the FIRST run since the new harness shape was introduced
+(§27) where:
+- Step 4 completes fully (T7c + T7g + T7e + T7h all working in concert).
+- Steps 5-8 all execute cleanly (first-time exercise of every line).
+- M3 weights (~700MB) download from S3 succeeds.
+- DB env file written from SSM SecureString.
+- All 4 systemd units install (worker.service, spot-monitor.timer,
+  idle-shutdown.timer, abs-cap.timer).
+- The cloud-init `done` banner is reached.
+
+The remaining gap is purely runtime: `flake-analysis-worker.service`
+crashes at process start, before procrastinate's worker-registration
+code runs.
+
+### 36.2 Root cause: worker.service Python startup crash (specifics not captured)
+
+The instance was already past cloud-init when the crash loop started,
+and the SSE foreground was waiting for `gpu_ready` (which depends on
+the worker registering). My SSM diagnostic probe to grab
+`journalctl -u worker.service` was sent at +12 min, but by that time
+the idle-shutdown timer had already fired and the instance was
+shutting down — SSM rejected the command (`Failed`). The crash details
+(exception type / traceback) are NOT in the EC2 console output
+(systemd unit logs go to journal, not console).
+
+What we know from indirect signals:
+1. **Worker process exits non-zero quickly** (≤30s — matches the
+   `Started…Stopped…Started` cadence). systemd's
+   `Restart=on-failure` + `RestartSec=10` then schedules a retry.
+2. **No procrastinate_workers row gets created**, so the crash
+   happens BEFORE `await app.run_worker_async(...)` registers the
+   worker. Likely candidates for early-startup failure:
+   - DB connection failure (SSL config, SG, credentials, schema
+     version mismatch).
+   - Module import error (peft / SAM-2 / vendor symlinks).
+   - `app.open_async()` raising (procrastinate connection setup).
+3. **`flake-analysis-idle-shutdown.service` also fails to start**
+   when the timer triggers it — separate bug, possibly related
+   (shared env file? shared exec preconditions?). The timer itself
+   continues firing per its schedule, and the shutdown logic
+   eventually runs anyway (`systemctl poweroff` from a successful
+   timer event).
+
+Without journalctl from a fresh failing instance, we can't pin
+down WHICH of those three categories the crash falls into. Next
+acceptance attempt needs **upfront SSM diagnostic capture** of
+worker.service status + journalctl ≤ 5 min after instance running,
+before idle-shutdown wipes it.
+
+### 36.3 Recommended fix (T7i — operational, not code)
+
+Two changes, both in the harness/orchestration, no user-data patch yet:
+
+**T7i-A: Embed worker.service health check in PM polling.** Right
+after `gpu_launching` SSE, the harness (or PM polling) should send
+an SSM command at +3 min, +5 min, +7 min capturing:
+```bash
+systemctl is-active flake-analysis-worker.service
+systemctl status flake-analysis-worker.service --no-pager -l | tail -40
+journalctl -u flake-analysis-worker.service --no-pager -n 80
+```
+This pre-flight diagnostic ensures the next failed run yields the
+crash details before the instance auto-terminates.
+
+**T7i-B: Push idle-shutdown.timer's first-fire delay further out.**
+Default `IDLE_TIMEOUT_S=600` (10 min) is too aggressive for a cold
+boot that may need debugging. Bumping to `IDLE_TIMEOUT_S=1800`
+(30 min) gives the operator a meaningful window. Per LT v32, this
+is configurable via user-data env override (LT modify, no AMI
+rebake). One-line change.
+
+These are debugging-aid fixes, not the actual worker.service fix.
+The actual fix depends on what the journalctl reveals on the next
+attempt.
+
+### 36.4 What was newly verified vs §35
+
+1. **Vendor gitlink alignment (T7h) works.** Step 4's T7e SHA-guard
+   passed. `git ls-tree HEAD vendor/QPress-SAM-Flake` =
+   `git rev-parse HEAD` inside the baked submodule = `2c69ebd`.
+2. **All cloud-init steps 5-8 actually run** for the first time.
+3. **M3 weights bundle download from S3** is healthy (272MB dataset
+   + 898MB sam2.1_hiera_l.pt + 700MB merged_m3.pt all complete).
+4. **systemd unit installation completes** including:
+   - `flake-analysis-worker.service`
+   - `flake-analysis-spot-monitor.{service,timer}`
+   - `flake-analysis-idle-shutdown.{service,timer}`
+   - `flake-analysis-abs-cap.timer`
+5. **T7c `git config --system`** — 7-for-7.
+6. **`gpu_launching` SSE wire** — 7-for-7.
+
+### 36.5 What did NOT run
+
+- worker.service successful startup → procrastinate worker registration.
+- procrastinate job 22 claim (run_sam).
+- M3 model load + LoRA apply.
+- Per-image SAM inference.
+- `gpu_ready` SSE.
+- per-image `progress` SSE.
+- terminal `done` SSE.
+- idle-shutdown after ACTUAL idle (the timer fired on a never-busy
+  worker — that's the wrong trigger condition for measurement,
+  but operationally fine for cost protection).
+
+### 36.6 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 20:42:16 | POST /run/sam |
+| 20:42:17 | HTTP 200, content-type=text/event-stream |
+| 20:42:19 | `event=gpu_launching` `instance_id=i-06026a66780f96e89` |
+| 20:42:19 | EC2 `running` (spot, us-east-2a) |
+| ~20:43:37 | SSM Online; cloud-init enters scripts_user |
+| 20:43:37 | user-data start banner |
+| 20:43:37-44 | step 4: T7c + T7g + T7e + T7h all green; reset to `c7e2647` |
+| 20:43:44-?? | steps 5/6: uv sync, M3 weights ~1.6GB total |
+| 20:44:18-19 | step 7: SSM DB params → /etc/flake-analysis-worker.env |
+| 20:44:19-21 | step 8: systemd units installed; **`Started Flake Analysis procrastinate GPU worker`** |
+| 20:44:21 | cloud-init `done` banner |
+| 20:44:21-? | worker.service `Started` ×4, `Stopped` ×3 — crash loop visible in console |
+| ~20:54:21 | `idle-shutdown.timer` fires (default IDLE_TIMEOUT_S=600); `idle-shutdown.service` fails to start but shutdown proceeds |
+| ~20:54:22 | system power-off sequence |
+| ~20:55:00 | EC2 `shutting-down`; SSM rejects diagnostic probes |
+| ~20:55:00 | PM kills SSE foreground; cancels `sir-scfqji3h`; waits for `terminated` |
+
+### 36.7 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot (us-east-2a) | ~12 min | ~$5.96 | **~$1.19** |
+| Bastion overlap | ~12 min | ~$0.0104 | ~$0.002 |
+| RDS round-trips, NAT GW data egress (M3 weights ~1.6GB from S3 over VPC endpoint) | negligible | | ~$0.001 |
+| **Total this re-run** | | | **~$1.21** |
+
+Within $5 cap. Wall-time bounded by `idle-shutdown.timer` firing at
++10 min — the timer worked correctly as a cost guard.
+
+### 36.8 Cleanup performed
+
+- API uvicorn — left running.
+- SSH bastion tunnel — left open on 5433.
+- Bastion `i-063165d449976b2e4` — left running.
+- GPU instance `i-06026a66780f96e89` — terminated naturally via
+  idle-shutdown timer (no manual `terminate-instances` needed).
+- Spot request `sir-scfqji3h` explicitly cancelled.
+- procrastinate job 22 (run_id=28) left in `todo` state — operator
+  may want to mark `failed` before next attempt to avoid stale
+  job pickup.
+- Staging RDS rows preserved.
+- Harness SSE log: `/tmp/saa-acceptance-sse-T6a3-r15.log`.
+- Console output saved at `/tmp/console-r15.txt` (~612 lines).
+
+### 36.9 Status for owner decision
+
+**Verified by this run (BIG step forward):**
+- Vendor gitlink alignment unblocked T7e SHA-guard.
+- Cloud-init steps 4-8 all execute end-to-end on this AMI in the
+  new orchestration. M3 weights, DB env, systemd unit installation
+  all green for the first time.
+- 7 prior fixes hold (T7c 7-for-7, T7e 2-for-2 since first
+  exercise, T7g 2-for-2, T7h gitlink-aligned).
+
+**New blocker — worker.service crash loop:**
+- `flake-analysis-worker.service` fails at process start before
+  registering with procrastinate. Crash loop visible in console
+  (4× Started, 3× Stopped). procrastinate_workers table empty,
+  job 22 unclaimed.
+- Crash details NOT captured this run because SSM diagnostic was
+  attempted at +12 min, after idle-shutdown had begun. journalctl
+  is gone.
+
+**Next action — T7i (debugging instrumentation, not the actual
+fix):**
+1. **T7i-A**: Add SSM-driven worker.service journalctl capture to
+   the harness at `+3 min` after `gpu_launching`. The next failed
+   run yields the actual crash signature.
+2. **T7i-B**: Bump default `IDLE_TIMEOUT_S` from 600 to 1800 (30
+   min) via LT user-data env override — gives diagnostic window
+   without auto-poweroff. LT v33 publish, user-data env line
+   change only.
+
+After T7i ships, re-run §36 acceptance. Expected outcome: same
+crash loop, but this time the journalctl reveals what's failing
+(import error / DB connect / `app.open_async`). Then T7j is the
+actual code/config fix for whichever it is.
+
+**Heads-up — this is the 8th iteration on T6 acceptance.**
+Cumulative dispatcher cost ~$5.88 + this run's $1.21 = **~$7.09 of
+$100 cap**. We're ~12-15 min of GPU wall away from a SUCCESS run
+once the worker.service issue is identified. **Owner directive
+"한번 돌아가면 냅둬"** still guides — but we should also weigh: the
+worker.service crash is unlikely to be a bake-time bug (the unit
+was just installed by user-data step 8 and the binary is a fresh
+`uv run`), so an AMI rebake wouldn't help here. T7i+T7j should
+bring us across the finish line within 1-2 more iterations.
+
+**Out of scope (still deferred):**
+- Region switch / instance-type switch.
+- T9 spot-request-cancel-on-terminate.
