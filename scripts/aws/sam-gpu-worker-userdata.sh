@@ -175,14 +175,28 @@ if ! done_stamp repo; then
     git clone "${REPO_URL}" "${REPO_DIR}"
   fi
   pushd "${REPO_DIR}" > /dev/null
-  # `--no-recurse-submodules` is critical: modern git (>=2.9) defaults
-  # `fetch.recurseSubmodules=on-demand`, and `--all` widens the scope.
-  # Without this flag, the main-repo fetch auto-recurses into the
-  # vendor/QPress-SAM-Flake submodule and tries to authenticate to
-  # the private repo with a PAT we deliberately don't carry at
-  # runtime (T6 retry 6 / §33 evidence). Vendor is handled separately
-  # below via the SHA-equality skip (T7e), so suppress recursion here.
-  git fetch --all --tags --no-recurse-submodules
+
+  # Bake-time bug workaround (T7g, §34 diagnostic): the AMI bake
+  # (`scripts/aws/sam-bake-ami.sh`) doesn't run `git submodule sync`,
+  # so the baked submodule's `.git/config` has the wrong `origin`
+  # URL — points at the main repo, not at QPress-SAM-Flake. This
+  # corrupts modern git's submodule recursion path: even with
+  # `--no-recurse-submodules` on the CLI, cold-init's first fetch
+  # somehow still recurses (verified live on §34 instance
+  # i-004a4df739b7676d7). Resyncing the remote BEFORE any fetch
+  # lets `--no-recurse-submodules` actually work and is harmless on
+  # subsequent boots. Long-term: fix the bake script.
+  if [[ -d vendor/QPress-SAM-Flake/.git ]]; then
+    git submodule sync --recursive
+  fi
+
+  # `--no-recurse-submodules` plus per-call config override: modern
+  # git (>=2.9) defaults `fetch.recurseSubmodules=on-demand` and the
+  # `--all` flag widens the scope. Belt-and-suspenders with both
+  # mechanisms; the per-call config wins over any baked .gitconfig.
+  # Vendor handled separately below via SHA-equality skip (T7e).
+  git -c fetch.recurseSubmodules=no fetch \
+    --all --tags --no-recurse-submodules
   # Reset hard to remote ref — handles the case where AMI was baked from
   # an older SHA on the same branch and remote has advanced (T13 attempt 3:
   # AMI baked at 01ceb7f, main 341 commits ahead, vendor gitlink shifted).
