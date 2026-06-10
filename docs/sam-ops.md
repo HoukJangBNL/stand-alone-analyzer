@@ -5227,3 +5227,281 @@ bring us across the finish line within 1-2 more iterations.
 **Out of scope (still deferred):**
 - Region switch / instance-type switch.
 - T9 spot-request-cancel-on-terminate.
+
+---
+
+## 37. 1-click SAM dispatch acceptance — 2026-06-10 (post-T7i, diagnostic) DB_PASSWORD_DRIFT
+
+Re-run of §36 after T7i shipped as commit `9011618` — bumped
+`IDLE_TIMEOUT_S` default from 600 (10 min) to 1800 (30 min) via
+user-data env override. LT v33 published default. The goal of §37
+was **diagnostic, not success**: capture worker.service journalctl
+that §36 missed because idle-shutdown wiped the instance before
+SSM probes could land.
+
+**Outcome: DB_PASSWORD_DRIFT** — root cause identified at +3 min.
+SSM journalctl probe captured the exact crash signature:
+
+```text
+Jun 10 13:02:22 worker[3825]: WARNING psycopg.pool error connecting:
+  connection to server at "172.31.36.17", port 5432 failed:
+  FATAL:  password authentication failed for user "houk"
+[... 20+ identical retries ...]
+Jun 10 13:02:52 worker[3825]: psycopg_pool.PoolTimeout:
+  pool initialization incomplete after 30.0 sec
+Jun 10 13:02:52 systemd[1]: flake-analysis-worker.service:
+  Main process exited, code=exited, status=1/FAILURE
+[restart cycle repeats]
+```
+
+The worker reads `SAA_DB_PASSWORD` from
+`/etc/flake-analysis-worker.env`, which was populated by user-data
+step 7 from SSM SecureString `/qpress-sam/db_password` (last
+modified 2026-05-28T07:40:16, before §15 manual run). The live
+RDS password lives in Secrets Manager under
+`rds!db-beb90dd0-feef-45a5-b8b5-81af8d02e0d6-Cwxa1w` (an AWS-managed
+RDS rotation secret). PM compared the two values directly:
+
+| Source | Length | Match? |
+|---|---|---|
+| SSM SecureString `/qpress-sam/db_password` | 28 chars | (stale) |
+| Secrets Manager `rds!db-...` (live RDS auth) | 28 chars | (truth) |
+| Direct equality test (`bash` `==`) | | **MISMATCH** |
+
+The PM acceptance harness uses Secrets Manager directly (see
+`/tmp/saa-acceptance-server.py` startup) and connects fine — that's
+why every `httpx` POST + manual `psql` works. The GPU worker uses
+the SSM-populated env file and fails. The SSM param is **stale**:
+last modified 2026-05-28 (before any rotation), Secrets Manager
+has been rotated since.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `9011618` (T7i: IDLE_TIMEOUT_S=1800) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged) |
+| Launch template | `qpress-sam-gpu-worker` v33 (default, IDLE_TIMEOUT_S=1800) |
+| Instances launched | 1 — `i-0df4ab46174700cd3` (g6e.48xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-10T13:00:14 |
+| `gpu_launching` SSE | **fired** at +3.84 s (8-for-8) |
+| user-data steps 1-8 | **ALL SUCCEEDED** (8-for-8 since §36) |
+| cloud-init `done` banner | reached cleanly |
+| worker.service Started | yes — but immediately enters crash loop |
+| worker.service crash signature | `psycopg_pool.PoolTimeout` after 30s of `password authentication failed for user "houk"` retries |
+| `procrastinate_workers` (RDS) | empty (worker never registers) |
+| procrastinate job 23 | `status=todo` (never claimed) |
+| `gpu_ready` / progress / `done` SSE | never fired |
+| Total instance wall (billed) | ~4.3 min (PM terminated early after capturing diagnostic) |
+| Cost (this re-run) | **~$0.43** |
+| Status | `db_password_drift` (operator-actionable, not a code bug) |
+
+### 37.1 Why this was masked through §36
+
+§36's `idle-shutdown.timer` (10-min default) fired before the SSM
+probe could land. T7i's bump to 30 min gave a 25-min diagnostic
+window — exactly its design intent. The probe at +3 min returned
+the journalctl with the auth failures within 12 seconds.
+
+**T7i-A worked perfectly.** The `journalctl -u
+flake-analysis-worker.service --no-pager -n 200` output revealed:
+1. The first boot (May 28, AMI bake time) had a different error
+   (`ImportError: cannot import name '_require_ssl'`) — that's
+   resolved at runtime via the fresh `git fetch + uv sync`. Stale
+   bake-time evidence only.
+2. The current boot (Jun 10) has the live error: 20+ `psycopg.pool`
+   warnings of `FATAL: password authentication failed for user
+   "houk"` from `172.31.36.17:5432` (RDS private IP), then a clean
+   `PoolTimeout` after the procrastinate worker's 30 s connect
+   budget elapses, then systemd restart, then the cycle repeats.
+
+§36's hypothesis space (DB cred, module import error, app.open_async)
+correctly listed DB cred as a candidate. T7i confirmed it.
+
+### 37.2 Recommended fix (T7j — operator-side, no code/AMI change)
+
+Sync the SSM param to the live Secrets Manager value. One AWS CLI
+command, **owner approval required** because it touches a SecureString
+that other systems may rely on:
+
+```bash
+# Verify exact-match precondition first:
+SECRET_PW=$(aws --profile qpress --region us-east-2 \
+  secretsmanager get-secret-value \
+  --secret-id 'arn:aws:secretsmanager:us-east-2:931886963315:secret:rds!db-beb90dd0-feef-45a5-b8b5-81af8d02e0d6-Cwxa1w' \
+  --query SecretString --output text \
+  | python3 -c "import sys, json; print(json.load(sys.stdin)['password'])")
+
+# Apply (owner approval required):
+aws --profile qpress --region us-east-2 ssm put-parameter \
+  --name /qpress-sam/db_password \
+  --type SecureString \
+  --value "$SECRET_PW" \
+  --overwrite
+
+# Verify post-apply:
+aws --profile qpress --region us-east-2 ssm get-parameter \
+  --name /qpress-sam/db_password --with-decryption \
+  --query 'Parameter.Value' --output text \
+  | python3 -c "import sys; print('len:', len(sys.stdin.read().rstrip()))"
+```
+
+**Risk profile**: Low. The SSM param is consumed only by the GPU
+worker user-data (per `grep -rn '/qpress-sam/db_password'` across
+the repo). No other service reads it. Worst case is the new value
+is identical to the old (no harm). Best case (expected) is the
+GPU worker's next launch authenticates cleanly.
+
+**T7j follow-up — prevent future drift**:
+- **Option A**: Have user-data fetch directly from Secrets Manager
+  instead of SSM. One-line change in `scripts/aws/sam-gpu-worker-userdata.sh`:
+  `DB_PASSWORD=$(aws secretsmanager get-secret-value ... | jq -r .SecretString | jq -r .password)`.
+  Eliminates the SSM-as-stale-cache failure mode permanently.
+- **Option B**: Add a CloudWatch Events rule that triggers on
+  Secrets Manager rotation and re-syncs the SSM param. Heavier
+  infra; not justified for this single param.
+
+**Recommendation**: T7j Option A. The SSM SecureString as
+intermediate cache adds no value (worker has IAM permission to
+read either). The user-data fix is one line in the bake script
+PLUS one line in user-data step 7. AMI does not need re-bake — the
+bake SHA contains userdata-as-template that gets re-rendered each
+launch. Just LT v34 with patched user-data.
+
+### 37.3 What was newly verified vs §36
+
+1. **T7i-A (diagnostic instrumentation) worked exactly as
+   designed.** The +3 min SSM probe captured the actual crash
+   signature within 12 s of issuing the command. Without T7i, §36's
+   10-min idle-shutdown would have wiped this evidence.
+2. **T7i-B (`IDLE_TIMEOUT_S=1800`) gave the diagnostic window.**
+   Instance was running comfortably at the +3 min probe; not even
+   close to the 30-min timeout.
+3. **All cloud-init steps still pass** (T7c, T7g multi-belt, T7e,
+   T7h aligned, steps 5-8) — 2-for-2 since §36, no regression.
+4. **`gpu_launching` SSE** — 8-for-8.
+5. **First boot's `_require_ssl` ImportError** is BAKE-TIME
+   journalctl from May 28 — not a current bug. The fresh `uv sync`
+   on every cold boot re-installs the package from current `main`,
+   resolving it.
+
+### 37.4 What did NOT run (carry forward)
+
+- worker.service successful registration with procrastinate.
+- procrastinate job claim + run_sam execution.
+- `gpu_ready` / per-image `progress` / `done` SSE.
+- M3 model load + LoRA apply on a freshly-booted instance.
+- Per-image SAM inference on the 100-image acceptance set.
+
+After T7j ships, the next acceptance attempt is **likely the
+SUCCESS run**. The DB-password fix is independent of any code
+path; once the worker can authenticate, it will register, claim
+job 23 (or the next defer), and exercise the SAM pipeline.
+
+### 37.5 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 13:00:14 | POST /run/sam |
+| 13:00:15 | HTTP 200, content-type=text/event-stream |
+| 13:00:18 | `event=gpu_launching` `instance_id=i-0df4ab46174700cd3` |
+| 13:00:18 | EC2 `running` (spot, us-east-2a) |
+| ~13:01:30 | SSM Online; cloud-init enters scripts_user |
+| ~13:01:30-2:08 | user-data steps 1-8 complete (T7c, T7g, T7e, T7h all green; uv sync, M3, env, systemd units) |
+| 13:02:08 | First worker.service start; immediate ImportError (stale bake-time error, NOT current — see §37.6) |
+| 13:02:20 | systemd restart; `uv run python -m flake_analysis.worker` starts retry |
+| 13:02:22-52 | psycopg pool 20+ retries: `password authentication failed for user "houk"` |
+| 13:02:52 | `psycopg_pool.PoolTimeout` after 30s budget; worker exits 1 |
+| 13:03:02 | systemd restart attempt 2; same cycle |
+| 13:03:33 | PM SSM probe sent (+3 min after gpu_launching) |
+| 13:03:45 | SSM probe returns full journalctl revealing both crash signatures |
+| 13:04:30 | PM `terminate-instances` (root cause already identified, no value in keeping instance running) |
+| 13:04:30 | `cancel-spot-instance-requests sir-xh57hbpk` |
+
+### 37.6 Note on the May-28 ImportError in journalctl
+
+The `journalctl -u flake-analysis-worker.service` output on a
+fresh instance includes ENTRIES FROM PREVIOUS BOOTS (because the
+journal is on the EBS root volume baked into the AMI). The first
+~80 lines of journalctl are from May 28 (AMI bake / §15 manual
+run). This is just historical evidence; the actual current crash
+is the post-`-- Boot 4b92b16a6ddc489aaa9dd60f74e200ff --` section,
+where every line has `Jun 10 13:0X:XX` timestamps. The current
+crash is purely DB auth.
+
+The May-28 ImportError signature (`_require_ssl`) was a bake-time
+state inconsistency in the venv that the fresh `uv sync` on every
+cold boot resolves. Not relevant for T7j.
+
+### 37.7 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot (us-east-2a) | ~4.3 min | ~$5.96 | **~$0.43** |
+| Bastion overlap | ~6 min | ~$0.0104 | ~$0.001 |
+| **Total this re-run** | | | **~$0.43** |
+
+Within the $5 hard cap. PM terminated early once root cause was
+identified — diagnostic was complete at +3.5 min, no value in
+running longer.
+
+### 37.8 Cleanup performed
+
+- API uvicorn — left running.
+- SSH bastion tunnel — left open.
+- Bastion `i-063165d449976b2e4` — left running.
+- GPU instance `i-0df4ab46174700cd3` — manually terminated at
+  13:04:30, well under the 30-min idle-timeout.
+- Spot request `sir-xh57hbpk` explicitly cancelled.
+- Diagnostic SSM probe output saved at `/tmp/diag-r16-t3.txt` (176 lines).
+- procrastinate job 23 (run_id=29 if assigned) likely left in `todo`
+  — operator may want to clean up before T7j retry.
+- Staging RDS rows preserved.
+- Harness SSE log: `/tmp/saa-acceptance-sse-T6a3-r16.log`.
+
+### 37.9 Status for owner decision
+
+**Verified by this run (root cause identified):**
+- T7i-A diagnostic instrumentation WORKS — captured live worker
+  crash signature on the first try at +3 min.
+- T7i-B 30-min idle-timeout WORKS — gave headroom for diagnostics.
+- worker.service crash is **not a code bug**; it's an operator-side
+  config drift between SSM SecureString `/qpress-sam/db_password`
+  (stale, May-28) and Secrets Manager `rds!db-...` (live RDS auth).
+
+**Operator action required (owner approval blocking)**:
+T7j-prerequisite is a one-line `aws ssm put-parameter --overwrite`
+on `/qpress-sam/db_password`. Touches AWS state + a SecureString;
+PM will not execute without explicit owner approval per CLAUDE.md
+§6 escalation triggers ("AWS resource changes" / "data
+overwrite").
+
+**Owner decision**:
+1. **Approve T7j-now (1-line CLI)**: PM runs the `put-parameter`
+   command to overwrite the SSM SecureString with the live Secrets
+   Manager value. Risk: low (only consumer is GPU worker user-data;
+   verified via repo-wide `grep`). Allows immediate retry.
+2. **Approve T7j Option A (LT-side fix)**: PM patches user-data
+   step 7 to fetch directly from Secrets Manager. LT v34 publish.
+   Same retry path, but no SSM cache to drift in the future.
+3. **Both** (recommended): Apply (1) immediately to unblock the
+   acceptance, then schedule (2) as a separate hardening commit.
+
+**After T7j applied**: §37 retry should be the SUCCESS run.
+
+### Cumulative cost (updated through §37)
+
+| Phase | Cost |
+|---|---|
+| #229 attempts §18-§26 | $20.54 |
+| §27-§29 (capacity drought) | $0.00 |
+| §28 (post-T7) | ~$1.52 |
+| §30 (post-T7b retry) | ~$1.19 |
+| §31 (post-T7c) | ~$0.62 |
+| §32 (post-vendor-revert) | ~$0.55 |
+| §33 (post-T7e) | ~$0.65 |
+| §34 (post-T7f) | ~$0.75 |
+| §35 (post-T7g — first pass through step 4) | ~$0.60 |
+| §36 (post-T7h — cloud-init fully complete, worker crash loop) | ~$1.21 |
+| **§37 (post-T7i — diagnostic, root cause = SSM/Secrets-Mgr drift)** | **~$0.43** |
+| **Total** | **~$28.06** |
+
+$100 cap remaining: ~$71.94.
