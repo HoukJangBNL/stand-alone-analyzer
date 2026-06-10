@@ -455,6 +455,24 @@ if ! done_stamp merged-m3-weights; then
     fi
     echo "${LATEST_M3_KEY}" > "${STATE_DIR}/active_merged_m3_key"
     stamp merged-m3-weights
+
+    # T7l (§38 fix): disable the merged_m3.pt artifact so
+    # `_resolve_merged_m3_path()` returns None and the SAM core falls
+    # back to the LoRA-runtime path. The merged_m3 producer
+    # (scripts/aws/sam-build-merged-m3.sh) writes a `{"model_config",
+    # "model_state_dict"}` checkpoint, but vendor's
+    # `build_sam2_from_yaml` → SAM2 `_load_checkpoint` expects
+    # `state_dict["model"]` and crashes with `KeyError: 'model'`.
+    # §26 documented this; §38 confirmed it on cold launch (instance
+    # i-0f682c2ff36479395, terminal SSE error_type=KeyError model).
+    # Renaming to .disabled keeps the artifact for forensics + future
+    # re-enable, while letting cold-launches use the working
+    # LoRA-runtime path that takes the harness's weights_path
+    # (merged.pt — LoRA-folded single file from §15).
+    if [[ -f "${MERGED_M3_PT}" ]]; then
+      mv "${MERGED_M3_PT}" "${MERGED_M3_PT}.disabled"
+      echo "  merged_m3.pt renamed to .disabled (T7l: forces LoRA-runtime path)"
+    fi
   fi
 fi
 
