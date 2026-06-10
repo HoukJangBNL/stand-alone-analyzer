@@ -5505,3 +5505,343 @@ overwrite").
 | **Total** | **~$28.06** |
 
 $100 cap remaining: ~$71.94.
+
+---
+
+## 38. 1-click SAM dispatch acceptance — 2026-06-10 (post-T7j-A) PIPELINE_FAILED_KEYERROR_MODEL
+
+Re-run of §37 after T7j-A shipped as commit `09b5908` (LT v34
+default). Three coordinated changes:
+1. user-data step 6 fetches DB password directly from Secrets
+   Manager (the AWS-managed RDS rotation secret), parsing JSON
+   `{"username", "password"}`. SSM SecureString cache eliminated.
+2. IAM inline policy `qpress-sam-gpu-secret-rw` attached to
+   `qpress-sam-gpu-role` granting `secretsmanager:GetSecretValue` +
+   `DescribeSecret` on the specific secret ARN. Resource-scoped,
+   owner approved.
+3. Other DB params (host/port/user/name) still on SSM as stable
+   infra config — only the rotated secret moved.
+
+**Outcome: PIPELINE_FAILED_KEYERROR_MODEL** — and a giant leap
+forward end-to-end. For the first time since the new harness was
+introduced (§27), the dispatcher reached:
+
+- `gpu_launching` SSE (8th run in a row; 9-for-9)
+- worker.service successfully registered with procrastinate
+- procrastinate claimed an `run_sam` job
+- **`gpu_ready` SSE fired** with `image_count=100`
+- **per-image `progress` SSE streamed** ("starting 8-GPU fan-out
+  across 8 GPUs")
+- nvidia-smi confirmed 8× NVIDIA L40S detected (g6e.48xlarge has
+  8 GPUs — though the LT description says "H200", the actual
+  hardware reported is L40S)
+
+Then the run failed cleanly with a CODE-LEVEL error:
+
+```text
+event=error data={"type": "error", "error": {
+  "code": "pipeline_failed",
+  "message": "'model'",
+  "details": {"exc_type": "KeyError"},
+  "request_id": "215d008d-da84-4f61-8ace-89308382724f"
+}}
+```
+
+This is the **§26 latent bug 1 (merged_m3 weight format)** — known
+since 2026-05-31 manual run, never patched. `_resolve_merged_m3_path()`
+finds `/opt/sam/weights/merged_m3.pt` (set by user-data step 5d via
+`SAM_MERGED_M3_PATH` env), routes to vendor's `build_sam2_from_yaml`
+which calls SAM2's `_load_checkpoint` expecting `sd["model"]`. The
+`merged_m3.pt` artifact has structure `{"model_config",
+"model_state_dict"}` instead → `KeyError: 'model'`.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `09b5908` (T7j-A: Secrets Manager fetch + IAM grant) |
+| AMI | `ami-0b7ec5ff47a1eff11` |
+| Launch template | `qpress-sam-gpu-worker` v34 (default) |
+| Instances launched | 1 — `i-0f682c2ff36479395` (g6e.48xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-10T19:07:34 |
+| `gpu_launching` SSE | **fired** at +3.60 s (9-for-9) |
+| user-data steps 1-8 | **ALL SUCCEEDED** |
+| Initial worker boot (3rd attempt) | failed at 19:09:53-54 with `password authentication failed for user "houk"` (see §38.1 for race-condition explanation) |
+| Worker boot retry at 19:10:35 | **SUCCEEDED** — registered with procrastinate (worker_id=14, fresh heartbeat) |
+| Job claim | claimed stale job 16 (run_id=21 from §27 era) — see §38.2 |
+| `gpu_ready` SSE | **FIRED at +315.92 s** (`image_count=100`, ~5:16 after POST) |
+| per-image `progress` SSE | **FIRED at +315.98 s** (`pct=0.0, msg="starting 8-GPU fan-out across 8 GPUs"`) |
+| Terminal `error` SSE | fired at +323.92 s — `KeyError: 'model'` after ~8 s of pipeline init |
+| Stream closed | `progress_count=2, terminal=error` |
+| nvidia-smi | 8× NVIDIA L40S detected, 0% util (didn't reach inference loop) |
+| `done` SSE | never fired (KeyError aborted before per-image inference) |
+| Total instance wall (billed) | ~5.6 min (PM terminated after capturing terminal SSE) |
+| Cost (this re-run) | **~$0.55** (g6e.48xlarge spot @ ~$5.96/hr × 5.6 min) |
+| Status | `pipeline_failed_keyerror_model` |
+
+### 38.1 Initial DB-auth false positive at 19:09:54
+
+The journalctl shows password-auth failures during the **first two
+worker.service boots** (19:09:54 → 19:10:24 PoolTimeout). Then a
+**third boot at 19:10:35 succeeded cleanly**.
+
+This is consistent with a race between user-data step 6 (Secrets
+Manager fetch + write `/etc/flake-analysis-worker.env`) and step 8
+(`systemctl enable --now flake-analysis-worker.service`). On a
+slow first-boot path, systemd may have started the worker BEFORE
+step 6 had finished updating the env file — the worker read the
+*previous* env file's stale value (or no env file at all). systemd's
+`Restart=on-failure RestartSec=10` then retried, by which point
+step 6 had completed and the new env value took effect.
+
+This is operationally fine (worker eventually authenticates) but
+adds ~40-60 s to cold boot due to the failed restarts. T7k-optional:
+add `After=cloud-final.service` to the worker.service unit so
+systemd doesn't start the worker until cloud-init scripts are
+fully done. Out of scope for the immediate path-to-success; flag
+for follow-up.
+
+### 38.2 Stale job claim — worker picked up `run_id=21` from §27
+
+When the worker registered, the procrastinate job queue had **9
+stale `todo` jobs** accumulated from §27-§37 (jobs 16 through 24,
+all `attempts=0` because every prior worker boot crashed before
+claiming anything). Procrastinate's default scheduler claims the
+**oldest job first** (id ASC).
+
+Worker claimed job 16 (run_id=21, deferred 2026-06-08T18:26 from
+§27). Looking at job 16's args:
+
+```text
+device=None, run_id=21, weights_path='/opt/sam/weights/merged.pt',
+raw_images_dir='/opt/sam/dataset/scan6-100',
+analysis_folder='/opt/sam/runs/acceptance-2026-06-08-scan-1'
+```
+
+Same `(scan_id=1, project_id=acceptance-2026-06-08)` as the
+current run, same dataset, same weights — which is why
+`gpu_ready` correctly reported `image_count=100`. The worker
+processed exactly the same scan as the current request would
+have. The `KeyError: 'model'` would have fired regardless of
+which job it claimed.
+
+The current run's job 24 (run_id=30) stayed in `todo` during this
+attempt; the worker would have processed it next if the previous
+job had succeeded. After T7j-B (cleanup of stale jobs) the next
+run will be cleaner.
+
+### 38.3 Root cause: merged_m3 weight format mismatch (known since §26)
+
+§26 (2026-05-31 manual run) identified this same bug:
+> `_resolve_merged_m3_path()` finds `/opt/sam/weights/merged_m3.pt`
+> → `build_sam2_from_yaml` path → SAM2's `_load_checkpoint` expects
+> `sd["model"]` but `merged_m3.pt` is `{"model_config",
+> "model_state_dict"}` → `KeyError: 'model'`
+
+§26's workaround was to rename `merged_m3.pt` → `.disabled` to
+force the LoRA-runtime fallback. That manual rename never landed
+in user-data; every cold boot since has had the same vulnerable
+state, but we never reached this code path until T7j-A unblocked
+DB auth.
+
+The §26 SECOND latent bug (cuDNN sublib version mismatch) hasn't
+been re-tested yet on this AMI — the LoRA-runtime path is
+expected to surface it after T7l. But that's a separate AMI/torch
+question; the merged_m3 weight format fix is independent.
+
+### 38.4 Recommended fix (T7l) — algorithmic, not operational
+
+Two options. Option A is faster; Option B is more robust.
+
+**Option A (preferred for path-to-SUCCESS): suppress merged_m3 in
+user-data.** Either:
+- Rename `merged_m3.pt` → `merged_m3.pt.disabled` after step 5d
+  download, OR
+- Skip step 5d's S3 fetch entirely if we don't need merged_m3
+  performance for the acceptance.
+
+Either keeps `_resolve_merged_m3_path()` returning `None` →
+LoRA-runtime path → uses `merged.pt` (the LoRA-folded single-`.pt`
+that PM acceptance harness specifies via `weights_path`).
+
+```bash
+# user-data step 5d — at the end, after the SHA256 check succeeds:
+mv "${MERGED_M3_PT}" "${MERGED_M3_PT}.disabled" || true
+```
+
+Pros: zero algo-engineer time; one-line user-data fix; LT v35
+publish + retry; AMI rebake unnecessary.
+Cons: gives up the merged_m3 multi-GPU speedup until Option B.
+
+**Option B (proper fix): patch `build_sam2_from_yaml` checkpoint
+loader.** The vendor SAM2 `_load_checkpoint` needs to handle the
+`{"model_config", "model_state_dict"}` shape OR our
+`_build_vendor_config()` should reshape the checkpoint before
+passing. §26 recommended:
+
+```python
+sd = sd.get("model_state_dict", sd.get("model", sd))
+```
+
+Pros: keeps merged_m3 fast path. Cons: requires
+vendor/QPress-SAM-Flake change (private submodule, AMI rebake
+likely needed), or a wrapper in `flake_analysis.core.pipeline.sam`
+that loads + re-saves the checkpoint with `{"model": ...}` shape.
+
+**Recommendation**: Option A first. The acceptance only needs
+SUCCESS once on the 100-image set; the fast path doesn't matter
+yet. Get to SUCCESS, then schedule Option B as a separate
+optimization commit.
+
+### 38.5 What was newly verified vs §37
+
+This run is the **biggest single advance in T6 acceptance history**:
+
+1. **T7j-A's Secrets Manager fetch works** — worker successfully
+   authenticates after the cold-boot race window passes.
+2. **Worker.service registers with procrastinate** — `procrastinate_workers`
+   has worker_id=14 with live heartbeat. First-ever observation.
+3. **Job claim works** — worker picks up a job from the gpu queue,
+   begins execution.
+4. **`gpu_ready` SSE fires end-to-end** — bridge correctly
+   translates worker's progress NOTIFY into the SSE wire format,
+   with `image_count=100` from manifest.
+5. **per-image `progress` SSE wire works** — first `progress`
+   frame "starting 8-GPU fan-out across 8 GPUs" confirms the
+   multi-GPU spawn path engages.
+6. **Terminal `error` SSE wire works** — the `KeyError` from inside
+   the pipeline correctly translates into `pipeline_failed` SSE
+   error envelope, request_id propagated, stream closes cleanly.
+7. **8× NVIDIA L40S GPU detection** — `nvidia-smi` shows 8 cards,
+   driver loaded, ready (though no inference happened).
+8. **idle-shutdown.timer extended to 30 min (T7i-B)** correctly
+   gave us the diagnostic window — without it the SSM probes
+   would have been cut off again.
+
+T7c is now 9-for-9. `gpu_launching` SSE is 9-for-9. Cloud-init
+8/8 is 3-for-3. Worker registration: 1-for-1 (this run).
+gpu_ready/progress/error: 1-for-1.
+
+### 38.6 What did NOT run
+
+- Per-image SAM inference (failed before first image).
+- `done` SSE with `result.images >= 100`.
+- Auto-terminate via idle-shutdown.timer (PM terminated manually
+  after capturing terminal `error` SSE).
+- §26 second bug (cuDNN sublib mismatch) — gated behind merged_m3
+  fix.
+
+### 38.7 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 19:07:34 | POST /run/sam |
+| 19:07:35 | HTTP 200 SSE (+1.46s) |
+| 19:07:38 | `gpu_launching` `instance_id=i-0f682c2ff36479395` (+3.60s) |
+| 19:07:38 | EC2 `running` (spot us-east-2a) |
+| ~19:09:00 | SSM Online |
+| ~19:09:00-39 | cloud-init step 4-5 (T7c, T7g, T7e, T7h, uv sync) |
+| 19:09:39 | First worker.service boot — old `_require_ssl` ImportError (stale code from old venv) |
+| 19:09:50 | systemd restart; venv rebuild (`Building stand-alone-analyzer`) |
+| 19:09:53-54 | Second worker boot starts; psycopg pool retries with stale env file |
+| 19:10:23 | `psycopg_pool.PoolTimeout` after 30 s; worker exits 1 |
+| 19:10:34 | systemd restart attempt 2; this time env file has new SecretsManager-sourced password |
+| 19:10:35 | **Worker registers cleanly** with procrastinate; claims stale job 16 (run_id=21 from §27) |
+| 19:11:08 | PM SSM probe at +3 min — captured cold-boot crash signature for §38.1 documentation |
+| 19:12:50 | **`gpu_ready` SSE fired (+315.92s)** with `image_count=100` |
+| 19:12:50 | **per-image `progress` SSE #1 fired (+315.98s)**: "starting 8-GPU fan-out across 8 GPUs" |
+| 19:12:58 | **`error` SSE fired (+323.92s)**: `KeyError: 'model'` |
+| 19:12:58 | SSE stream closed cleanly (`terminal=error`) |
+| 19:13:15 | PM `terminate-instances`, `cancel-spot-instance-requests sir-9emzk6tj` |
+
+### 38.8 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot (us-east-2a) | ~5.6 min | ~$5.96 | **~$0.55** |
+| Bastion overlap | ~10 min | ~$0.0104 | ~$0.002 |
+| RDS round-trips, NAT GW (M3 weights again) | negligible | | ~$0.001 |
+| **Total this re-run** | | | **~$0.55** |
+
+Within the $5 hard cap. Wall ~6 min (POST → terminate). PM
+terminated immediately after capturing the terminal SSE — no value
+keeping the instance running.
+
+### 38.9 Cleanup performed
+
+- API uvicorn — left running.
+- SSH bastion tunnel — left open on 5433.
+- Bastion `i-063165d449976b2e4` — left running.
+- GPU instance `i-0f682c2ff36479395` — terminated at ~19:13:15.
+- Spot request `sir-9emzk6tj` explicitly cancelled.
+- procrastinate jobs 19-24 (all stale `todo` from prior failed runs)
+  ALL transitioned to `failed` (status=`failed`, attempts=1) when
+  the worker briefly registered. Job 16 (run_id=21, the one the
+  worker actually claimed and crashed on) is also `failed`.
+- procrastinate worker_id=14 will be cleaned up by procrastinate's
+  heartbeat-based GC.
+- Diagnostic SSM probe output saved at `/tmp/diag-r17-t3.txt`.
+- Harness SSE log: `/tmp/saa-acceptance-sse-T6a3-r17.log` —
+  contains the full timing including `gpu_ready` + `progress` +
+  terminal `error` events.
+
+### 38.10 Status for owner decision
+
+**Verified by this run (massive end-to-end progress):**
+- T7j-A's Secrets Manager fetch path works (after cold-boot race).
+- Worker registers, claims jobs, executes pipeline init.
+- `gpu_launching` / `gpu_ready` / `progress` / `error` SSE wires
+  all work end-to-end — the entire dispatcher contract from §27's
+  spec is now demonstrably functional.
+- The acceptance hardware path (8× NVIDIA L40S on g6e.48xlarge spot)
+  is reachable on first cold-boot from a clean LT/AMI.
+
+**New blocker — §26's known merged_m3 weight format bug:**
+- This bug was identified 2026-05-31 in §26 manual run, and the
+  workaround (rename `merged_m3.pt` → `.disabled`) was never
+  landed in user-data. Every prior cold boot would have hit it,
+  but DB-auth (T7j-A) blocked us upstream until now.
+
+**Next action — T7l (algorithmic, ~5 min owner time)**:
+
+T7l-A (recommended for fast path-to-success):
+1. Patch user-data step 5d (`scripts/aws/sam-gpu-worker-userdata.sh`)
+   to rename `merged_m3.pt → merged_m3.pt.disabled` after the
+   SHA256 verification, OR remove step 5d entirely if merged_m3
+   isn't needed for acceptance.
+2. Publish LT v35 (no AMI rebake).
+3. Re-run §38 acceptance — SHOULD succeed end-to-end on first
+   try modulo §26's second latent bug (cuDNN), which we'll find
+   out about either way.
+
+T7l-B (proper fix, schedule separately): Patch the
+`_build_vendor_config()` or the vendor checkpoint loader to handle
+the `{"model_config", "model_state_dict"}` shape via:
+```python
+sd = sd.get("model_state_dict", sd.get("model", sd))
+```
+
+**Heads-up — §26 also flagged a SECOND latent bug** (cuDNN sublib
+version mismatch on `set_image()` first conv2d). That was on AMI
+v25 (2026-05-31 build). The current AMI is `ami-0b7ec5ff47a1eff11`
+(cu124 stack from §15 verification), so cuDNN may be fine — but
+won't know until T7l clears the way. Possible §39 surprise; will
+document with full diagnostic if it surfaces.
+
+**T7j-A side effect to clean up (T7k-optional)**:
+- Worker.service has a cold-boot race (env file write vs systemd
+  start). Adds ~40 s to first cold boot. `After=cloud-final.service`
+  on the unit would fix it. Not blocking.
+
+### Cumulative cost (updated through §38)
+
+| Phase | Cost |
+|---|---|
+| #229 attempts §18-§26 | $20.54 |
+| §27-§29 (capacity drought) | $0.00 |
+| §28 (post-T7) | ~$1.52 |
+| §30-§35 (T7b-T7g iterations) | ~$4.36 |
+| §36 (post-T7h, cloud-init done; worker crash loop) | ~$1.21 |
+| §37 (post-T7i, diagnostic captured DB-auth root cause) | ~$0.43 |
+| **§38 (post-T7j-A — first end-to-end gpu_ready/progress/error wire test)** | **~$0.55** |
+| **Total** | **~$28.61** |
+
+$100 cap remaining: ~$71.39.
