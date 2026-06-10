@@ -30,7 +30,13 @@ S3_M3_PFX="${S3_M3_PFX:-internal/sam/m3/}"
 S3_MERGED_M3_PFX="${S3_MERGED_M3_PFX:-internal/sam/merged_m3/}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 PY_VERSION="${PY_VERSION:-3.11}"
-IDLE_TIMEOUT_S="${IDLE_TIMEOUT_S:-600}"
+# Idle-shutdown grace period in seconds. Default 1800 (30 min) gives
+# meaningful debugging window when worker.service crash-loops before
+# claiming any procrastinate jobs. Operator may override via LT env
+# at production time once reliability is established. T7i (§36 fix:
+# the prior 600s default wiped journalctl before SSM probes could
+# capture worker.service crash details).
+IDLE_TIMEOUT_S="${IDLE_TIMEOUT_S:-1800}"
 ABS_CAP_MIN="${ABS_CAP_MIN:-60}"
 
 # --- Paths ----------------------------------------------------------------
