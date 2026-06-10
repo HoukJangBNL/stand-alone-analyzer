@@ -5845,3 +5845,243 @@ document with full diagnostic if it surfaces.
 | **Total** | **~$28.61** |
 
 $100 cap remaining: ~$71.39.
+
+---
+
+## 39. 1-click SAM dispatch acceptance — 2026-06-10 (post-T7l) PEFT_NOT_INSTALLED
+
+Re-run of §38 after T7l shipped as commit `d6efe94` (LT v35
+default). user-data step 5d now renames `merged_m3.pt` →
+`merged_m3.pt.disabled` after SHA verification, forcing
+`_resolve_merged_m3_path()` to return `None` and the SAM core to
+fall back to the LoRA-runtime path that uses the harness-supplied
+`weights_path` (`/opt/sam/weights/merged.pt` — LoRA-folded single-pt).
+
+**Outcome: PEFT_NOT_INSTALLED.** Pipeline progressed further than
+ever — `gpu_ready` fired in **half the time** of §38 (159 s vs 316 s)
+because no stale-job processing, then progress events fired and the
+multi-GPU spawn engaged. Worker successfully distributed 100 images
+across 8 GPUs, but each child process raised `ImportError` at vendor
+`lora.py:11`:
+
+```text
+File "/opt/sam/.../vendor/QPress-SAM-Flake/lora.py", line 11, in <module>
+  from peft import LoraConfig, get_peft_model
+ModuleNotFoundError: No module named 'peft'
+
+raise ImportError(
+ImportError: PEFT library is required for LoRA fine-tuning.
+Install with: pip install peft
+```
+
+PM verified directly via SSM:
+- `/opt/sam/stand-alone-analyzer/.venv/bin/python -c "import peft"` →
+  `ModuleNotFoundError: No module named 'peft'`
+- `.venv/bin/python` mtime: `2026-05-28 00:40:07 UTC` (AMI bake time)
+- Manual `uv pip install peft` succeeded immediately (`peft==0.19.1`
+  + transformers + safetensors + tokenizers etc.)
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `d6efe94` (T7l: disable merged_m3) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged) |
+| Launch template | `qpress-sam-gpu-worker` v35 (default) |
+| Instances launched | 1 — `i-0591d6d7a507de300` (g6e.48xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-10T20:57:49 |
+| `gpu_launching` SSE | **fired** at +3.55 s (10-for-10) |
+| user-data steps 1-8 | **all completed** (4-for-4) |
+| Worker registers + claims fresh job (run_id=31, job 25) | ✅ first time on a non-stale job |
+| `gpu_ready` SSE | **+159.35 s** (~half of §38's 316 s — no stale-job processing) |
+| per-image `progress` SSE #1 | **+227.10 s** ("starting 8-GPU fan-out across 8 GPUs") |
+| Multi-GPU spawn | ✅ 8 worker subprocesses, 12-13 images each |
+| Vendor `lora.apply_lora_to_sam2_components` import | **FAILED** with `ModuleNotFoundError: No module named 'peft'` after 93.6 s job runtime |
+| Terminal `error` SSE | **+253.16 s** — `pipeline_failed` / `ImportError` |
+| Per-image inference | never executed (model load aborted before any image) |
+| Total instance wall (billed) | ~5.2 min |
+| Cost (this re-run) | **~$0.52** |
+| Status | `peft_not_installed` |
+
+### 39.1 Root cause: bake-time stamp `deps.done` shadows runtime peft install
+
+User-data step 5 (`[5/8] uv sync + SAM2 inference deps`) is gated
+by `done_stamp deps` (line 244 of `scripts/aws/sam-gpu-worker-userdata.sh`).
+The check uses `${STATE_DIR}/deps.done`, where `${STATE_DIR}=/opt/sam/state`.
+
+The AMI was baked on 2026-05-28 with `deps.done` stamp file already
+present (the bake script ran step 5 once during bake). On every
+cold boot since, `done_stamp deps` returns true, step 5 is **skipped
+entirely**, and the bake-time `.venv` is used as-is.
+
+The `peft>=0.8.0,<0.20` install was added to user-data lines 266-270
+**after** the AMI bake. Because the deps stamp persists, the new
+peft install never runs at runtime. The `.venv/bin/python` mtime
+confirms: `2026-05-28 00:40:07` — exactly bake time.
+
+PM's SSM probe enumerated the bake-time stamp file inventory:
+```text
+/opt/sam/state/
+  apt-base.done    May 27  ← bake
+  cuda.done        May 27  ← bake
+  deps.done        May 28  ← bake — THE PROBLEM
+  python.done      May 27  ← bake
+  uv.done          May 27  ← bake
+  weights.done     May 28  ← bake
+  active_weights_key  May 28  ← bake
+  active_merged_m3_key  Jun 10  ← runtime (step 5d redownloads)
+  dataset.done     Jun 10  ← runtime (step 6 redownloads)
+  env.done         Jun 10  ← runtime (line 74 invalidates this each boot)
+  m3-assets.done   Jun 10  ← runtime
+  m3-prod-symlinks.done Jun 10  ← runtime
+  merged-m3-weights.done Jun 10  ← runtime
+  repo.done        Jun 10  ← runtime (line 74 invalidates this each boot)
+```
+
+Note line 74 of user-data:
+```bash
+rm -f "${STATE_DIR}/env.done" "${STATE_DIR}/repo.done"
+```
+
+This invalidates env + repo stamps each boot to pick up RDS env
+changes and main-branch advances. **It does NOT invalidate
+deps.done** — so deps.done persists from bake forever, and any
+new dependency added to user-data step 5 silently won't install.
+
+This is the same class of latent bug as §38's merged_m3 weight
+format: code ships in user-data, but it never actually runs at
+cold boot because of stamp shadowing.
+
+### 39.2 Recommended fix (T7m) — invalidate deps.done in line 74
+
+One-line change in `scripts/aws/sam-gpu-worker-userdata.sh`:
+
+```bash
+# Current (line 74):
+rm -f "${STATE_DIR}/env.done" "${STATE_DIR}/repo.done"
+
+# Replacement:
+rm -f "${STATE_DIR}/env.done" "${STATE_DIR}/repo.done" "${STATE_DIR}/deps.done"
+```
+
+This forces step 5 (`uv sync` + vendor inference deps + peft) to
+re-run on every cold boot. Cost: ~30-60 s extra boot time (mostly
+cache hits on `uv sync --frozen`; the explicit peft install is the
+only NEW work and that's ~5 s). **No AMI rebake needed.**
+
+LT v36 publish, retry.
+
+**Why not just rebake the AMI?** Rebaking would propagate peft
+into the deps.done stamp — but the bake script itself has the same
+class of issue: any dependency added to user-data after the next
+bake would have the same shadowing problem. Patching the
+invalidation list is the structural fix.
+
+### 39.3 What was newly verified vs §38
+
+This run confirmed every wire from §38 is repeatable AND added new
+ground truth on the multi-GPU spawn path:
+
+1. **T7l (merged_m3 disable) works perfectly** — vendor LoRA-runtime
+   path engaged (build_sam2_finetuned at run_amg_v2.py:562 was
+   called, NOT `build_sam2_from_yaml`). KeyError 'model' from §38 is
+   gone.
+2. **Stale-job cleanup from §38 paid off** — worker claimed FRESH
+   job 25 (run_id=31, the current request) directly. `gpu_ready`
+   fired at +159 s vs §38's +316 s — the difference is exactly
+   §38's stale-job processing time we don't have to repeat.
+3. **Multi-GPU spawn path verified** — vendor's `run_multi_process`
+   at run_amg_v2.py:1143 successfully forked 8 worker subprocesses
+   using `multiprocessing.pool`. Distribution math is correct
+   (12-13 images per GPU = 100 images / 8 GPUs with remainder).
+4. **8× NVIDIA L40S detected** — same as §38, no regression.
+5. **T7c 10-for-10**, **`gpu_launching` SSE 10-for-10**,
+   **cloud-init 8/8 4-for-4**, **worker registration 2-for-2**,
+   **`gpu_ready` SSE 2-for-2**, **`progress` SSE 2-for-2**, **terminal
+   `error` SSE wire 2-for-2**.
+
+### 39.4 What did NOT run
+
+- `lora.apply_lora_to_sam2_components` (failed at module import).
+- Per-image SAM inference.
+- `done` SSE.
+- Auto-terminate via idle-shutdown.timer (PM terminated manually).
+
+### 39.5 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 20:57:49 | POST /run/sam |
+| 20:57:50 | HTTP 200 SSE (+1.40 s) |
+| 20:57:53 | `gpu_launching` (+3.55 s) |
+| ~20:59:00 | SSM Online; cloud-init starts |
+| 20:59:12 | user-data start banner; immediately jumps to step 6 (S3 dataset DL) — steps 4 + 5 SKIPPED via deps.done |
+| 20:59:47 | userdata done banner (35 s — fast because most steps gated) |
+| ~20:59:50 | worker.service starts, registers cleanly |
+| 20:59:53 | worker claims job 25 (run_id=31, fresh) |
+| 21:00:28 | worker registered (per `procrastinate_workers` heartbeat) |
+| 21:00:28 | `Starting job run_sam[25]` |
+| 21:00:28 | `gpu_ready` SSE fired (+159.35 s) — `image_count=100` |
+| 21:01:36 | progress SSE #1 (+227.10 s) — "starting 8-GPU fan-out across 8 GPUs" |
+| 21:01:37 | Vendor logs "Distributing 100 images across 8 workers / Worker 0-7 (GPU 0-7): 12-13 images" |
+| 21:02:02 | Vendor multiprocessing.pool worker 0 raises `ImportError: PEFT library is required` |
+| 21:02:02 | Job ends with status=Error, lasted 93.615 s |
+| 21:02:02 | `error` SSE fired (+253.16 s); stream closes cleanly |
+| 21:03:00 | PM `terminate-instances`, `cancel-spot sir-mwm7k6hj` |
+
+### 39.6 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.48xlarge spot | ~5.2 min | ~$5.96 | **~$0.52** |
+| Bastion overlap | ~6 min | ~$0.0104 | ~$0.001 |
+| **Total this re-run** | | | **~$0.52** |
+
+### 39.7 Cleanup performed
+
+- API uvicorn — left running.
+- SSH bastion tunnel — open.
+- Bastion `i-063165d449976b2e4` — running.
+- GPU instance `i-0591d6d7a507de300` — terminated 21:03; spot
+  request `sir-mwm7k6hj` cancelled.
+- procrastinate job 25 (run_id=31) marked `failed` post-run.
+- Diagnostic SSM logs saved at `/tmp/diag-r18.txt` (full peft
+  trace + venv probe + manual peft install confirmation).
+
+### 39.8 Status for owner decision
+
+**Verified by this run:**
+- T7l merged_m3 disable works.
+- Multi-GPU spawn path engages (8 subprocesses, correct image
+  distribution).
+- All dispatcher SSE wires repeatable (10-for-10 / 2-for-2 metrics
+  above).
+
+**New blocker — bake-time stamp shadowing in user-data**:
+- `deps.done` baked at 2026-05-28 prevents step 5 from ever
+  re-running at cold boot.
+- peft install added to user-data after that bake → never executed
+  at runtime.
+
+**Next action — T7m (1-line user-data fix, no AMI rebake)**:
+1. Add `"${STATE_DIR}/deps.done"` to the rm -f at line 74 of
+   `scripts/aws/sam-gpu-worker-userdata.sh`.
+2. Publish LT v36.
+3. Re-run §39 acceptance. Expected: step 5 actually runs (~30-60 s),
+   peft installs in `.venv`, vendor LoRA import succeeds, model
+   load + per-image inference.
+
+**Heads-up — §26 second latent bug still gated behind T7m**:
+The cuDNN sublib version mismatch from §26 was never re-tested on
+this AMI. After T7m clears the peft import, model load proceeds to
+`set_image()`'s first `conv2d` — exactly where §26 hit cuDNN. AMI
+is §15-verified cu124 stack which is different from §26's v25, so
+result may differ. §40 will tell us either way.
+
+### Cumulative cost (updated through §39)
+
+| Phase | Cost |
+|---|---|
+| Through §38 (full dispatcher wire e2e) | ~$28.61 |
+| **§39 (post-T7l — bake-time stamp shadowing surfaced)** | **~$0.52** |
+| **Total** | **~$29.13** |
+
+$100 cap remaining: ~$70.87.
