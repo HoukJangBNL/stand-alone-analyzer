@@ -498,7 +498,19 @@ if ! done_stamp env; then
   DB_PORT=$(fetch_ssm /qpress-sam/db_port)
   DB_USER=$(fetch_ssm /qpress-sam/db_user)
   DB_NAME=$(fetch_ssm /qpress-sam/db_name)
-  DB_PASSWORD=$(fetch_ssm /qpress-sam/db_password true)
+
+  # T7j-A (§37 fix): fetch the DB password directly from Secrets
+  # Manager — RDS auto-rotates the password, but the SSM SecureString
+  # `/qpress-sam/db_password` was set once at #229 SSM seed time and
+  # has drifted from RDS truth. Worker DB auth fails with `password
+  # authentication failed for user "houk"` (verified in §37 journalctl).
+  # Reading directly from Secrets Manager keeps user-data in lockstep
+  # with whatever value RDS currently accepts.
+  RDS_SECRET_ARN="arn:aws:secretsmanager:us-east-2:931886963315:secret:rds!db-beb90dd0-feef-45a5-b8b5-81af8d02e0d6-Cwxa1w"
+  DB_PASSWORD=$(aws --region "${AWS_REGION}" secretsmanager get-secret-value \
+    --secret-id "${RDS_SECRET_ARN}" \
+    --query 'SecretString' --output text \
+    | python3 -c 'import json,sys; print(json.load(sys.stdin)["password"])')
 
   umask 077
   cat > "${ENV_FILE}" <<EOF
