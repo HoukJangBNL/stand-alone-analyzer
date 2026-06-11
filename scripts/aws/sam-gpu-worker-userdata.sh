@@ -67,11 +67,18 @@ stamp() { echo "$(date -u +%FT%TZ) $1" >> "${STATE_DIR}/$1.done"; }
 done_stamp() { [[ -f "${STATE_DIR}/$1.done" ]]; }
 
 # --- Force re-run of fix-affected steps ----------------------------------
-# AMI ami-0b7ec5ff47a1eff11 was baked before commits 196824a (sslmode) and
-# d68a9a0 (env-quote). Until AMI re-bake (Task #220), invalidate these
-# stamps so userdata re-runs the corrected env-file write and pulls the
-# post-fix repo HEAD. See docs/sam-ops.md §17.1 for the root cause.
-rm -f "${STATE_DIR}/env.done" "${STATE_DIR}/repo.done"
+# AMI ami-0b7ec5ff47a1eff11 was baked 2026-05-28. Each commit since
+# that adds new code to a stamped step needs the corresponding stamp
+# invalidated, or the bake-time stamp shadows the new code and it
+# never runs at cold boot. Adds since the bake:
+# * env.done — quoted SAA_DB_* writes (#220 era)
+# * repo.done — post-bake repo HEAD pulls (T7c+T7e+T7g+T7h fixes)
+# * deps.done — peft pip install (T7l+T7m: §39 ImportError gated
+#   here because the pre-bake .venv lacks peft, and step 5 was
+#   stamped at bake time so the new install never ran).
+# Long-term: when the AMI is re-baked, prune entries whose targets
+# are baked in.
+rm -f "${STATE_DIR}/env.done" "${STATE_DIR}/repo.done" "${STATE_DIR}/deps.done"
 
 # --- Helper: IMDSv2 token ------------------------------------------------
 imds_token() {
