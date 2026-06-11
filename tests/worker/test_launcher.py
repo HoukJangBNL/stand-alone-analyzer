@@ -404,11 +404,11 @@ async def test_default_factory_uses_boto3_ec2_client(monkeypatch):
 
 
 def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable():
-    """When the LT's spot request hits InsufficientInstanceCapacity,
-    _launch_one retries once with InstanceMarketOptions={} (overrides
-    the LT's spot setting, dispatching as on-demand). The on-demand
-    attempt's response is what _launch_one returns."""
-    from flake_analysis.worker.launcher import _launch_one
+    """T7n: when ALL three AZs reject spot with capacity errors,
+    _launch_one rotates to on-demand and accepts the first AZ that
+    returns an instance. NetworkInterfaces.SubnetId is overridden
+    per-call to bypass the LT's pinned single-AZ subnet."""
+    from flake_analysis.worker.launcher import _launch_one, SUBNETS_BY_AZ
 
     capacity_err = ClientError(
         {"Error": {"Code": "InsufficientInstanceCapacity",
@@ -425,31 +425,38 @@ def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable():
         def run_instances(self, **kwargs):
             self.attempt += 1
             calls.append(kwargs)
-            if self.attempt == 1:
-                # First call (spot via LT default) — fails with capacity
+            # Spot in all three AZs (calls 1-3) refuse, then first
+            # on-demand call (call 4 = us-east-2a on-demand) succeeds.
+            if self.attempt <= 3:
                 raise capacity_err
-            # Second call (on-demand override) — succeeds
             return {"Instances": [{"InstanceId": "i-on-demand-test"}]}
 
     ec2 = _FakeEc2()
     instance_id = _launch_one(ec2)
 
     assert instance_id == "i-on-demand-test"
-    assert len(calls) == 2
+    assert len(calls) == 4
 
-    # First attempt — relied on LT default (no market override)
-    assert "InstanceMarketOptions" not in calls[0] \
-        or calls[0]["InstanceMarketOptions"] == {"MarketType": "spot"}
+    # All four calls override NetworkInterfaces.SubnetId per-AZ.
+    subnets_seen = [c["NetworkInterfaces"][0]["SubnetId"] for c in calls]
+    expected_subnets = list(SUBNETS_BY_AZ.values())  # 2a, 2b, 2c
+    # Calls 1-3 are spot in 2a, 2b, 2c (in dict order).
+    assert subnets_seen[:3] == expected_subnets
+    # Call 4 is on-demand starting at 2a again.
+    assert subnets_seen[3] == expected_subnets[0]
 
-    # Second attempt — explicit empty market options to override LT's spot
-    assert calls[1]["InstanceMarketOptions"] == {}
+    # Calls 1-3: spot (no InstanceMarketOptions override).
+    for c in calls[:3]:
+        assert "InstanceMarketOptions" not in c
+    # Call 4: on-demand (explicit empty market options).
+    assert calls[3]["InstanceMarketOptions"] == {}
 
 
-def test_launch_one_raises_capacity_error_when_both_spot_and_on_demand_fail():
-    """If on-demand also returns InsufficientInstanceCapacity (rare but
-    possible during region-wide events), _launch_one raises
-    GpuCapacityUnavailable — same as the prior spot-only behavior, just
-    after both attempts."""
+def test_launch_one_raises_capacity_error_when_all_six_attempts_fail():
+    """If spot in all 3 AZs AND on-demand in all 3 AZs all return
+    InsufficientInstanceCapacity, _launch_one raises
+    GpuCapacityUnavailable after exactly 6 attempts (spot 2a/2b/2c +
+    on-demand 2a/2b/2c)."""
     from flake_analysis.worker.launcher import _launch_one, GpuCapacityUnavailable
 
     capacity_err = ClientError(
@@ -470,7 +477,7 @@ def test_launch_one_raises_capacity_error_when_both_spot_and_on_demand_fail():
     with pytest.raises(GpuCapacityUnavailable):
         _launch_one(ec2)
 
-    assert ec2.attempt == 2  # tried both spot and on-demand
+    assert ec2.attempt == 6  # spot 3 AZs + on-demand 3 AZs
 
 
 def test_launch_one_propagates_non_capacity_client_errors():

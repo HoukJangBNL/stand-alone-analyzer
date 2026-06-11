@@ -60,6 +60,25 @@ LAUNCH_TEMPLATE_NAME: str = "qpress-sam-gpu-worker"
 #: Region where the launch template + IAM + SG live.
 AWS_REGION: str = "us-east-2"
 
+#: Multi-AZ subnet rotation list (T7n, owner directive 2026-06-11).
+#: The LT pins a single subnet (us-east-2a) into its NetworkInterfaces
+#: block, but g6e.48xlarge capacity flits between AZs in real time —
+#: 2026-06-11 §40 saw all three AZs rotate "drought" / "available" within
+#: seconds of each other. _launch_one tries each AZ in turn (spot first,
+#: then on-demand), giving us 6 boot attempts before raising
+#: GpuCapacityUnavailable. SubnetId override on RunInstances supersedes
+#: the LT's NetworkInterfaces.SubnetId, and the SG also lives at the VPC
+#: level (sg-0e57146d5b6d42452 covers all three AZs).
+SUBNETS_BY_AZ: dict[str, str] = {
+    "us-east-2a": "subnet-0fe8558512beea68a",
+    "us-east-2b": "subnet-0fe98fb0f6d63afc3",
+    "us-east-2c": "subnet-09f76839fd0c109a9",
+}
+
+#: Security group attached when overriding the LT's NetworkInterfaces.
+#: Created by ``scripts/aws/sam-iam-bootstrap.sh``; same group across AZs.
+WORKER_SECURITY_GROUP_ID: str = "sg-0e57146d5b6d42452"
+
 #: Tag values used to identify production GPU workers (cost-allocation
 #: tag is also ``Project=qpress-sam`` for budget filtering — see P4.5).
 TAG_PROJECT: str = "qpress-sam"
@@ -282,66 +301,113 @@ _SPOT_FAILURE_CODES = frozenset({
 })
 
 
+def _try_run_instances(
+    ec2: Any,
+    *,
+    subnet_id: str,
+    on_demand: bool,
+) -> str | None:
+    """One RunInstances attempt against a specific subnet + market type.
+
+    Overrides the LT's pinned NetworkInterfaces (single-AZ subnet) with
+    ``subnet_id``, and overrides the LT's pinned MarketType=spot with
+    an empty ``InstanceMarketOptions`` when ``on_demand=True``. Returns
+    the new InstanceId on success, or ``None`` if AWS refused with a
+    spot- or capacity-related code (InsufficientInstanceCapacity,
+    MaxSpotInstanceCountExceeded, etc — see :data:`_SPOT_FAILURE_CODES`,
+    plus on-demand's `InsufficientInstanceCapacity`). Any other
+    ClientError propagates so callers see real bugs (IAM, malformed
+    template, etc).
+    """
+    kwargs: dict[str, Any] = {
+        "LaunchTemplate": {
+            "LaunchTemplateName": LAUNCH_TEMPLATE_NAME,
+            "Version": "$Default",
+        },
+        "MinCount": 1,
+        "MaxCount": 1,
+        "NetworkInterfaces": [
+            {
+                "DeviceIndex": 0,
+                "AssociatePublicIpAddress": True,
+                "Groups": [WORKER_SECURITY_GROUP_ID],
+                "SubnetId": subnet_id,
+            }
+        ],
+    }
+    if on_demand:
+        kwargs["InstanceMarketOptions"] = {}
+
+    try:
+        resp = ec2.run_instances(**kwargs)
+    except ClientError as e:
+        code = (e.response.get("Error") or {}).get("Code", "")
+        if on_demand and code == "InsufficientInstanceCapacity":
+            return None  # try a different AZ
+        if not on_demand and code in _SPOT_FAILURE_CODES:
+            return None  # try a different AZ or fall through to on-demand
+        raise
+    instances = resp.get("Instances") or []
+    if not instances:
+        raise RuntimeError("RunInstances returned no Instances")
+    return instances[0]["InstanceId"]
+
+
 def _launch_one(ec2: Any) -> str:
     """Synchronous boto3 call: boot exactly one worker.
 
-    Tries spot first (via the LT's default ``InstanceMarketOptions``).
-    If AWS returns any of :data:`_SPOT_FAILURE_CODES`, retries once
-    with ``InstanceMarketOptions={}`` to override the LT's spot
-    setting and dispatch as on-demand. On-demand is more expensive
-    ($7.23/hr vs $3.96/hr for g6e.48xlarge in us-east-2 as of
-    2026-06-08) but reliably available during spot droughts and
-    after recent terminates that haven't released the spot quota.
+    Multi-AZ rotation (T7n, owner directive 2026-06-11). g6e.48xlarge
+    capacity in us-east-2 flits between AZs in real time — 2026-06-11
+    §40 saw all three AZs respond `InsufficientInstanceCapacity`
+    individually within seconds of each other. AWS-side recommendation
+    on every refusal: "you can currently get capacity by choosing
+    <one of the other AZs>". So we try each AZ in turn:
 
-    Translates ``InsufficientInstanceCapacity`` from the on-demand
-    attempt into :class:`GpuCapacityUnavailable`. Other ClientErrors
-    on either attempt propagate without retry.
+      1. spot us-east-2a → 2b → 2c
+      2. on-demand us-east-2a → 2b → 2c
+
+    Each attempt overrides the LT's pinned NetworkInterfaces.SubnetId
+    so the AZ choice is per-call (LT stays untouched). On-demand is
+    more expensive ($7.23/hr vs $3.96/hr for g6e.48xlarge in us-east-2
+    as of 2026-06-08) but reliably available outside multi-AZ droughts.
+
+    All six attempts refused with a spot/capacity code →
+    :class:`GpuCapacityUnavailable`. Non-spot ClientErrors (IAM,
+    malformed template, etc) propagate immediately from the first
+    attempt that hits them.
     """
-    try:
-        resp = ec2.run_instances(
-            LaunchTemplate={
-                "LaunchTemplateName": LAUNCH_TEMPLATE_NAME,
-                "Version": "$Default",
-            },
-            MinCount=1,
-            MaxCount=1,
-        )
-    except ClientError as e:
-        code = (e.response.get("Error") or {}).get("Code", "")
-        if code not in _SPOT_FAILURE_CODES:
-            raise
-        # Spot failure mode — retry as on-demand. Empty
-        # InstanceMarketOptions overrides the LT's MarketType=spot.
-        logger.info(
-            "spot launch failed (code=%s); retrying as on-demand "
-            "(LT %s, $7.23/hr)",
-            code,
-            LAUNCH_TEMPLATE_NAME,
-        )
-        try:
-            resp = ec2.run_instances(
-                LaunchTemplate={
-                    "LaunchTemplateName": LAUNCH_TEMPLATE_NAME,
-                    "Version": "$Default",
-                },
-                InstanceMarketOptions={},
-                MinCount=1,
-                MaxCount=1,
-            )
-        except ClientError as e2:
-            code2 = (e2.response.get("Error") or {}).get("Code", "")
-            if code2 == "InsufficientInstanceCapacity":
-                raise GpuCapacityUnavailable(
-                    "GPU capacity unavailable in us-east-2 (both spot "
-                    "and on-demand). Retry in a few minutes."
-                ) from e2
-            raise
+    azs = list(SUBNETS_BY_AZ.keys())  # ['us-east-2a', '2b', '2c']
 
-    instances = resp.get("Instances") or []
-    if not instances:
-        # Defensive: the API contract says Instances is non-empty on success.
-        raise RuntimeError("RunInstances returned no Instances")
-    return instances[0]["InstanceId"]
+    # Phase 1: spot in each AZ.
+    for az in azs:
+        subnet = SUBNETS_BY_AZ[az]
+        result = _try_run_instances(ec2, subnet_id=subnet, on_demand=False)
+        if result is not None:
+            logger.info("launched spot in %s (subnet %s) → %s", az, subnet, result)
+            return result
+        logger.info("spot refused in %s — trying next AZ", az)
+
+    # Phase 2: on-demand in each AZ.
+    logger.info("all spot AZs refused; switching to on-demand")
+    for az in azs:
+        subnet = SUBNETS_BY_AZ[az]
+        result = _try_run_instances(ec2, subnet_id=subnet, on_demand=True)
+        if result is not None:
+            logger.info(
+                "launched on-demand in %s (subnet %s) → %s",
+                az,
+                subnet,
+                result,
+            )
+            return result
+        logger.info("on-demand refused in %s — trying next AZ", az)
+
+    # All 6 attempts refused.
+    raise GpuCapacityUnavailable(
+        "GPU capacity unavailable in us-east-2 across all AZs "
+        "(spot 2a/2b/2c and on-demand 2a/2b/2c all refused). "
+        "Retry in a few minutes — capacity flits between AZs."
+    )
 
 
 # ---------------------------------------------------------------------------
