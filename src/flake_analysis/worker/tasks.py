@@ -216,9 +216,21 @@ def run_sam(
         raise
 
     try:
+        # T7p (§42 fix): Postgres NOTIFY has an 8000-byte payload limit.
+        # `result["per_image"]` is a 100+ entry dict (~10 KB+ JSON) and
+        # blows the cap, so the entire `completed` notify is rejected
+        # with InvalidParameterValue and the SSE consumer never gets
+        # `done`. Send only the summary scalars over NOTIFY; per_image
+        # detail stays on disk (per_image_results.json) for any
+        # consumer that needs it.
+        slim_result = {
+            "images": int(result.get("images", 0) or 0),
+            "masks_total": int(result.get("masks_total", 0) or 0),
+            "errors": int(result.get("errors", 0) or 0),
+        }
         _emit_progress(
             run_id=run_id,
-            payload={"type": "completed", "result": result},
+            payload={"type": "completed", "result": slim_result},
         )
     except Exception:  # noqa: BLE001
         logger.exception("completed emit failed for run_id=%s", run_id)

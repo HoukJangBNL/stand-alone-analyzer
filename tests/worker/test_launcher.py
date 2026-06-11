@@ -452,12 +452,16 @@ def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable():
     assert calls[3]["InstanceMarketOptions"] == {}
 
 
-def test_launch_one_raises_capacity_error_when_all_six_attempts_fail():
-    """If spot in all 3 AZs AND on-demand in all 3 AZs all return
-    InsufficientInstanceCapacity, _launch_one raises
-    GpuCapacityUnavailable after exactly 6 attempts (spot 2a/2b/2c +
-    on-demand 2a/2b/2c)."""
-    from flake_analysis.worker.launcher import _launch_one, GpuCapacityUnavailable
+def test_launch_one_raises_capacity_error_when_full_ladder_fails():
+    """T7q: when every instance type × AZ × market combination is
+    refused, _launch_one raises GpuCapacityUnavailable after exactly
+    `len(INSTANCE_TYPE_LADDER) × 6` attempts (3 AZs × 2 markets per
+    type)."""
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        GpuCapacityUnavailable,
+        INSTANCE_TYPE_LADDER,
+    )
 
     capacity_err = ClientError(
         {"Error": {"Code": "InsufficientInstanceCapacity",
@@ -477,7 +481,50 @@ def test_launch_one_raises_capacity_error_when_all_six_attempts_fail():
     with pytest.raises(GpuCapacityUnavailable):
         _launch_one(ec2)
 
-    assert ec2.attempt == 6  # spot 3 AZs + on-demand 3 AZs
+    assert ec2.attempt == len(INSTANCE_TYPE_LADDER) * 6
+
+
+def test_launch_one_falls_through_ladder_to_smaller_gpu():
+    """T7q: when the largest GPU type is fully drought across all AZs
+    and markets (6 refusals), _launch_one steps down to the next
+    instance type. First successful attempt wins."""
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        INSTANCE_TYPE_LADDER,
+    )
+
+    capacity_err = ClientError(
+        {"Error": {"Code": "InsufficientInstanceCapacity",
+                   "Message": "Insufficient capacity"}},
+        "RunInstances",
+    )
+
+    calls: list[dict] = []
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            calls.append(kwargs)
+            # First instance type (g6e.48xlarge) — all 6 attempts refuse.
+            # Second instance type, first attempt — succeeds.
+            if self.attempt <= 6:
+                raise capacity_err
+            return {"Instances": [{"InstanceId": "i-fallback-test"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+
+    assert instance_id == "i-fallback-test"
+    assert ec2.attempt == 7
+
+    # First 6 calls: largest type
+    for call in calls[:6]:
+        assert call["InstanceType"] == INSTANCE_TYPE_LADDER[0]
+    # Call 7: second type
+    assert calls[6]["InstanceType"] == INSTANCE_TYPE_LADDER[1]
 
 
 def test_launch_one_propagates_non_capacity_client_errors():

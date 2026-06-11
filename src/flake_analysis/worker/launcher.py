@@ -79,6 +79,25 @@ SUBNETS_BY_AZ: dict[str, str] = {
 #: Created by ``scripts/aws/sam-iam-bootstrap.sh``; same group across AZs.
 WORKER_SECURITY_GROUP_ID: str = "sg-0e57146d5b6d42452"
 
+#: GPU-count ladder of instance types — try the largest first
+#: (most throughput), fall back to smaller ones if capacity fails.
+#: Owner directive 2026-06-11: "8장부터 시작해서 실패하면 7장 이런식으로
+#: 내려와서 최대한 빨리 실행하게" — g6e family only ships 8/4/4/1 GPU
+#: SKUs, so the ladder picks one of each tier. Each tier gets the
+#: full spot-3AZ + on-demand-3AZ probe (T7n) before stepping down.
+#:
+#: g6e.48xlarge: 8 GPUs ($5.96 spot / $7.23 on-demand)
+#: g6e.24xlarge: 4 GPUs ($2.97 spot / ~$3.61 on-demand)
+#: g6e.12xlarge: 4 GPUs ($1.86 spot / ~$2.52 on-demand) — best price/perf
+#: g6e.4xlarge:  1 GPU  ($0.62 spot / ~$0.77 on-demand) — almost always
+#:               available; floor of the ladder.
+INSTANCE_TYPE_LADDER: tuple[str, ...] = (
+    "g6e.48xlarge",
+    "g6e.24xlarge",
+    "g6e.12xlarge",
+    "g6e.4xlarge",
+)
+
 #: Tag values used to identify production GPU workers (cost-allocation
 #: tag is also ``Project=qpress-sam`` for budget filtering — see P4.5).
 TAG_PROJECT: str = "qpress-sam"
@@ -304,26 +323,28 @@ _SPOT_FAILURE_CODES = frozenset({
 def _try_run_instances(
     ec2: Any,
     *,
+    instance_type: str,
     subnet_id: str,
     on_demand: bool,
 ) -> str | None:
-    """One RunInstances attempt against a specific subnet + market type.
+    """One RunInstances attempt with a specific instance type, subnet,
+    and market type.
 
-    Overrides the LT's pinned NetworkInterfaces (single-AZ subnet) with
-    ``subnet_id``, and overrides the LT's pinned MarketType=spot with
-    an empty ``InstanceMarketOptions`` when ``on_demand=True``. Returns
-    the new InstanceId on success, or ``None`` if AWS refused with a
-    spot- or capacity-related code (InsufficientInstanceCapacity,
-    MaxSpotInstanceCountExceeded, etc — see :data:`_SPOT_FAILURE_CODES`,
-    plus on-demand's `InsufficientInstanceCapacity`). Any other
-    ClientError propagates so callers see real bugs (IAM, malformed
-    template, etc).
+    Overrides the LT's pinned ``InstanceType`` and ``NetworkInterfaces``
+    (single-AZ subnet) per-call. Empty ``InstanceMarketOptions``
+    overrides the LT's MarketType=spot when ``on_demand=True``.
+
+    Returns the new InstanceId on success, ``None`` if AWS refused
+    with a spot- or capacity-related code (InsufficientInstanceCapacity,
+    MaxSpotInstanceCountExceeded, etc). Other ClientErrors propagate
+    so callers see real bugs (IAM, malformed template, etc).
     """
     kwargs: dict[str, Any] = {
         "LaunchTemplate": {
             "LaunchTemplateName": LAUNCH_TEMPLATE_NAME,
             "Version": "$Default",
         },
+        "InstanceType": instance_type,
         "MinCount": 1,
         "MaxCount": 1,
         "NetworkInterfaces": [
@@ -343,9 +364,9 @@ def _try_run_instances(
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
         if on_demand and code == "InsufficientInstanceCapacity":
-            return None  # try a different AZ
+            return None  # try a different AZ or instance type
         if not on_demand and code in _SPOT_FAILURE_CODES:
-            return None  # try a different AZ or fall through to on-demand
+            return None  # try a different AZ, market, or instance type
         raise
     instances = resp.get("Instances") or []
     if not instances:
@@ -356,57 +377,82 @@ def _try_run_instances(
 def _launch_one(ec2: Any) -> str:
     """Synchronous boto3 call: boot exactly one worker.
 
-    Multi-AZ rotation (T7n, owner directive 2026-06-11). g6e.48xlarge
-    capacity in us-east-2 flits between AZs in real time — 2026-06-11
-    §40 saw all three AZs respond `InsufficientInstanceCapacity`
-    individually within seconds of each other. AWS-side recommendation
-    on every refusal: "you can currently get capacity by choosing
-    <one of the other AZs>". So we try each AZ in turn:
+    Triple-tier fallback (T7n + T7q):
+      * outer: instance-type ladder — try the largest GPU SKU first,
+        fall back to smaller ones to absorb capacity drought
+        (:data:`INSTANCE_TYPE_LADDER`).
+      * middle: market — spot first (cheaper), on-demand fallback
+        (always available outside multi-AZ outages).
+      * inner: AZ rotation — try each us-east-2 AZ in turn, since
+        g6e capacity flits between AZs in real time (T7n / §40).
 
-      1. spot us-east-2a → 2b → 2c
-      2. on-demand us-east-2a → 2b → 2c
+    Order per instance type: spot 2a/2b/2c → on-demand 2a/2b/2c (6
+    attempts), then step down to the next instance type.
 
-    Each attempt overrides the LT's pinned NetworkInterfaces.SubnetId
-    so the AZ choice is per-call (LT stays untouched). On-demand is
-    more expensive ($7.23/hr vs $3.96/hr for g6e.48xlarge in us-east-2
-    as of 2026-06-08) but reliably available outside multi-AZ droughts.
+    With the default 4-tier ladder this gives 24 attempts before
+    raising :class:`GpuCapacityUnavailable`. Each attempt is ~2-3 s
+    so worst-case total wall is ~1 min. Non-capacity ClientErrors
+    (IAM, malformed template) propagate immediately.
 
-    All six attempts refused with a spot/capacity code →
-    :class:`GpuCapacityUnavailable`. Non-spot ClientErrors (IAM,
-    malformed template, etc) propagate immediately from the first
-    attempt that hits them.
+    Owner directive 2026-06-11: "8장부터 시작해서 실패하면 7장 이런식
+    으로 내려와서 최대한 빨리 실행하게" — the ladder embodies that
+    "biggest available wins" preference.
     """
     azs = list(SUBNETS_BY_AZ.keys())  # ['us-east-2a', '2b', '2c']
 
-    # Phase 1: spot in each AZ.
-    for az in azs:
-        subnet = SUBNETS_BY_AZ[az]
-        result = _try_run_instances(ec2, subnet_id=subnet, on_demand=False)
-        if result is not None:
-            logger.info("launched spot in %s (subnet %s) → %s", az, subnet, result)
-            return result
-        logger.info("spot refused in %s — trying next AZ", az)
-
-    # Phase 2: on-demand in each AZ.
-    logger.info("all spot AZs refused; switching to on-demand")
-    for az in azs:
-        subnet = SUBNETS_BY_AZ[az]
-        result = _try_run_instances(ec2, subnet_id=subnet, on_demand=True)
-        if result is not None:
-            logger.info(
-                "launched on-demand in %s (subnet %s) → %s",
-                az,
-                subnet,
-                result,
+    for instance_type in INSTANCE_TYPE_LADDER:
+        # Phase 1: spot in each AZ.
+        for az in azs:
+            subnet = SUBNETS_BY_AZ[az]
+            result = _try_run_instances(
+                ec2,
+                instance_type=instance_type,
+                subnet_id=subnet,
+                on_demand=False,
             )
-            return result
-        logger.info("on-demand refused in %s — trying next AZ", az)
+            if result is not None:
+                logger.info(
+                    "launched %s spot in %s (subnet %s) → %s",
+                    instance_type, az, subnet, result,
+                )
+                return result
+            logger.info(
+                "%s spot refused in %s — trying next AZ", instance_type, az,
+            )
 
-    # All 6 attempts refused.
+        # Phase 2: on-demand in each AZ for the same instance type.
+        logger.info(
+            "%s spot exhausted; switching to on-demand", instance_type,
+        )
+        for az in azs:
+            subnet = SUBNETS_BY_AZ[az]
+            result = _try_run_instances(
+                ec2,
+                instance_type=instance_type,
+                subnet_id=subnet,
+                on_demand=True,
+            )
+            if result is not None:
+                logger.info(
+                    "launched %s on-demand in %s (subnet %s) → %s",
+                    instance_type, az, subnet, result,
+                )
+                return result
+            logger.info(
+                "%s on-demand refused in %s — trying next AZ",
+                instance_type, az,
+            )
+
+        logger.info(
+            "%s exhausted across all AZs and markets — stepping down",
+            instance_type,
+        )
+
+    # All instance types × AZs × markets refused.
     raise GpuCapacityUnavailable(
-        "GPU capacity unavailable in us-east-2 across all AZs "
-        "(spot 2a/2b/2c and on-demand 2a/2b/2c all refused). "
-        "Retry in a few minutes — capacity flits between AZs."
+        "GPU capacity unavailable in us-east-2 across the full ladder "
+        f"({list(INSTANCE_TYPE_LADDER)}) × all AZs (2a/2b/2c) × "
+        "both markets (spot+on-demand). Retry in a few minutes."
     )
 
 
