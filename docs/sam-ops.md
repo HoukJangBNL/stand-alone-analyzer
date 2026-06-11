@@ -6085,3 +6085,214 @@ result may differ. §40 will tell us either way.
 | **Total** | **~$29.13** |
 
 $100 cap remaining: ~$70.87.
+
+---
+
+## 40. 1-click SAM dispatch acceptance — 2026-06-11 (post-T7m) CAPACITY_BLOCKED + LOCAL_API_PW_DRIFT
+
+Re-run of §39 after T7m shipped as commit `b068036` (LT v36
+default). user-data line 74 now invalidates `deps.done` alongside
+`env.done` and `repo.done`, forcing step 5 (`uv sync` + peft
+install) to re-run on every cold boot.
+
+**Outcome: CAPACITY_BLOCKED + LOCAL_API_PW_DRIFT.** This run did not
+exercise T7m at all — two upstream issues blocked us before any GPU
+instance could even launch.
+
+**Issue 1 (LOCAL_API_PW_DRIFT)**: the first `POST /run/sam` failed
+in 1.5 s with:
+
+```text
+{"code": "pipeline_failed",
+ "message": "connection failed: connection to server at \"127.0.0.1\",
+   port 5433 failed: FATAL:  password authentication failed for user \"houk\"",
+ "details": {"exc_type": "OperationalError"}}
+```
+
+This is the **local PM acceptance API** (uvicorn on 127.0.0.1:8765),
+NOT the GPU worker. The API process (PID 44674) was launched
+2026-06-09 09:04 with a captured `SAA_DB_PASSWORD` from Secrets
+Manager at that moment. Over the intervening ~2 days, AWS
+auto-rotation refreshed the RDS password (the secret is
+`rds!db-beb90dd0-...`, an AWS-managed RDS rotation secret). The
+running uvicorn process held the stale password in env, and
+authentication to RDS started failing.
+
+PM verified directly:
+- `aws secretsmanager get-secret-value` returned a password that
+  worked: `psql ... -tAc "SELECT 'live-pw-ok'"` succeeded with the
+  fresh value.
+- The running uvicorn (PID 44674, started Jun 9 09:04) was killed.
+- Restarted uvicorn (PID 82185) with fresh env captured at restart
+  time.
+
+**Issue 2 (CAPACITY_BLOCKED)**: After the API was restarted,
+`POST /run/sam` got HTTP 200 SSE but ~25 s later returned terminal
+error:
+
+```text
+{"code": "pipeline_failed",
+ "message": "GPU capacity unavailable in us-east-2 (both spot and
+   on-demand). Retry in a few minutes.",
+ "details": {"exc_type": "GpuCapacityUnavailable"}}
+```
+
+PM retried after 60 s wait — same error. Spot price history shows
+us-east-2a/b/c at $5.40-$6.92/hr (vs ~$3.96 on-demand baseline),
+indicating real capacity tightness. No lingering spot requests
+from prior runs (PM cleaned all sirs explicitly per §31 discipline),
+so this is genuine AWS-side drought for `g6e.48xlarge`, similar
+to §27 (2026-06-08) and §29 (2026-06-08 evening).
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `b068036` (T7m: deps.done invalidation) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged) |
+| Launch template | `qpress-sam-gpu-worker` v36 (default, T7m user-data) |
+| Instances launched | **0** — capacity drought blocked both spot and on-demand |
+| First POST ts (UTC) | 2026-06-11T17:38:57 |
+| First SSE error | LOCAL `OperationalError` at +1.5 s — local API stale password |
+| Second POST ts (UTC) | 2026-06-11T17:39:47 (after API restart) |
+| Second SSE error | `GpuCapacityUnavailable` at +25.7 s — spot+on-demand both rejected |
+| Third POST ts (UTC) | 2026-06-11T17:42:37 (after 60 s wait) |
+| Third SSE error | same `GpuCapacityUnavailable` at +34.1 s |
+| `gpu_launching` SSE | **never fired** — `_launch_one` never returned an instance ID |
+| Worker.service | n/a — no instance |
+| T7m verification | **NOT EXERCISED** — capacity blocked us upstream |
+| Total instance wall (billed) | **0 min** |
+| Cost (this re-run) | **$0.00** |
+| Status | `capacity_blocked` (with `local_api_pw_drift` side finding) |
+
+### 40.1 Local-API password drift (operational learning)
+
+The PM acceptance harness uvicorn process is normally left running
+between attempts (per §35-§39 cleanup pattern). With AWS-managed
+RDS rotation enabled on the `rds!db-beb90dd0-...` secret, the
+captured-at-startup password silently goes stale.
+
+**Two observations**:
+1. **PM workaround is one-shot**: kill + restart uvicorn with
+   fresh `aws secretsmanager get-secret-value` capture. Done in
+   ~30 s, no acceptance impact beyond the false-start POST.
+2. **This is the third time RDS rotation has affected acceptance**:
+   §37 (worker SSM SecureString stale), §38.1 (cold-boot env-write
+   race during T7j-A bootstrap), and now §40 (local API stale).
+
+**Recommended T7n (operational, not blocking)**: kill + restart
+the local API once per session, OR reload the password on every
+request via a short-lived helper. Out of scope for SUCCESS path;
+flag for follow-up.
+
+### 40.2 Capacity drought — known pattern
+
+Same shape as §27 / §29:
+- Spot AND on-demand both reject `RunInstances` immediately with
+  `InsufficientInstanceCapacity`.
+- T7 broadened-fail catch list correctly catches the spot fail
+  AND the on-demand fall-back fail; SSE error envelope is clean
+  per §29's verification.
+- Spot prices elevated ($5.40-$6.92 vs $3.96 baseline) are a
+  leading indicator AWS-side inventory is tight.
+
+History (only counting PM's ~13 attempts in last 4 days):
+- §27 (06-08 afternoon): full drought, 4 attempts, 0 launches.
+- §28 (06-08 evening): partial, 6 attempts, 2 launches.
+- §29 (06-08 night): full drought, 8 attempts, 0 launches.
+- §30 (06-09): drought lifted, capacity restored.
+- §31-§39 (06-09 to 06-10): capacity stable.
+- **§40 (06-11)**: drought returned.
+
+**No code action**. Wait and retry. Per §29.7 owner-decision
+guidance, recommend: (1) wait 4-12 h for capacity to return, then
+re-run §40 (which will be the actual T7m verification + path-
+to-SUCCESS attempt); (2) if drought persists 24 h+, consider
+us-east-1 or us-west-2 region switch.
+
+### 40.3 What was newly verified
+
+Nothing pipeline-side — capacity blocked us. But two operational
+points reinforced:
+
+1. **§28.3 quota-lag pattern is NOT recurring** despite §27/§29
+   drought returning. PM's spot-cancel discipline since §31 keeps
+   the queue clean.
+2. **Local-API stale password is a real and recurring drift mode**
+   (third manifestation of RDS auto-rotation impact on long-lived
+   processes).
+
+### 40.4 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 17:38:57 | POST #1 |
+| 17:38:58 | SSE error — local `OperationalError`, PID 44674 stale env |
+| 17:39:00 | PM kill PID 44674; verified fresh Secrets Manager pw works via `psql` |
+| 17:39:30 | Restart uvicorn (PID 82185) with fresh env |
+| 17:39:47 | POST #2 |
+| 17:39:49 | HTTP 200 SSE |
+| 17:40:13 | SSE error — `GpuCapacityUnavailable`, both spot+on-demand |
+| 17:42:37 | POST #3 (after 60 s wait) |
+| 17:43:11 | SSE error — same |
+| 17:43:30 | PM stops, no instances launched, no spot requests, $0 spend |
+
+### 40.5 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| GPU instances | 0 min | n/a | **$0.00** |
+| Bastion overlap | ~7 min | ~$0.0104 | ~$0.001 |
+| **Total this re-run** | | | **~$0.00** |
+
+Within $5 cap. Wall ~5 min POST→stop. PM did not retry beyond 3
+attempts because spot price history confirmed real drought, not
+quota-lag (no value in burning more retries).
+
+### 40.6 Cleanup performed
+
+- Stale uvicorn (PID 44674) killed; fresh uvicorn (PID 82185)
+  running.
+- SSH bastion tunnel — open on 5433.
+- Bastion `i-063165d449976b2e4` — running.
+- No GPU instances launched, none to terminate.
+- No spot requests created, none to cancel.
+- Staging RDS rows preserved.
+- Harness SSE logs saved at
+  `/tmp/saa-acceptance-sse-T6a3-r19{,b,c}.log`.
+- procrastinate jobs from prior runs (16-25): all `failed` or
+  `succeeded`, no stale `todo` to clean up (verified by §38's
+  burn-through and §39's job 25 cleanup).
+
+### 40.7 Status for owner decision
+
+**No code action needed**. T7m is unverified but unaffected by
+this run (drought blocked us before user-data ran). The fix is
+likely correct; we just couldn't exercise it.
+
+**Owner decision**:
+1. **Wait + retry** (recommended). Drought returned ~12-15 h after
+   §39 success. AWS capacity in us-east-2 for g6e.48xlarge has
+   shown ~24-48 h drought windows in §27/§29 history. Recommend
+   re-run §40 in 4-12 h. Most likely outcome: T7m verifies, peft
+   installs, model load proceeds, and we either reach SUCCESS or
+   surface §26's cuDNN as the next layer.
+2. **Region switch** (defer): us-east-1 / us-west-2 typically have
+   larger pools. Adds RDS cross-region complexity; only justified
+   if drought persists 48 h+.
+
+**Operational follow-up T7n (low priority)**: address local-API
+PID lifetime > AWS rotation interval. Either:
+- Add a small wrapper that catches `OperationalError("password
+  authentication failed")` and re-fetches Secrets Manager once
+  before retrying; OR
+- Document a "kill + restart uvicorn" step at the top of any
+  multi-day acceptance session.
+
+### Cumulative cost (updated through §40)
+
+| Phase | Cost |
+|---|---|
+| Through §39 (peft not installed) | ~$29.13 |
+| **§40 (post-T7m — capacity drought returned, T7m unverified)** | **$0.00** |
+| **Total** | **~$29.13** |
+
+$100 cap remaining: ~$70.87 (unchanged — no spend this attempt).
