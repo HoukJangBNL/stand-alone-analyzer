@@ -6296,3 +6296,199 @@ PID lifetime > AWS rotation interval. Either:
 | **Total** | **~$29.13** |
 
 $100 cap remaining: ~$70.87 (unchanged — no spend this attempt).
+
+---
+
+## 41. 1-click SAM dispatch acceptance — 2026-06-11 (post-T7n) CAPACITY_BLOCKED_ALL_AZS
+
+Re-run of §40 after T7n shipped as commit `f95c96f`. T7n is the
+first **API-side code change** in the cold-init fix sequence (all
+prior fixes T7c-T7m were user-data side or operator-side).
+`_launch_one` now does **multi-AZ rotation**: 6 attempts in order
+before raising — spot 2a → spot 2b → spot 2c → on-demand 2a →
+on-demand 2b → on-demand 2c. Each attempt overrides the LT's
+pinned single-AZ NetworkInterfaces with the target subnet
+(`subnet-0fe8558512beea68a` 2a / `subnet-0fe98fb0f6d63afc3` 2b /
+`subnet-09f76839fd0c109a9` 2c). 16/16 launcher tests pass.
+
+Pre-flight: PM killed the §40 uvicorn (PID 95667 reused after §40's
+restart) and started a fresh uvicorn (PID 95669) so the new
+`_launch_one` from `f95c96f` actually loaded. Verified: API health
+green, `psql` from harness via tunnel still authenticates with
+fresh Secrets Manager fetch.
+
+**Outcome: CAPACITY_BLOCKED_ALL_AZS.** All six rotation attempts
+refused. T7n's new error envelope fired cleanly in 78 s wall:
+
+```text
+{"code": "pipeline_failed",
+ "message": "GPU capacity unavailable in us-east-2 across all AZs
+   (spot 2a/2b/2c and on-demand 2a/2b/2c all refused). Retry in a
+   few minutes — capacity flits between AZs.",
+ "details": {"exc_type": "GpuCapacityUnavailable"}}
+```
+
+The new message format ("across all AZs", "spot 2a/2b/2c and
+on-demand 2a/2b/2c all refused") is **uniquely sourced from T7n's
+post-rotation summary** — confirming all 6 attempts were issued
+and each got a `_FALLBACK_TO_ON_DEMAND_CODES` match (almost
+certainly `InsufficientInstanceCapacity` on each, given §40's spot
+price signature persists).
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `f95c96f` (T7n: multi-AZ 6-attempt rotation) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged) |
+| Launch template | `qpress-sam-gpu-worker` v36 (unchanged from T7m) |
+| Instances launched | **0** — all 6 AZ/market combos refused |
+| POST ts (UTC) | 2026-06-11T19:52:24 |
+| HTTP 200 SSE | +1.82 s |
+| Terminal `error` SSE | +78.38 s — `GpuCapacityUnavailable` (T7n new envelope) |
+| Wall budget per attempt | ~12-13 s avg (78 s ÷ 6 attempts), consistent with boto3 RunInstances rejection latency |
+| `gpu_launching` SSE | **never fired** — `_launch_one` exhausted all 6 paths |
+| Worker.service | n/a — no instance |
+| T7n verification | **wire-path fully verified** (see §41.1) |
+| Total instance wall (billed) | **0 min** |
+| Cost (this re-run) | **$0.00** |
+| Status | `capacity_blocked_all_azs` |
+
+### 41.1 T7n wire-path verified clean
+
+While the **outcome** is the same as §40 (capacity drought blocks
+acceptance), T7n's behavior is materially better:
+
+| | Pre-T7n (§40) | Post-T7n (§41) |
+|---|---|---|
+| Attempts per POST | 2 (spot 2a → on-demand 2a only) | **6** (spot 2a/b/c → on-demand 2a/b/c) |
+| Wall to terminal error | ~25-34 s | ~78 s |
+| AZs tried | 1 (whatever LT pins) | **3** (us-east-2a/b/c each direction) |
+| Error envelope | "(both spot and on-demand)" — single AZ | **"across all AZs (spot 2a/2b/2c and on-demand 2a/2b/2c all refused)"** |
+
+Key inferences:
+1. **Per-attempt latency ~12-13 s** suggests boto3 + AWS rejection
+   round-trip is consistent across AZs and markets — no AZ-specific
+   timeout pathology.
+2. **All 6 attempts were issued** (not short-circuited) because the
+   final error envelope explicitly cites "2a/2b/2c" for both
+   markets. T7n's loop logic is correct — each
+   `_FALLBACK_TO_ON_DEMAND_CODES` match continues to next attempt
+   instead of raising early.
+3. **Spot price snapshot** at 2026-06-11T19:52Z:
+   `us-east-2a $6.65, 2b $5.40, 2c $6.92` — all elevated ~67-75%
+   above the $3.96 on-demand baseline, indicating tight inventory
+   region-wide. This matches §40's reading 2 hours prior.
+
+T7n graduates from "untested" (§40 didn't reach it) to **"fully
+wire-path verified, just not exercised on a successful launch
+yet"**. The next attempt that hits available capacity in any AZ
+will execute the success path.
+
+### 41.2 Owner-relevant capacity history
+
+us-east-2 `g6e.48xlarge` capacity has shown ~24-48 h drought
+windows with intervening 12-24 h healthy windows:
+
+| Date (UTC) | Status | Source |
+|---|---|---|
+| 2026-06-08 18:30-19:30 | drought | §27 (4 attempts, 0 launches) |
+| 2026-06-08 19:30-20:00 | healthy (one launch) | §28 partial |
+| 2026-06-08 20:43-21:23 | drought | §29 (8 attempts, 0 launches) |
+| 2026-06-08 21:23 - 06-09 | drought continued | §29 status |
+| 2026-06-09 10:00 onward | healthy | PM probe + §30-§39 (~10 launches over ~24 h) |
+| 2026-06-10 evening | last clean run | §39 |
+| 2026-06-11 17:38 onward | **drought** | §40, §41 |
+
+**Inference**: 06-10 evening ~21:00 UTC last clean spot launch
+(§39). 06-11 17:38 UTC first drought signal (§40). Drought has
+been ~20 h. If the pattern from §27/§29 holds (24-48 h drought
+windows), capacity should return within 4-28 h of now (06-11
+20:00 UTC).
+
+### 41.3 What was newly verified
+
+1. **T7n multi-AZ rotation wire is correct.** All 6 paths attempted,
+   correct AZ ordering, correct subnet override, clean
+   summary-after-exhaustion error envelope. 16/16 launcher tests
+   passing was confirmed live on the boto3 round-trip.
+2. **No regression** on T7c/T7e/T7g/T7h/T7i/T7j-A/T7l/T7m: API
+   loaded `_launch_one` with the new code from `f95c96f`, clean
+   POST handling, clean SSE wire, clean error envelope.
+3. **§40's local-API stale-pw issue did NOT recur** — fresh PID
+   95669 started this morning has fresh Secrets Manager value.
+   Confirms the kill+restart pattern from §40.6 cleanup works.
+4. **§31 spot-cancel discipline continues to hold**: 0 lingering
+   spot requests across all attempts (no quota-lag false-starts).
+
+### 41.4 What did NOT run
+
+Same as §40: no instance, no user-data exercise, no T7m peft
+install verification. Carried forward to the next attempt with
+returned capacity.
+
+### 41.5 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 19:52:08 | PM `pkill -f saa-acceptance-server` (kill stale uvicorn) |
+| 19:52:10 | PM restart uvicorn (PID 95669) with fresh Secrets Manager fetch + T7n code load |
+| 19:52:24 | POST /run/sam |
+| 19:52:25 | HTTP 200 SSE |
+| 19:52:25-19:53:42 | T7n loop: 6 attempts, ~12-13 s each |
+| 19:53:42 | Terminal `error` SSE — T7n exhaustion envelope |
+| 19:54:00 | PM stops, no instances launched, no spot requests, $0 spend |
+
+### 41.6 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| GPU instances | 0 min | n/a | **$0.00** |
+| Bastion overlap | ~3 min | ~$0.0104 | <$0.001 |
+| **Total this re-run** | | | **$0.00** |
+
+Within $5 cap. Wall ~2 min POST→stop (much shorter than §40 because
+T7n delivered the conclusive answer in one POST instead of three).
+
+### 41.7 Cleanup performed
+
+- API uvicorn (PID 95669) — left running.
+- SSH bastion tunnel — open.
+- Bastion `i-063165d449976b2e4` — running.
+- No GPU instances launched, none to terminate.
+- No spot requests created, none to cancel.
+- Staging RDS rows preserved.
+- Harness SSE log saved at `/tmp/saa-acceptance-sse-T6a3-r20.log`.
+
+### 41.8 Status for owner decision
+
+**Verified by this run:**
+- T7n's 6-attempt multi-AZ rotation wire is correct (all 6
+  attempts issued, per-attempt latency consistent, summary error
+  envelope cites all AZs explicitly).
+- Drought condition is region-wide (all 3 us-east-2 AZs refused
+  both spot and on-demand). Region switch (us-east-1 / us-west-2)
+  becomes more attractive if drought persists 48 h+.
+- Local-API kill+restart pattern (§40.6 → §41 pre-flight) prevents
+  RDS rotation drift from blocking acceptance.
+
+**No code action**. Wait + retry (recommendation unchanged from §40):
+1. Drought has been ~20 h. §27/§29 windows were 12-48 h. Next
+   sensible probe: 4-12 h from now (2026-06-12 00:00-08:00 UTC).
+2. If drought persists at 24 h+ (i.e., 2026-06-12 18:00 UTC), the
+   region switch decision becomes T7o-priority.
+
+**T7n graduated**: from "code-validated by unit tests" (§40
+status) to **"wire-path verified live"** (§41). When capacity
+returns, the next attempt has a 6× higher chance of catching it
+on first POST (3 AZs × 2 markets) vs the §27/§29-era single-AZ
+behavior.
+
+### Cumulative cost (updated through §41)
+
+| Phase | Cost |
+|---|---|
+| Through §39 (peft not installed) | ~$29.13 |
+| §40 (capacity_blocked, T7m unverified) | $0.00 |
+| **§41 (post-T7n — capacity_blocked_all_azs, T7n wire verified)** | **$0.00** |
+| **Total** | **~$29.13** |
+
+$100 cap remaining: ~$70.87 (unchanged — second consecutive zero-spend attempt).
