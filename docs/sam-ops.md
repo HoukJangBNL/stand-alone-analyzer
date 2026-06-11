@@ -6492,3 +6492,299 @@ behavior.
 | **Total** | **~$29.13** |
 
 $100 cap remaining: ~$70.87 (unchanged — second consecutive zero-spend attempt).
+
+---
+
+## 42. 1-click SAM dispatch acceptance — 2026-06-11 (post-T7o, g6e.12xlarge) PARTIAL_SUCCESS_NOTIFY_PAYLOAD_TOO_LONG
+
+Re-run of §41 after T7o shipped: LT v37 default flips
+`InstanceType` from `g6e.48xlarge` to `g6e.12xlarge`. Owner
+directive: "g6e.12xlarge 기본값으로 — capacity 풍부". Owner-side
+live probe (instance `i-0d2e15b01ae7371e8`, 2026-06-11 20:02) had
+on-demand `g6e.12xlarge` running in 2 s in us-east-2a.
+
+**Outcome: PARTIAL_SUCCESS_NOTIFY_PAYLOAD_TOO_LONG.** **The actual SAM
+inference work succeeded end-to-end** — 100/100 images, 1405 masks
+written to disk, 0 errors — but the `done` SSE event never reached
+the client because the completion-notify payload exceeded
+Postgres `pg_notify`'s 8000-byte limit.
+
+This is the closest we've ever been to formal SUCCESS. The compute
+contract (POST → SAM inference → masks on disk) is verified working;
+the wire-delivery contract (`done` SSE → client) is the new gap.
+
+| Field | Value |
+|---|---|
+| Branch / HEAD | `main` / `8e4fbed` (head before T7o LT-only revision) |
+| AMI | `ami-0b7ec5ff47a1eff11` (unchanged) |
+| Launch template | `qpress-sam-gpu-worker` v37 (default, T7o: `InstanceType=g6e.12xlarge`) |
+| Instance type | g6e.12xlarge (4× NVIDIA L40S, 192 GB GPU mem) |
+| Spot price | $1.86/hr (vs $5.96 for g6e.48xlarge) |
+| Instances launched | 1 — `i-04d3b71b75a87ef5f` (g6e.12xlarge spot us-east-2a) |
+| POST ts (UTC) | 2026-06-11T20:04:32 |
+| HTTP 200 SSE | +0.87 s |
+| `gpu_launching` SSE | **fired** at +2.83 s (11-for-11) |
+| EC2 `running` | +3 s after launch |
+| user-data steps 1-8 | **all completed** (5-for-5) |
+| `peft` install (T7m) | **VERIFIED** — `/opt/sam/.../venv/bin/python -c "import peft"` returns `0.19.1` |
+| Worker first-boot psycopg auth retries (§38.1 race) | yes, ~30 s of retries before second boot succeeded |
+| Worker registers + claims FRESH job 26 (run_id=36) | ✅ at 20:08:31 |
+| `gpu_ready` SSE | **+238.89 s** with `image_count=100` |
+| per-image `progress` SSE #1 | **+241.91 s** ("starting 4-GPU fan-out across 4 GPUs") |
+| 4-way image distribution (vendor `run_multi_process`) | 4 workers × 25 imgs each |
+| All 4 GPUs at 90-98% util, 8-10 GB VRAM each | verified via SSM nvidia-smi probe |
+| Inference completion logged by worker | 20:13:42 (per-image summary visible in journalctl) |
+| `progress` SSE #3 (vendor's "completed N imgs, M masks") | **+550.47 s** — `"completed 100 images, 1405 masks"` |
+| Worker job result | `{'images': 100, 'masks_total': 1405, 'errors': 0, 'per_image': {...100 entries...}}` |
+| procrastinate job 26 | `succeeded` ✅ |
+| **`done` SSE** | **NEVER FIRED** — see §42.1 |
+| **`runs.completed_at`** | **NEVER UPDATED** (still `running` in RDS) |
+| Total instance wall (billed) | ~11.5 min |
+| Cost (this re-run) | **~$0.36** |
+| Status | `partial_success_notify_payload_too_long` |
+
+### 42.1 Root cause: pg_notify payload > 8000 bytes
+
+`flake_analysis.worker.tasks.run_sam` line 219-222 (immediately
+after the inference returns successfully):
+
+```python
+try:
+    _emit_progress(
+        run_id=run_id,
+        payload={"type": "completed", "result": result},
+    )
+except Exception:
+    logger.exception("completed emit failed for run_id=%s", run_id)
+```
+
+`result` is the full `run_sam_step` return dict, which includes
+`per_image: {<sha256>.png: {n_masks, error}, ...}` for ALL 100
+images. JSON-serialized this exceeds Postgres' fixed 8000-byte
+NOTIFY payload limit:
+
+```text
+psycopg.errors.InvalidParameterValue: payload string too long
+```
+
+The `try/except Exception: logger.exception(...)` swallows the
+error — the worker logs "completed emit failed" but doesn't fail
+the job, doesn't raise, and doesn't fall back to a smaller payload.
+So:
+- procrastinate job: **`succeeded`** (return value flowed correctly)
+- worker_events `sam_task_end`: written ✅ (only `status,
+  masks_total, errors` — small payload)
+- SSE `done` event: **never delivered** to the listening API
+- `runs.completed_at`: never updated (depends on the SSE bridge
+  receiving `completed` to call `record_run_complete`)
+
+The actual work product (1405 masks PNG files in
+`/opt/sam/runs/acceptance-2026-06-08-scan-1/07_sam/masks/<sha>/`)
+is intact on disk. The compute path is verified end-to-end.
+
+### 42.2 What was newly verified — substantial
+
+This run is the **first-ever 100% successful 1-click SAM compute
+run on g6e.12xlarge** in the new harness. Layer-by-layer:
+
+1. **T7o (g6e.12xlarge) capacity is healthy** — first-try spot
+   allocation in 2.83 s in us-east-2a, no on-demand fallback
+   needed. Per the owner directive's premise.
+2. **g6e.12xlarge has 4× NVIDIA L40S, not 1× H200** — relevant for
+   future plans. Vendor `run_multi_process` correctly distributed
+   100 imgs across 4 GPUs (25 each). Per-GPU utilization was
+   90-98% during inference, ~9 GB VRAM each.
+3. **T7m's `deps.done` invalidation works** — `peft==0.19.1`
+   verified installed in the cold-boot venv. The §39 ImportError
+   is permanently fixed.
+4. **T7l's merged_m3 disable works** — vendor `build_sam2_finetuned`
+   LoRA-runtime path engaged (no `KeyError 'model'` from §38).
+5. **Multi-GPU (4-way) spawn + LoRA + per-image inference works
+   end-to-end** — the `peft import → LoraConfig → get_peft_model`
+   chain successfully attached LoRA layers and ran inference on
+   all 100 images.
+6. **SAM model load succeeded** — no §26 cuDNN sublib mismatch on
+   this AMI (cu124 stack from §15 verification holds; v25's
+   cuDNN ABI bug doesn't reproduce here).
+7. **Worker emits per-image journalctl logs** with mask count and
+   filtered-mask count per file. 1405 total masks across 100 imgs
+   = avg 14 masks/img.
+8. **Wall budget**: cold-init ~4 min + worker registration ~1 min
+   + inference 311 s (~5.2 min) ≈ 9-10 min total. Single SAM run
+   on g6e.12xlarge fits comfortably in the 30-min idle budget
+   (~$0.93 cap), and significantly under the 60-min wall cap.
+
+T7c through T7n all hold without regression. This is the longest
+clean dispatcher run in the new harness — only the final SSE
+delivery hop is broken.
+
+### 42.3 Recommended fix (T7p) — trim notify payload
+
+Two-line change in `src/flake_analysis/worker/tasks.py:219-222`:
+
+```python
+# Current (broken when N images is large):
+_emit_progress(
+    run_id=run_id,
+    payload={"type": "completed", "result": result},
+)
+
+# Replacement: send a slim payload that fits under 8000 bytes
+# regardless of image count. Per-image dict is on disk; clients
+# can fetch it via a separate API endpoint if needed.
+slim_result = {
+    "images": result.get("images", 0),
+    "masks_total": result.get("masks_total", 0),
+    "errors": result.get("errors", 0),
+    # Intentionally OMIT result["per_image"] — would blow 8000-byte
+    # pg_notify limit at N≥~80 images. Per-image stats are
+    # written to disk by the runner; consumer fetches from there.
+}
+_emit_progress(
+    run_id=run_id,
+    payload={"type": "completed", "result": slim_result},
+)
+```
+
+Pros: one-shot fix, no schema/API change, no AMI rebake, no LT bump.
+Worker code only.
+Cons: clients that depend on `done.result.per_image` (unlikely —
+the wire was designed for SSE summary, not full data) need to
+read from disk or a future endpoint.
+
+**Side fix (T7q-optional)**: also update `runs.completed_at` from
+the worker side, OR have the API SSE bridge listen for
+`sam_task_end` worker_event in addition to `completed` notify.
+Right now `runs.completed_at` depends on the API receiving the
+`completed` SSE — which won't happen if NOTIFY fails for any
+reason. Belt-and-suspenders.
+
+### 42.4 What did NOT run
+
+- `done` SSE delivery to client (failed at notify layer).
+- `runs.completed_at` update in RDS.
+- Idle-shutdown timer firing (PM terminated manually for cost
+  control; instance was idle for ~3 min after inference completed
+  before PM intervened).
+
+After T7p, the `done` SSE will fire and `runs.completed_at` will
+update via the existing bridge. T7q is operational hardening for
+worker-side completion finality.
+
+### 42.5 Run timeline (UTC)
+
+| t | Event |
+|---|---|
+| 20:04:32 | POST /run/sam |
+| 20:04:33 | HTTP 200 SSE (+0.87 s) |
+| 20:04:35 | `gpu_launching` `instance_id=i-04d3b71b75a87ef5f` (+2.83 s) |
+| 20:04:35 | EC2 `running` (g6e.12xlarge spot us-east-2a) |
+| ~20:06:00 | SSM Online; cloud-init starts |
+| ~20:07:00-08:00 | user-data steps 4-8 complete (T7m peft install runs ~5 s, idle-timeout=1800 in env) |
+| ~20:07:50 | First worker.service boot — psycopg auth retries (§38.1 race) |
+| 20:08:19 | First worker boot exits with `PoolTimeout` |
+| 20:08:31 | Second worker boot starts; **registers with procrastinate** |
+| 20:08:31 | Worker claims **fresh** job 26 (run_id=36) |
+| 20:08:31 | `gpu_ready` SSE fired (+238.89 s) — `image_count=100` |
+| 20:08:34 | progress SSE #1 (+241.91 s) — `"starting 4-GPU fan-out across 4 GPUs"` |
+| 20:08:35 | Vendor logs "Distributing 100 images across 4 workers" — 25 imgs/GPU |
+| ~20:09:00-13:42 | Per-image inference (~3.13 s/img on L40S, 4-way parallel) |
+| 20:13:42 | Worker logs `[Worker N] Completed processing 25 images` for all 4 |
+| 20:13:43 | `_emit_progress(completed)` raises `InvalidParameterValue: payload string too long` |
+| 20:13:43 | progress SSE #3 (+550.47 s) — `"completed 100 images, 1405 masks"` (this is from VENDOR's pre-completion progress, not the failed `completed` emit) |
+| 20:13:43 | procrastinate job 26 logs `ended with status: Success, lasted 311.633 s` |
+| 20:13:43 | Worker emits `sam_task_end` worker_event (slim, fits pg_notify) ✅ |
+| 20:14-16:30 | API SSE stream continues to wait — `done` event never arrives |
+| 20:16:30 | PM `terminate-instances`, `cancel-spot sir-gxy7kdnh` |
+
+### 42.6 Cost ledger
+
+| Resource | Wall | $/hr | Cost |
+|---|---|---|---|
+| g6e.12xlarge spot (us-east-2a) | ~11.5 min | ~$1.86 | **~$0.36** |
+| Bastion overlap | ~13 min | ~$0.0104 | ~$0.002 |
+| **Total this re-run** | | | **~$0.36** |
+
+Within the $5 hard cap. Wall ~12 min POST→stop. Significantly
+cheaper than the §38-§39 g6e.48xlarge attempts (~$0.55/0.52),
+exactly per the owner-side cost analysis.
+
+### 42.7 Cleanup performed
+
+- API uvicorn (PID 95669) — left running.
+- SSH bastion tunnel — open on 5433.
+- Bastion `i-063165d449976b2e4` — running.
+- GPU instance `i-04d3b71b75a87ef5f` — terminated 20:16:30.
+- Spot request `sir-gxy7kdnh` explicitly cancelled.
+- Owner's earlier capacity-probe spot request `sir-9ax7h2xk` was
+  found `active`/fulfilled at start of this run; PM cancelled it
+  before our POST (instance `i-0d2e15b01ae7371e8` was already
+  `shutting-down`, so cancel was the right call to avoid
+  quota-lag). State convergence took a few minutes; no impact on
+  our launch.
+- Job 26 (run_id=36) is `succeeded` in procrastinate but
+  `running` in `runs` table — operator should manually
+  `UPDATE runs SET status='completed', completed_at=NOW() WHERE
+  id=36;` once T7p ships, OR leave for the §43 retry to overwrite
+  via the proper SSE wire.
+- Staging RDS rows preserved.
+- Harness SSE log: `/tmp/saa-acceptance-sse-T6a3-r21.log`.
+- The mask outputs at `/opt/sam/runs/acceptance-2026-06-08-scan-1/07_sam/`
+  are gone (instance terminated). After T7p re-run, masks land
+  back on a fresh instance — that's expected per the dispatcher
+  design (instances are ephemeral, results flow back via
+  `runs.metrics` or S3 sync, both of which depend on the
+  `completed` event firing).
+
+### 42.8 Status for owner decision
+
+**Verified by this run (THE compute path works):**
+- T7o g6e.12xlarge has healthy capacity in us-east-2a; T7n
+  multi-AZ rotation will catch any AZ-level drought going forward.
+- T7m peft install is real and verified at runtime.
+- Multi-GPU (4-way) LoRA inference path works on cu124 cuDNN
+  stack — no §26 cuDNN sublib mismatch on this AMI.
+- 100-image acceptance dataset processed in 5.2 min wall on
+  4× L40S (~3.13 s/img, comparable to §15 single-H100 baseline
+  of ~3.98 s/img — slightly faster due to 4-way parallel after
+  per-image overhead amortizes).
+- 1405 masks written to disk (avg 14 masks/img) — consistent with
+  graphene flake density on the scan6-100 set.
+- T7c through T7n all hold without regression.
+
+**New gap surfaced — `done` SSE delivery:**
+- `pg_notify` 8000-byte payload limit hit by 100-image `per_image`
+  dict in `completed` event. Worker logs the failure but
+  swallows it.
+- Frontend / API never receives the `done` event.
+- `runs.completed_at` never updates in RDS.
+
+**Next action — T7p (1-line worker fix, no AMI rebake)**:
+1. Trim the `completed` SSE notify payload to omit `per_image`
+   (`src/flake_analysis/worker/tasks.py:219-222`). Per-image stats
+   stay on disk and in the runner's return value (logged via
+   procrastinate's job result).
+2. Push commit; the API/worker code is loaded fresh on every cold
+   boot via `uv sync` (T7m), so no LT bump needed.
+3. Re-run §42 acceptance. Expected outcome: full **SUCCESS** —
+   `done` SSE arrives, frontend handler fires, `runs.completed_at`
+   gets stamped, idle-timer fires after 10 min, instance
+   auto-terminates.
+
+**Optional T7q (post-SUCCESS hardening, defer)**:
+- API SSE bridge falls back to listening for `sam_task_end`
+  worker_event when `completed` NOTIFY doesn't arrive within N s.
+- OR: worker writes `runs.completed_at` directly via the shared
+  DB connection (eliminates dependency on NOTIFY for
+  finality).
+
+### Cumulative cost (updated through §42)
+
+| Phase | Cost |
+|---|---|
+| Through §39 (peft not installed) | ~$29.13 |
+| §40 + §41 (capacity drought × 2) | $0.00 |
+| **§42 (post-T7o g6e.12xlarge — partial_success, payload limit)** | **~$0.36** |
+| **Total** | **~$29.49** |
+
+$100 cap remaining: ~$70.51.
