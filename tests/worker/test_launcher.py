@@ -637,3 +637,294 @@ def test_launch_one_falls_back_on_spot_max_price_too_low():
     ec2 = _FakeEc2()
     assert _launch_one(ec2) == "i-od-after-low-bid"
     assert ec2.attempt == 2
+
+
+# ---------------------------------------------------------------------------
+# T7 — On-demand error tolerance (bug fix 2026-06-12)
+# ---------------------------------------------------------------------------
+
+
+def test_launch_one_continues_ladder_on_max_spot_count_during_ondemand():
+    """Bug fix: MaxSpotInstanceCountExceeded can leak onto on-demand
+    calls when recent spot requests haven't cleared. This is a transient
+    account-level limit that should NOT kill the ladder — step down to
+    the next instance type.
+
+    Observed 2026-06-12: g6e.48xlarge spot exhausted (3 AZs), then first
+    on-demand call raised MaxSpotInstanceCountExceeded and killed the
+    ladder instead of trying 24xlarge."""
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        INSTANCE_TYPE_LADDER,
+    )
+
+    quota_err = ClientError(
+        {"Error": {"Code": "MaxSpotInstanceCountExceeded",
+                   "Message": "Max spot instance count exceeded"}},
+        "RunInstances",
+    )
+
+    calls: list[dict] = []
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            calls.append(kwargs)
+            # First instance type (48xlarge): spot 3 AZs fail (1-3),
+            # then all 3 on-demand AZs raise the quota error (4-6).
+            # Should step down to next tier instead of propagating.
+            if self.attempt <= 3:
+                # Spot capacity error
+                raise ClientError(
+                    {"Error": {"Code": "InsufficientInstanceCapacity",
+                               "Message": "no capacity"}},
+                    "RunInstances",
+                )
+            if 4 <= self.attempt <= 6:
+                # On-demand quota leak in all AZs — should continue ladder
+                raise quota_err
+            # Succeed on first attempt of next tier (spot)
+            return {"Instances": [{"InstanceId": "i-fallback-tier"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+
+    # Should have stepped down to next tier (not raised)
+    assert instance_id == "i-fallback-tier"
+    # Attempts: 48xlarge spot×3 + 48xlarge on-demand×3 (all failed) +
+    # 24xlarge spot×1 (succeeds)
+    assert ec2.attempt == 7
+    # Verify the ladder progressed to the 2nd tier on attempt 7
+    assert calls[6]["InstanceType"] == INSTANCE_TYPE_LADDER[1]
+
+
+def test_launch_one_propagates_vcpu_limit_exceeded_immediately():
+    """VcpuLimitExceeded is a hard account quota ceiling. If the account
+    is at its limit, ALL tiers will fail with the same error. Stepping
+    down would burn 24 attempts then mask an actionable "request quota
+    increase" signal behind a vague GpuCapacityUnavailable. Propagate
+    immediately so the operator sees the real error."""
+    from flake_analysis.worker.launcher import _launch_one
+
+    vcpu_err = ClientError(
+        {"Error": {"Code": "VcpuLimitExceeded",
+                   "Message": "Account vCPU limit exceeded"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            # Spot attempts exhaust capacity
+            if self.attempt <= 3:
+                raise ClientError(
+                    {"Error": {"Code": "InsufficientInstanceCapacity",
+                               "Message": "no capacity"}},
+                    "RunInstances",
+                )
+            # On-demand hits hard quota — must propagate
+            raise vcpu_err
+
+    ec2 = _FakeEc2()
+    with pytest.raises(ClientError) as exc_info:
+        _launch_one(ec2)
+
+    assert exc_info.value.response["Error"]["Code"] == "VcpuLimitExceeded"
+    # Should fail on first on-demand attempt (4th total), no ladder descent
+    assert ec2.attempt == 4
+
+
+def test_launch_one_propagates_instance_limit_exceeded_immediately():
+    """InstanceLimitExceeded is a hard account instance-count quota.
+    Same rationale as VcpuLimitExceeded — propagate immediately for
+    operator diagnosis, not masked behind GpuCapacityUnavailable."""
+    from flake_analysis.worker.launcher import _launch_one
+
+    limit_err = ClientError(
+        {"Error": {"Code": "InstanceLimitExceeded",
+                   "Message": "Instance limit for this family"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            if self.attempt <= 3:
+                raise ClientError(
+                    {"Error": {"Code": "InsufficientInstanceCapacity",
+                               "Message": "no capacity"}},
+                    "RunInstances",
+                )
+            raise limit_err
+
+    ec2 = _FakeEc2()
+    with pytest.raises(ClientError) as exc_info:
+        _launch_one(ec2)
+
+    assert exc_info.value.response["Error"]["Code"] == "InstanceLimitExceeded"
+    assert ec2.attempt == 4
+
+
+def test_launch_one_still_propagates_iam_errors_on_ondemand():
+    """Genuine bugs (UnauthorizedOperation, InvalidParameterValue) must
+    still propagate immediately on on-demand calls — don't mask real
+    misconfigurations."""
+    from flake_analysis.worker.launcher import _launch_one
+
+    iam_err = ClientError(
+        {"Error": {"Code": "UnauthorizedOperation",
+                   "Message": "IAM not allowed"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            # Spot attempts work until we hit on-demand
+            if self.attempt <= 3:
+                raise ClientError(
+                    {"Error": {"Code": "InsufficientInstanceCapacity",
+                               "Message": "no capacity"}},
+                    "RunInstances",
+                )
+            # On-demand IAM error — must propagate
+            raise iam_err
+
+    ec2 = _FakeEc2()
+    with pytest.raises(ClientError) as exc_info:
+        _launch_one(ec2)
+
+    assert exc_info.value.response["Error"]["Code"] == "UnauthorizedOperation"
+    # Should fail on first on-demand attempt (4th total)
+    assert ec2.attempt == 4
+
+
+def test_launch_one_still_propagates_invalid_parameter_on_ondemand():
+    """InvalidParameterValue indicates a bug in our template or override
+    logic — must propagate immediately, not continue the ladder."""
+    from flake_analysis.worker.launcher import _launch_one
+
+    param_err = ClientError(
+        {"Error": {"Code": "InvalidParameterValue",
+                   "Message": "Bad subnet ID"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            if self.attempt <= 3:
+                raise ClientError(
+                    {"Error": {"Code": "InsufficientInstanceCapacity",
+                               "Message": "no capacity"}},
+                    "RunInstances",
+                )
+            raise param_err
+
+    ec2 = _FakeEc2()
+    with pytest.raises(ClientError) as exc_info:
+        _launch_one(ec2)
+
+    assert exc_info.value.response["Error"]["Code"] == "InvalidParameterValue"
+    assert ec2.attempt == 4
+
+
+def test_launch_one_raises_capacity_unavailable_after_full_ladder_exhaustion():
+    """When MaxSpotInstanceCountExceeded (or other tolerated error) occurs
+    on EVERY attempt across the full ladder (4 tiers × 3 AZs × 2 markets
+    = 24 attempts), _launch_one must raise GpuCapacityUnavailable (not
+    the raw boto ClientError) to converge to the clean terminal state."""
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        GpuCapacityUnavailable,
+        INSTANCE_TYPE_LADDER,
+        SUBNETS_BY_AZ,
+    )
+
+    quota_err = ClientError(
+        {"Error": {"Code": "MaxSpotInstanceCountExceeded",
+                   "Message": "Max spot instance count exceeded"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            # Every single attempt refuses with the tolerated error
+            raise quota_err
+
+    ec2 = _FakeEc2()
+    with pytest.raises(GpuCapacityUnavailable):
+        _launch_one(ec2)
+
+    # Full ladder: 4 tiers × 3 AZs × 2 markets = 24 attempts
+    expected_attempts = len(INSTANCE_TYPE_LADDER) * len(SUBNETS_BY_AZ) * 2
+    assert ec2.attempt == expected_attempts
+
+
+def test_launch_one_recovers_mid_ladder_after_tolerated_errors():
+    """Tolerated error (MaxSpotInstanceCountExceeded) occurs deeper in
+    the ladder (not just tier 1). Tier 1 spot exhausts all AZs with
+    capacity errors, tier 1 on-demand hits the tolerated error in all
+    AZs, then tier 2 spot SUCCEEDS. Assert it returns the tier-2
+    instance id and correct InstanceType."""
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        INSTANCE_TYPE_LADDER,
+    )
+
+    quota_err = ClientError(
+        {"Error": {"Code": "MaxSpotInstanceCountExceeded",
+                   "Message": "Max spot instance count exceeded"}},
+        "RunInstances",
+    )
+
+    calls: list[dict] = []
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            calls.append(kwargs)
+            # Tier 1 (48xlarge): spot 3 AZs fail with capacity (1-3)
+            if self.attempt <= 3:
+                raise ClientError(
+                    {"Error": {"Code": "InsufficientInstanceCapacity",
+                               "Message": "no capacity"}},
+                    "RunInstances",
+                )
+            # Tier 1 on-demand 3 AZs fail with tolerated error (4-6)
+            if 4 <= self.attempt <= 6:
+                raise quota_err
+            # Tier 2 (24xlarge) spot succeeds on first AZ (attempt 7)
+            return {"Instances": [{"InstanceId": "i-tier2-recovery"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+
+    assert instance_id == "i-tier2-recovery"
+    # Verify ladder progressed to tier 2 and succeeded on first spot attempt
+    assert ec2.attempt == 7
+    assert calls[6]["InstanceType"] == INSTANCE_TYPE_LADDER[1]
+    # Verify it's a spot call (no InstanceMarketOptions override)
+    assert "InstanceMarketOptions" not in calls[6]

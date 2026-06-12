@@ -319,6 +319,46 @@ _SPOT_FAILURE_CODES = frozenset({
     "Unsupported",
 })
 
+# On-demand transient capacity/quota errors that should continue the
+# ladder (step down to smaller instance type) rather than abort. These
+# are distinct from genuine bugs (IAM, malformed template) and hard
+# account quotas which must propagate immediately.
+#
+# Bug context (2026-06-12): observed MaxSpotInstanceCountExceeded raised
+# during on-demand RunInstances when recent spot requests hadn't cleared.
+# AWS surfaces account-level spot quota state even on on-demand calls,
+# and the spot-only error codes can leak. Without this tolerance, the
+# launcher kills the ladder on the first on-demand call instead of
+# stepping down to smaller instance types that might succeed.
+#
+# - InsufficientInstanceCapacity: genuine capacity shortage. Stepping
+#   down to a smaller tier (fewer GPUs) or trying next AZ may succeed.
+# - MaxSpotInstanceCountExceeded: account spot-limit residue leaking
+#   onto on-demand calls; transient, continue ladder.
+# - SpotInstanceCountLimitExceeded: alternate name for spot quota leak.
+#
+# NOT included (must propagate immediately):
+# - UnauthorizedOperation: IAM misconfiguration; ladder can't fix this.
+# - InvalidParameterValue: bug in our template/override logic; not transient.
+# - InvalidParameterCombination: also a code bug, not a capacity issue.
+# - VcpuLimitExceeded: hard account vCPU quota ceiling. If the account
+#   is at its limit, ALL tiers will fail with the same error. Stepping
+#   down burns 24 attempts then raises GpuCapacityUnavailable, masking
+#   an actionable "request quota increase" signal. Propagate immediately
+#   so the operator sees the real error.
+# - InstanceLimitExceeded: hard account instance-count quota. Same
+#   rationale as VcpuLimitExceeded — propagate for operator diagnosis.
+#
+# General rule: only transient capacity / spot-quota-leak errors belong
+# here. Hard account quotas (Vcpu/InstanceLimitExceeded) and
+# configuration bugs (IAM, subnet, AMI, parameter validation) must
+# surface immediately for operator diagnosis.
+_ONDEMAND_FALLBACK_CODES = frozenset({
+    "InsufficientInstanceCapacity",
+    "MaxSpotInstanceCountExceeded",
+    "SpotInstanceCountLimitExceeded",
+})
+
 
 def _try_run_instances(
     ec2: Any,
@@ -363,7 +403,7 @@ def _try_run_instances(
         resp = ec2.run_instances(**kwargs)
     except ClientError as e:
         code = (e.response.get("Error") or {}).get("Code", "")
-        if on_demand and code == "InsufficientInstanceCapacity":
+        if on_demand and code in _ONDEMAND_FALLBACK_CODES:
             return None  # try a different AZ or instance type
         if not on_demand and code in _SPOT_FAILURE_CODES:
             return None  # try a different AZ, market, or instance type
