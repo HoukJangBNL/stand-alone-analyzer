@@ -1,8 +1,16 @@
 // web/src/lib/uploadOrchestrator.ts
 import { useUploadStore, type UploadFile } from '@/state/uploadSlice'
 import { sha256Hex } from '@/lib/sha256'
-import { presignImage, putToS3, completeImage, type PresignBody } from '@/api/upload'
+import { presignImage, putToS3, completeImage, finalizeScan, type PresignBody } from '@/api/upload'
 import { isTiffFilename, readTiffDimensions } from '@/lib/tiffDimensions'
+import { toast } from 'sonner'
+
+// Optional callback for query invalidation. The modal will set this to
+// invalidate the scans list after auto-finalize succeeds.
+let onFinalizeSuccess: (() => void) | null = null
+export function setFinalizeSuccessCallback(cb: (() => void) | null): void {
+  onFinalizeSuccess = cb
+}
 
 export interface OrchestratorOptions {
   concurrency?: number
@@ -52,6 +60,8 @@ export class Orchestrator {
   private readonly concurrency: number
   private readonly controllers = new Map<string, AbortController>()
   private cancelled = false
+  /** Track which scans have been auto-finalized to avoid double-fire. */
+  private finalized = new Set<string>()
 
   constructor(opts: OrchestratorOptions = {}) {
     this.concurrency = opts.concurrency ?? 8
@@ -81,6 +91,11 @@ export class Orchestrator {
     }
     for (let i = 0; i < this.concurrency; i++) workers.push(next())
     await Promise.all(workers)
+
+    // Auto-finalize after successful completion: if all files are done (zero
+    // failures), call finalizeScan. This works even if the modal is closed
+    // because the orchestrator is a singleton and persists in the background.
+    await this.maybeAutoFinalize(scanId)
   }
 
   /** Cancel every in-flight fetch and stop new work. */
@@ -115,6 +130,42 @@ export class Orchestrator {
     if (!scanId) throw new Error('Orchestrator.retry: scanId not set')
     store.patch(uid, { status: 'queued', error: null, progress: 0, request_id: null })
     await this.runOne(scanId, uid)
+  }
+
+  /**
+   * Auto-finalize: if all files are done (zero failures), call finalizeScan.
+   * Guard against double-fire with a per-scanId latch. Called after runAll
+   * completes (including retryAllFailed path).
+   */
+  private async maybeAutoFinalize(scanId: string): Promise<void> {
+    // Already finalized this scan → skip
+    if (this.finalized.has(scanId)) return
+
+    const store = useUploadStore.getState()
+    const allDone = store.order.length > 0 && store.order.every((uid) => store.files[uid]?.status === 'done')
+    const anyFailed = store.order.some((uid) => store.files[uid]?.status === 'failed')
+
+    if (!allDone || anyFailed) {
+      // Not ready: either still has queued/uploading rows, or has failures.
+      // Don't finalize. The user will retry failures and then auto-finalize
+      // will fire again on the next runAll.
+      return
+    }
+
+    // All done, zero failures → finalize
+    this.finalized.add(scanId)
+    try {
+      await finalizeScan(scanId, undefined)
+      toast.success('Scan finalized — ready')
+      // Invalidate the scans list query if a callback was registered (by the
+      // modal or the scan table component).
+      onFinalizeSuccess?.()
+    } catch (e: unknown) {
+      const msg = (e as { message?: string })?.message ?? 'finalize failed'
+      toast.error(msg)
+      // On error, clear the latch so a retry can attempt finalize again
+      this.finalized.delete(scanId)
+    }
   }
 
   private async runOne(scanId: string, uid: string): Promise<void> {

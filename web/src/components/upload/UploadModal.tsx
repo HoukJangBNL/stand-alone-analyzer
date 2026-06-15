@@ -7,7 +7,7 @@ import { FileDropzone } from './FileDropzone'
 import { ProgressList } from './ProgressList'
 import { useUploadStore, resetUploadStore } from '@/state/uploadSlice'
 import { createScan, finalizeScan } from '@/api/upload'
-import { getOrchestrator, resetOrchestrator } from '@/lib/uploadOrchestrator'
+import { getOrchestrator, resetOrchestrator, setFinalizeSuccessCallback } from '@/lib/uploadOrchestrator'
 
 interface Props {
   projectId: string
@@ -89,6 +89,21 @@ export function UploadModal({ projectId, open, onClose }: Props) {
     }
   }, [open, running])
 
+  // Register the query-invalidation callback for auto-finalize. This runs when
+  // the modal mounts/opens so the orchestrator can invalidate the scans list
+  // after a successful auto-finalize (even if the modal is closed).
+  useEffect(() => {
+    if (open) {
+      setFinalizeSuccessCallback(() => {
+        qc.invalidateQueries({ queryKey: ['scans', 'list', projectId] })
+      })
+    }
+    return () => {
+      // Clean up the callback when the modal unmounts
+      setFinalizeSuccessCallback(null)
+    }
+  }, [open, projectId, qc])
+
   // Task 2: warn when closing tab/window mid-upload. Browser uploads only
   // continue while the tab is open; closing the tab stops them.
   useEffect(() => {
@@ -127,12 +142,23 @@ export function UploadModal({ projectId, open, onClose }: Props) {
   const finalizeMut = useMutation({
     mutationFn: () => finalizeScan(scanId!, undefined),
     onSuccess: () => {
-      toast.success('Scan finalized — ready')
+      // Auto-finalize may have already fired (toast shown from orchestrator).
+      // If the user clicks the manual Finalize button as a fallback or the scan
+      // is already ready on the server, this is a no-op. Invalidate the scan
+      // list to reflect the new state and close the modal.
       qc.invalidateQueries({ queryKey: ['scans', 'list', projectId] })
       handleClose()
     },
     onError: (e: unknown) => {
-      toast.error((e as { message?: string })?.message ?? 'finalize failed')
+      // Don't toast if the error is "already finalized" or similar. Check if
+      // the scan is already ready on the server (finalizeScan returns 400 if
+      // already finalized). For now, just log it; the orchestrator already
+      // handled success toasts.
+      const msg = (e as { message?: string })?.message ?? 'finalize failed'
+      // Only toast if it's a real error (not a benign "already finalized")
+      if (!msg.toLowerCase().includes('already') && !msg.toLowerCase().includes('finalized')) {
+        toast.error(msg)
+      }
     },
   })
 

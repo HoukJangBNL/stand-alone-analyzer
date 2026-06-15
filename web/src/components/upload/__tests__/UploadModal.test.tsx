@@ -79,9 +79,57 @@ describe('UploadModal', () => {
 
     await waitFor(() => expect(screen.getAllByText(/done/i).length).toBeGreaterThan(0))
 
-    // Finalize
-    await userEvent.click(await screen.findByTestId('upload-modal-finalize'))
+    // Auto-finalize: after runAll completes with all files done, finalizeScan is
+    // called automatically (no manual button click needed).
     await waitFor(() => expect(finalSpy).toHaveBeenCalledWith('scan_123', undefined))
+  })
+
+  it('auto-finalize does NOT fire when any file failed; shows failed list', async () => {
+    vi.spyOn(upload, 'createScan').mockResolvedValue({ scan_id: 'scan_123' })
+    vi.spyOn(sha, 'sha256Hex').mockResolvedValue('a'.repeat(64))
+    let callCount = 0
+    vi.spyOn(upload, 'presignImage').mockImplementation(async () => {
+      // First file succeeds, second fails
+      callCount++
+      if (callCount === 1) {
+        return { put_url: 'http://s3.fake/p', headers: {}, upload_item_id: 'ui_1' }
+      }
+      throw new Error('presign failed')
+    })
+    vi.spyOn(upload, 'putToS3').mockResolvedValue(undefined)
+    vi.spyOn(upload, 'completeImage').mockResolvedValue({ image_id: 'img_1' })
+    const finalSpy = vi.spyOn(upload, 'finalizeScan').mockResolvedValue({ status: 'ready' })
+
+    const onClose = vi.fn()
+    render(wrap(<UploadModal projectId="p1" open onClose={onClose} />))
+
+    await userEvent.type(screen.getByTestId('scan-form-name'), 'scan-A')
+    const matInput = await screen.findByTestId('material-combobox-input')
+    await userEvent.click(matInput)
+    await userEvent.click(await screen.findByTestId('material-combobox-option-graphene'))
+
+    const dz = screen.getByTestId('file-dropzone')
+    const f1 = new File([new Uint8Array(8)], 'tile_0_0.tif')
+    const f2 = new File([new Uint8Array(8)], 'tile_0_1.tif')
+    fireEvent.drop(dz, { dataTransfer: { files: [f1, f2], items: [], types: ['Files'] } })
+
+    await waitFor(() =>
+      expect((screen.getByTestId('upload-modal-start') as HTMLButtonElement).disabled).toBe(false),
+    )
+    await userEvent.click(screen.getByTestId('upload-modal-start'))
+
+    // Wait for upload to settle: 1 done, 1 failed
+    await waitFor(() => {
+      const counts = screen.getByTestId('upload-modal-counts')
+      expect(counts.textContent).toMatch(/1 done/)
+      expect(counts.textContent).toMatch(/1 failed/)
+    })
+
+    // Finalize must NOT have been called (has failures)
+    expect(finalSpy).not.toHaveBeenCalled()
+
+    // Retry-all button should appear
+    expect(await screen.findByTestId('upload-modal-retry-all')).toBeTruthy()
   })
 
   it('renders aggregate counter (done · uploading · failed · queued of total)', async () => {
@@ -285,6 +333,58 @@ describe('UploadModal', () => {
       expect(useUploadStore.getState().scanId).not.toBe('s999')
       expect(toastSuccessSpy).not.toHaveBeenCalled()
     })
+  })
+
+  it('retrying failures then auto-finalizes on success', async () => {
+    vi.spyOn(upload, 'createScan').mockResolvedValue({ scan_id: 'scan_123' })
+    vi.spyOn(sha, 'sha256Hex').mockResolvedValue('a'.repeat(64))
+    let attemptCount = 0
+    vi.spyOn(upload, 'presignImage').mockImplementation(async () => {
+      attemptCount++
+      // First attempt: fail. Second attempt (retry): succeed.
+      if (attemptCount === 1) throw new Error('presign failed')
+      return { put_url: 'http://s3.fake/p', headers: {}, upload_item_id: 'ui_1' }
+    })
+    vi.spyOn(upload, 'putToS3').mockResolvedValue(undefined)
+    vi.spyOn(upload, 'completeImage').mockResolvedValue({ image_id: 'img_1' })
+    const finalSpy = vi.spyOn(upload, 'finalizeScan').mockResolvedValue({ status: 'ready' })
+
+    const onClose = vi.fn()
+    render(wrap(<UploadModal projectId="p1" open onClose={onClose} />))
+
+    await userEvent.type(screen.getByTestId('scan-form-name'), 'scan-A')
+    const matInput = await screen.findByTestId('material-combobox-input')
+    await userEvent.click(matInput)
+    await userEvent.click(await screen.findByTestId('material-combobox-option-graphene'))
+
+    const dz = screen.getByTestId('file-dropzone')
+    const f1 = new File([new Uint8Array(8)], 'tile_0_0.tif')
+    fireEvent.drop(dz, { dataTransfer: { files: [f1], items: [], types: ['Files'] } })
+
+    await waitFor(() =>
+      expect((screen.getByTestId('upload-modal-start') as HTMLButtonElement).disabled).toBe(false),
+    )
+    await userEvent.click(screen.getByTestId('upload-modal-start'))
+
+    // First attempt fails
+    await waitFor(() => {
+      const counts = screen.getByTestId('upload-modal-counts')
+      expect(counts.textContent).toMatch(/1 failed/)
+    })
+
+    // Finalize not called yet
+    expect(finalSpy).not.toHaveBeenCalled()
+
+    // Retry the failed file
+    const retryBtn = await screen.findByTestId('upload-modal-retry-all')
+    await userEvent.click(retryBtn)
+
+    // Second attempt succeeds → auto-finalize fires
+    await waitFor(() => {
+      const counts = screen.getByTestId('upload-modal-counts')
+      expect(counts.textContent).toMatch(/1 done/)
+    })
+    await waitFor(() => expect(finalSpy).toHaveBeenCalledWith('scan_123', undefined))
   })
 
   // ---- Retry-all batch button (Task D4) ----
