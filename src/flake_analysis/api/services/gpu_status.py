@@ -224,9 +224,21 @@ def _probe_sync(ec2: Any, *, now: datetime) -> GpuPoolStatus:
             spot_prices_usd_per_hr=prices,
         )
 
+    # No fresh spot prices, but the launcher guarantees on-demand fallback
+    # across a 4-tier instance-type ladder (INSTANCE_TYPE_LADDER in
+    # worker/launcher.py) with multi-AZ retries. On-demand is almost always
+    # available outside of multi-region AWS outages. Return "ready" to
+    # reflect real launchability — the dispatcher will fall back to
+    # on-demand on the next run.
+    #
+    # "unavailable_capacity" is reserved for situations where we have
+    # evidence that NOTHING can launch (e.g., dry-run RunInstances across
+    # the ladder returns InsufficientInstanceCapacity for all tiers in all
+    # markets). Since that's too expensive/slow for a status probe, we
+    # don't claim unavailability here.
     return GpuPoolStatus(
-        state="unavailable_capacity",
-        detail="no spot prices published in last 1h",
+        state="ready",
+        detail="no live worker — will launch on-demand on next run",
         checked_at=now,
         spot_prices_usd_per_hr=None,
     )

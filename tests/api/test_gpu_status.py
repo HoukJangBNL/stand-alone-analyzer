@@ -1,19 +1,27 @@
 """GET /gpu/status — lazy probe + 30s memory cache.
 
-Verifies state derivation order (running > launching > ready >
-unavailable_capacity > unknown), cache TTL, and auth gating. Stubs
-boto3 EC2 calls via botocore.stub.Stubber so tests don't hit AWS.
+Verifies state derivation order (running > launching > ready > unknown),
+cache TTL, and auth gating. Stubs boto3 EC2 calls via botocore.stub.Stubber
+so tests don't hit AWS.
 
 State derivation order (first match wins):
   1. running                — describe_instances has any pending|running
                                instance with Project=qpress-sam, Role=worker
                                in 'running' state.
   2. launching              — same query, but only 'pending' instances.
-  3. ready                  — no live instance + describe_spot_price_history
-                               returns prices in last 1h across AZs.
-  4. unavailable_capacity   — no live instance + spot price history empty
-                               OR all timestamps stale (>1h old).
-  5. unknown                — botocore ClientError or other AWS failure.
+  3. ready                  — no live instance. Checks spot prices for
+                               display/informational purposes, but ALWAYS
+                               returns 'ready' because the launcher guarantees
+                               on-demand fallback across a 4-tier ladder with
+                               multi-AZ retries. Stale/empty spot prices do
+                               NOT mean unavailable — they mean "will launch
+                               on-demand on next run".
+  4. unknown                — botocore ClientError or other AWS failure.
+
+Note: 'unavailable_capacity' is reserved for situations where we have
+evidence that NOTHING can launch (e.g., dry-run RunInstances across the
+ladder fails for all tiers/markets). Since that's too expensive/slow for
+a status probe, we don't claim unavailability.
 """
 from __future__ import annotations
 
@@ -168,8 +176,14 @@ async def test_state_ready_when_no_instance_recent_prices(stubbed_ec2):
 
 
 @pytest.mark.asyncio
-async def test_state_unavailable_capacity_when_prices_stale(stubbed_ec2):
-    """No live instance + spot price history empty → state='unavailable_capacity'."""
+async def test_state_ready_when_prices_stale_ondemand_fallback(stubbed_ec2):
+    """No live instance + spot price history empty → state='ready' (on-demand fallback).
+
+    The launcher guarantees on-demand fallback across a 4-tier instance-type
+    ladder with multi-AZ retries. Stale/empty spot prices don't mean
+    "unavailable" — they mean "will launch on-demand". Return 'ready' to
+    reflect real launchability.
+    """
     stubbed_ec2.add_response(
         "describe_instances",
         _describe_instances_response(),
@@ -184,8 +198,9 @@ async def test_state_unavailable_capacity_when_prices_stale(stubbed_ec2):
 
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["state"] == "unavailable_capacity"
-    assert "spot prices" in body["detail"].lower() or "capacity" in body["detail"].lower()
+    assert body["state"] == "ready"
+    assert "on-demand" in body["detail"].lower()
+    assert body["spot_prices_usd_per_hr"] is None
     stubbed_ec2.assert_no_pending_responses()
 
 
