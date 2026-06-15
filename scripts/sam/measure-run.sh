@@ -29,6 +29,7 @@
 #     [--cost-cap-usd 5] \
 #     [--wall-cap-min 60] \
 #     [--ami-id ami-092ae5880cb9cf957] \
+#     [--cancel-stale-jobs] \
 #     [--dryrun]
 
 set -euo pipefail
@@ -51,6 +52,7 @@ RUN_ID="${RUN_ID:-${RUN_ID_DEFAULT}}"
 SCAN_ID="${SCAN_ID:-0}"
 DRYRUN=0
 EXPECTED_IMAGE_COUNT=""  # optional: if set, phase-6 asserts dataset count == this value
+CANCEL_STALE_JOBS=0  # flag: if 1, delete all todo jobs from gpu queue before defer
 
 WEIGHTS=""
 DATASET=""
@@ -67,6 +69,7 @@ while [[ $# -gt 0 ]]; do
         --wall-cap-min) WALL_CAP_MIN="$2"; shift 2;;
         --ami-id) AMI_ID="$2"; shift 2;;
         --expected-image-count) EXPECTED_IMAGE_COUNT="$2"; shift 2;;
+        --cancel-stale-jobs) CANCEL_STALE_JOBS=1; shift 1;;
         --dryrun) DRYRUN=1; shift 1;;
         -h|--help)
             sed -n '/^# Usage:/,/^$/p' "$0" >&2
@@ -319,11 +322,55 @@ else
 fi
 
 # ------- phase 7 -------
-log 7 "push defer launcher + run"
+log 7 "push defer launcher + poll helper + run"
 if (( DRYRUN )); then
     JOB_ID="DRYRUN-job"
-    log 7 "Would: scp measure-defer.py via SSM + run with --weights-uri $WEIGHTS"
+    log 7 "Would: push measure-defer.py + measure-poll.py via SSM"
+    if (( CANCEL_STALE_JOBS )); then
+        log 7 "Would: cancel stale todo jobs on gpu queue"
+    fi
 else
+    # Push measure-poll.py (used in phase 8 and optionally for stale-job cleanup here).
+    poll_b64=$(base64 < "$REPO_ROOT/scripts/sam/measure-poll.py")
+    cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+        --timeout-seconds 60 \
+        --document-name AWS-RunShellScript \
+        --parameters "commands=[\"echo $poll_b64 | base64 -d > /tmp/measure-poll.py\",\"chmod +x /tmp/measure-poll.py\"]" \
+        --query "Command.CommandId" --output text)
+    sleep 5
+    poll_push_status=$(aws_q ssm get-command-invocation \
+        --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+        --query "Status" --output text 2>/dev/null || echo "Failed")
+    if [[ "$poll_push_status" != "Success" ]]; then
+        echo "measure-poll.py push failed (status=$poll_push_status)" >&2
+        exit 4
+    fi
+    log 7 "measure-poll.py pushed"
+
+    # If --cancel-stale-jobs is set, delete any todo jobs on the gpu queue
+    # before deferring the new job (prevents worker from claiming orphans).
+    if (( CANCEL_STALE_JOBS )); then
+        cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+            --timeout-seconds 60 \
+            --document-name AWS-RunShellScript \
+            --parameters "commands=[\"sudo /opt/sam/stand-alone-analyzer/.venv/bin/python3 /tmp/measure-poll.py --cancel-stale-jobs\"]" \
+            --query "Command.CommandId" --output text)
+        sleep 5
+        cancel_out=$(aws_q ssm get-command-invocation \
+            --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+            --query "StandardOutputContent" --output text 2>/dev/null || echo "")
+        if [[ "$cancel_out" == *"DB_ERROR"* ]]; then
+            echo "cancel-stale-jobs failed: $cancel_out" >&2
+            exit 4
+        fi
+        if [[ "$cancel_out" == "CANCELLED_JOBS=NONE" ]]; then
+            log 7 "no stale todo jobs found (clean queue)"
+        else
+            log 7 "cancelled stale jobs: $cancel_out"
+        fi
+    fi
+
+    # Now push and run measure-defer.py.
     payload_b64=$(base64 < "$REPO_ROOT/scripts/sam/measure-defer.py")
     # Use pre-constructed DATASET_DIR and ANALYSIS_DIR (computed in phase 6).
     cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
@@ -400,9 +447,10 @@ esac
 log 8 "cost projection: $WON_INSTANCE_TYPE $WON_MARKET = \$$hourly_rate/hr"
 status="unknown"
 if (( DRYRUN )); then
-    log 8 "Would: poll procrastinate_jobs.status WHERE id=$JOB_ID"
+    log 8 "Would: poll procrastinate_jobs.status WHERE id=$JOB_ID via measure-poll.py"
     status="succeeded"
 else
+    db_error_streak=0  # count consecutive DB_ERROR ticks to abort on persistent failures
     while :; do
         now=$(date -u +%s)
         if (( now >= deadline )); then
@@ -419,50 +467,78 @@ else
             status="cost_cap_exceeded"
             break
         fi
-        # Query job status with robust error detection.
-        # Append || echo QUERY_FAILED so psql non-zero exit surfaces.
+
+        # Query job status via measure-poll.py (Python, reuses proven DB path).
         cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
             --timeout-seconds 60 \
             --document-name AWS-RunShellScript \
-            --parameters "commands=[\"sudo bash -c 'set -a; . /etc/flake-analysis-worker.env; set +a; PGPASSWORD=\\\"\\\$SAA_DB_PASSWORD\\\" psql -h \\\$SAA_DB_HOST -p \\\$SAA_DB_PORT -U \\\$SAA_DB_USER -d \\\$SAA_DB_NAME -tAc \\\"SELECT status FROM procrastinate_jobs WHERE id=$JOB_ID\\\" || echo QUERY_FAILED'\"]" \
+            --parameters "commands=[\"sudo /opt/sam/stand-alone-analyzer/.venv/bin/python3 /tmp/measure-poll.py --job-id $JOB_ID\"]" \
             --query "Command.CommandId" --output text)
         sleep 5
-        # Capture full invocation result: Status, stdout, stderr.
+
+        # Capture SSM invocation status + stdout.
         invo=$(aws_q ssm get-command-invocation \
             --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
-            --query "[Status,StandardOutputContent,StandardErrorContent]" \
-            --output text 2>/dev/null || echo "Failed			")
+            --query "[Status,StandardOutputContent]" \
+            --output text 2>/dev/null || echo "Failed	")
         ssm_status=$(awk -F'\t' 'NR==1 {print $1}' <<< "$invo")
         stdout=$(awk -F'\t' 'NR==1 {print $2}' <<< "$invo")
-        stderr=$(awk -F'\t' 'NR==1 {print $3}' <<< "$invo")
+
         # Check SSM command execution status first.
         if [[ "$ssm_status" != "Success" ]]; then
             log 8 "SSM command status=$ssm_status (transient failure, will retry)"
             sleep 25
             continue
         fi
-        # Check for psql query failure sentinel.
-        if [[ "$stdout" == *"QUERY_FAILED"* || -n "$stderr" ]]; then
-            echo "polling ABORT: psql query failed (bad JOB_ID or DB creds)" >&2
-            echo "stdout: $stdout" >&2
-            echo "stderr: $stderr" >&2
-            status="psql_error"
-            break
-        fi
-        # Extract and validate procrastinate job status.
-        s=$(echo "$stdout" | tr -d '[:space:]')
-        if [[ -z "$s" ]]; then
-            log 8 "WARNING: empty status (job row not found?), elapsed=${elapsed_s}s proj_cost=\$$proj_cost"
+
+        # Parse JOB_STATUS=<value> from stdout.
+        job_status=$(grep -oE 'JOB_STATUS=.+' <<< "$stdout" | head -1 | cut -d= -f2 || echo "")
+        if [[ -z "$job_status" ]]; then
+            log 8 "WARNING: no JOB_STATUS line in stdout, elapsed=${elapsed_s}s proj_cost=\$$proj_cost"
             sleep 25
             continue
         fi
-        log 8 "elapsed=${elapsed_s}s proj_cost=\$$proj_cost status=$s"
-        case "$s" in
-            succeeded) status="succeeded"; break;;
-            failed|aborted|cancelled) status="failed"; break;;
-            todo|doing|aborting) sleep 25; continue;;
+
+        # Handle the parsed status.
+        case "$job_status" in
+            succeeded)
+                status="succeeded"
+                break
+                ;;
+            failed|aborted|cancelled)
+                status="failed"
+                break
+                ;;
+            todo|doing|aborting)
+                # Job in progress — reset error streak and continue polling.
+                db_error_streak=0
+                log 8 "elapsed=${elapsed_s}s proj_cost=\$$proj_cost status=$job_status"
+                sleep 25
+                continue
+                ;;
+            NOT_FOUND)
+                # Job row missing (unusual but not fatal — maybe transient replication lag).
+                db_error_streak=0
+                log 8 "WARNING: job row not found (id=$JOB_ID), elapsed=${elapsed_s}s proj_cost=\$$proj_cost"
+                sleep 25
+                continue
+                ;;
+            DB_ERROR:*)
+                # DB connection/query error. Tolerate a few transient blips but abort on persistent failures.
+                db_error_streak=$((db_error_streak + 1))
+                log 8 "DB error (streak=$db_error_streak): $job_status, elapsed=${elapsed_s}s proj_cost=\$$proj_cost"
+                if (( db_error_streak >= 5 )); then
+                    echo "polling ABORT: 5 consecutive DB errors, last=$job_status" >&2
+                    status="db_error"
+                    break
+                fi
+                sleep 25
+                continue
+                ;;
             *)
-                log 8 "WARNING: unknown procrastinate status: $s"
+                # Unknown status value — log but continue (maybe a new procrastinate status we don't know).
+                db_error_streak=0
+                log 8 "WARNING: unknown job status '$job_status', elapsed=${elapsed_s}s proj_cost=\$$proj_cost"
                 sleep 25
                 continue
                 ;;
