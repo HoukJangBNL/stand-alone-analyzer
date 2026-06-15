@@ -113,7 +113,26 @@ echo "Subnet: ${SUBNET_ID}"
 # UserData hard limit is 16 KB base64-encoded at the AWS API. cloud-init
 # transparently decompresses gzip-magic'd payloads, so we compress before
 # base64. Without this, anything > ~12 KB raw fails publish.
-USERDATA_B64=$(gzip -c "${USERDATA_PATH}" | base64 | tr -d '\n')
+# If DATASET_PFX_OVERRIDE and/or ABS_CAP_MIN are set, inject them after the
+# shebang line so cloud-init picks them up.
+if [[ -n "${DATASET_PFX_OVERRIDE:-}" || -n "${ABS_CAP_MIN:-}" ]]; then
+  USERDATA_TEMP=$(mktemp)
+  trap 'rm -f "${USERDATA_TEMP}"' EXIT
+  # Insert overrides after shebang (line 1).
+  head -1 "${USERDATA_PATH}" > "${USERDATA_TEMP}"
+  if [[ -n "${DATASET_PFX_OVERRIDE:-}" ]]; then
+    echo "export DATASET_PFX=\"${DATASET_PFX_OVERRIDE}\"" >> "${USERDATA_TEMP}"
+    echo "[override] DATASET_PFX_OVERRIDE: ${DATASET_PFX_OVERRIDE}"
+  fi
+  if [[ -n "${ABS_CAP_MIN:-}" ]]; then
+    echo "export ABS_CAP_MIN=\"${ABS_CAP_MIN}\"" >> "${USERDATA_TEMP}"
+    echo "[override] ABS_CAP_MIN: ${ABS_CAP_MIN}"
+  fi
+  tail -n +2 "${USERDATA_PATH}" >> "${USERDATA_TEMP}"
+  USERDATA_B64=$(gzip -c "${USERDATA_TEMP}" | base64 | tr -d '\n')
+else
+  USERDATA_B64=$(gzip -c "${USERDATA_PATH}" | base64 | tr -d '\n')
+fi
 
 # --- 5. Build LaunchTemplateData JSON ------------------------------------
 TPL_DATA_JSON=$(cat <<EOF

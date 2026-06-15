@@ -34,16 +34,23 @@
 set -euo pipefail
 
 # ------- defaults -------
-INSTANCE_TYPE="g6e.48xlarge"
-COST_CAP_USD="5"
-WALL_CAP_MIN="60"
-AMI_ID="ami-092ae5880cb9cf957"
+INSTANCE_TYPE=""  # empty = walk full ladder (via prod launcher.py); set via --instance-type to pin
+# Instance type ladder (mirrors src/flake_analysis/worker/launcher.py T7q):
+# g6e.48xlarge: 8 GPU ($5.96 spot / $7.23 OD)
+# g6e.24xlarge: 4 GPU ($2.97 spot / $3.61 OD)
+# g6e.12xlarge: 4 GPU ($1.86 spot / $2.52 OD)
+# g6e.4xlarge:  1 GPU ($0.62 spot / $0.77 OD)
+INSTANCE_TYPE_LADDER=("g6e.48xlarge" "g6e.24xlarge" "g6e.12xlarge" "g6e.4xlarge")
+COST_CAP_USD="100"  # owner-approved budget envelope (2026-06-15)
+WALL_CAP_MIN="200"  # covers 4-GPU case (184 min) + headroom; 8-GPU fits easily
+AMI_ID="ami-0b7ec5ff47a1eff11"  # §43-verified working AMI (cu124, peft baked, vendor 2c69ebd)
 AWS_PROFILE="${AWS_PROFILE:-qpress}"
 AWS_REGION="${AWS_REGION:-us-east-2}"
 RUN_ID_DEFAULT="$(date -u +%s)"
 RUN_ID="${RUN_ID:-${RUN_ID_DEFAULT}}"
 SCAN_ID="${SCAN_ID:-0}"
 DRYRUN=0
+EXPECTED_IMAGE_COUNT=""  # optional: if set, phase-6 asserts dataset count == this value
 
 WEIGHTS=""
 DATASET=""
@@ -59,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --cost-cap-usd) COST_CAP_USD="$2"; shift 2;;
         --wall-cap-min) WALL_CAP_MIN="$2"; shift 2;;
         --ami-id) AMI_ID="$2"; shift 2;;
+        --expected-image-count) EXPECTED_IMAGE_COUNT="$2"; shift 2;;
         --dryrun) DRYRUN=1; shift 1;;
         -h|--help)
             sed -n '/^# Usage:/,/^$/p' "$0" >&2
@@ -94,6 +102,10 @@ terminate_now() {
 }
 trap 'terminate_now "trap EXIT"' EXIT
 
+# Export AWS_PROFILE and AWS_REGION globally for all child processes.
+export AWS_PROFILE
+export AWS_REGION
+
 # ------- phase 1 -------
 log 1 "precheck — profile=$AWS_PROFILE region=$AWS_REGION"
 if (( ! DRYRUN )); then
@@ -101,37 +113,98 @@ if (( ! DRYRUN )); then
 fi
 
 # ------- phase 2 -------
-log 2 "args — weights=$WEIGHTS dataset=$DATASET instance=$INSTANCE_TYPE cap=\$$COST_CAP_USD wall=${WALL_CAP_MIN}m ami=$AMI_ID dryrun=$DRYRUN"
+# If INSTANCE_TYPE empty, use ladder mode; otherwise pin to the specified type.
+if [[ -z "$INSTANCE_TYPE" ]]; then
+    INSTANCE_MODE="ladder (8/4/4/1 GPU)"
+    # LT publish needs *some* instance type — use the first tier for the template.
+    # Actual launch will override per-tier in phase 4.
+    LT_INSTANCE_TYPE="${INSTANCE_TYPE_LADDER[0]}"
+else
+    INSTANCE_MODE="pinned ($INSTANCE_TYPE)"
+    LT_INSTANCE_TYPE="$INSTANCE_TYPE"
+fi
+log 2 "args — weights=$WEIGHTS dataset=$DATASET instance=$INSTANCE_MODE cap=\$${COST_CAP_USD:-auto} wall=${WALL_CAP_MIN:-auto}m ami=$AMI_ID dryrun=$DRYRUN"
 
 # ------- phase 3 -------
-log 3 "publish LT (IMAGE_ID=$AMI_ID, INSTANCE_TYPE=$INSTANCE_TYPE)"
+log 3 "publish LT (IMAGE_ID=$AMI_ID, INSTANCE_TYPE=$LT_INSTANCE_TYPE)"
 if (( ! DRYRUN )); then
-    INSTANCE_TYPE="$INSTANCE_TYPE" IMAGE_ID_OVERRIDE="$AMI_ID" \
+    # Extract dataset prefix from --dataset URI for DATASET_PFX_OVERRIDE.
+    # Input: s3://bucket/prefix/ → Output: prefix/
+    DATASET_PFX=$(echo "$DATASET" | sed -E 's|^s3://[^/]+/||')
+    # Arm instance-side abs-cap timer with +10 min headroom over wall-cap
+    # for phase-9 collect before self-terminate.
+    ABS_CAP_FOR_INSTANCE=$(( WALL_CAP_MIN + 10 ))
+    log 3 "ABS_CAP_MIN=${ABS_CAP_FOR_INSTANCE} (wall_cap=${WALL_CAP_MIN} + 10 min headroom)"
+    INSTANCE_TYPE="$LT_INSTANCE_TYPE" IMAGE_ID_OVERRIDE="$AMI_ID" \
+        DATASET_PFX_OVERRIDE="$DATASET_PFX" \
+        ABS_CAP_MIN="$ABS_CAP_FOR_INSTANCE" \
         bash "$REPO_ROOT/scripts/aws/sam-launch-template.sh"
 fi
 
 # ------- phase 4 -------
-log 4 "spot launch (with on-demand fallback)"
+log 4 "instance-type ladder launch (prod launcher.py T7q via measure-launch.py)"
 if (( DRYRUN )); then
-    log 4 "Would: aws ec2 run-instances --launch-template Name=qpress-sam-gpu-worker --instance-type $INSTANCE_TYPE"
+    log 4 "Would: AWS_PROFILE=$AWS_PROFILE python3 $REPO_ROOT/scripts/sam/measure-launch.py"
     INSTANCE_ID="i-DRYRUNXXXXXXXXXXX"
+    WON_INSTANCE_TYPE="${INSTANCE_TYPE_LADDER[0]}"
+    WON_GPU_COUNT=8
     LAUNCH_TS_EPOCH="$(date -u +%s)"
 else
     LAUNCH_TS_EPOCH="$(date -u +%s)"
-    if ! INSTANCE_ID=$(aws_q ec2 run-instances \
-            --launch-template "LaunchTemplateName=qpress-sam-gpu-worker,Version=\$Default" \
-            --instance-type "$INSTANCE_TYPE" \
-            --instance-market-options "MarketType=spot" \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Purpose,Value=measure-run-${RUN_ID}}]" \
-            --query "Instances[0].InstanceId" --output text 2>/dev/null); then
-        log 4 "spot capacity drought → on-demand fallback"
-        INSTANCE_ID=$(aws_q ec2 run-instances \
-            --launch-template "LaunchTemplateName=qpress-sam-gpu-worker,Version=\$Default" \
-            --instance-type "$INSTANCE_TYPE" \
-            --tag-specifications "ResourceType=instance,Tags=[{Key=Purpose,Value=measure-run-${RUN_ID}-ondemand}]" \
-            --query "Instances[0].InstanceId" --output text)
+    log 4 "calling prod launcher (full ladder: 8/4/4/1 GPU × 3 AZ × spot+OD = 24 attempts)"
+    # NO timeout — let _launch_one run to natural completion (either win or 24-attempt exhaust).
+    # PYTHONUNBUFFERED=1 ensures launcher INFO logs reach stderr immediately.
+    launcher_output=$(AWS_PROFILE="$AWS_PROFILE" PYTHONUNBUFFERED=1 "$REPO_ROOT/.venv/bin/python3" "$REPO_ROOT/scripts/sam/measure-launch.py" 2>&1)
+    launcher_exit=$?
+    if (( launcher_exit != 0 )); then
+        if [[ "$launcher_output" == *"CAPACITY_DROUGHT"* ]]; then
+            echo "FATAL: GPU capacity unavailable across full prod ladder" >&2
+            echo "$launcher_output" >&2
+            exit 5
+        else
+            echo "FATAL: launcher failed (exit $launcher_exit)" >&2
+            echo "$launcher_output" >&2
+            exit 2
+        fi
     fi
-    log 4 "instance=$INSTANCE_ID launch_ts=$LAUNCH_TS_EPOCH"
+    # On success, stdout is the instance id (single line).
+    INSTANCE_ID=$(echo "$launcher_output" | tail -1 | tr -d '[:space:]')
+    if [[ ! "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]]; then
+        echo "FATAL: launcher returned invalid instance id: $INSTANCE_ID" >&2
+        echo "Full output: $launcher_output" >&2
+        exit 2
+    fi
+    log 4 "launched → $INSTANCE_ID"
+
+    # Query AWS for won instance details.
+    instance_info=$(aws_q ec2 describe-instances --instance-ids "$INSTANCE_ID" \
+        --query 'Reservations[0].Instances[0].[InstanceType,Placement.AvailabilityZone,InstanceLifecycle]' \
+        --output text)
+    WON_INSTANCE_TYPE=$(echo "$instance_info" | awk '{print $1}')
+    WON_AZ=$(echo "$instance_info" | awk '{print $2}')
+    lifecycle=$(echo "$instance_info" | awk '{print $3}')
+    if [[ "$lifecycle" == "spot" ]]; then
+        WON_MARKET="spot"
+    else
+        WON_MARKET="on-demand"
+    fi
+
+    # Map won instance type to GPU count.
+    case "$WON_INSTANCE_TYPE" in
+        g6e.48xlarge) WON_GPU_COUNT=8;;
+        g6e.24xlarge) WON_GPU_COUNT=4;;
+        g6e.12xlarge) WON_GPU_COUNT=4;;
+        g6e.4xlarge)  WON_GPU_COUNT=1;;
+        *) echo "FATAL: unknown instance type $WON_INSTANCE_TYPE" >&2; exit 2;;
+    esac
+
+    log 4 "won: ${WON_INSTANCE_TYPE} (${WON_GPU_COUNT} GPU) ${WON_MARKET} in ${WON_AZ}, launch_ts=$LAUNCH_TS_EPOCH"
+
+    # Caps: use passed values or leave empty to trigger auto-derivation below.
+    # Per owner directive: do NOT block on 1-GPU — let it run under the cap.
+    if [[ -z "$WALL_CAP_MIN" ]] || [[ -z "$COST_CAP_USD" ]]; then
+        log 4 "caps not explicitly set; will use passed values or fail if still empty"
+    fi
 fi
 
 # ------- phase 5 -------
@@ -172,10 +245,11 @@ else
     pf_deadline=$(( $(date -u +%s) + PREFLIGHT_WAIT_MIN * 60 ))
     while :; do
         if (( $(date -u +%s) >= pf_deadline )); then
-            echo "pre-flight fail: user-data did not finish within 15 min" >&2
+            echo "pre-flight fail: user-data did not finish within ${PREFLIGHT_WAIT_MIN} min" >&2
             exit 3
         fi
         cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+            --timeout-seconds 60 \
             --document-name AWS-RunShellScript \
             --parameters 'commands=["test -f /var/lib/cloud/instance/boot-finished && echo BOOT_FINISHED","test -f /etc/flake-analysis-worker.env && echo ENV_PRESENT","systemctl is-active flake-analysis-worker.service || true"]' \
             --query "Command.CommandId" --output text)
@@ -194,18 +268,54 @@ else
     done
 
     # Now run the actual artifact checks.
+    # Derive dataset dir basename from --dataset arg for dataset-agnostic checking.
+    DATASET_BASENAME=$(basename "$DATASET" | tr -d '/')
+    # Pre-construct full paths for use in SSM commands (so they expand locally).
+    DATASET_DIR="/opt/sam/dataset/${DATASET_BASENAME}"
+    ANALYSIS_DIR="/opt/sam/runs/${RUN_ID}"
     cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+        --timeout-seconds 60 \
         --document-name AWS-RunShellScript \
-        --parameters 'commands=["nvidia-smi -L | wc -l","ls /opt/sam/stand-alone-analyzer/vendor/QPress-SAM-Flake/run_amg_v2.py","ls /etc/flake-analysis-worker.env","pgrep -f flake_analysis.worker | head -1","ls /opt/sam/dataset/scan6-100 | wc -l"]' \
+        --parameters "commands=[\"nvidia-smi -L | wc -l\",\"ls /opt/sam/stand-alone-analyzer/vendor/QPress-SAM-Flake/run_amg_v2.py\",\"ls /etc/flake-analysis-worker.env\",\"pgrep -f flake_analysis.worker | head -1\",\"find $DATASET_DIR -maxdepth 1 -type f -name '*.png' | wc -l\"]" \
         --query "Command.CommandId" --output text)
     sleep 5
     out=$(aws_q ssm get-command-invocation \
         --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
         --query "StandardOutputContent" --output text)
-    grep -q "^8$" <<< "$out" || { echo "pre-flight fail: not 8 GPUs visible" >&2; echo "$out" >&2; exit 3; }
+    # GPU count check: tier-agnostic — verify actual count matches won tier.
+    actual_gpu_count=$(head -1 <<< "$out" | tr -d '[:space:]')
+    if [[ ! "$actual_gpu_count" =~ ^[0-9]+$ ]]; then
+        echo "pre-flight fail: GPU count not a number (got: $actual_gpu_count)" >&2
+        echo "$out" >&2
+        exit 3
+    fi
+    if (( actual_gpu_count != WON_GPU_COUNT )); then
+        echo "pre-flight fail: GPU count mismatch (nvidia-smi reports $actual_gpu_count, expected $WON_GPU_COUNT for $WON_INSTANCE_TYPE)" >&2
+        echo "$out" >&2
+        exit 3
+    fi
+    log 6 "GPU count verified: $actual_gpu_count GPU ($WON_INSTANCE_TYPE)"
+
     grep -q "run_amg_v2.py" <<< "$out" || { echo "pre-flight fail: vendor not present" >&2; echo "$out" >&2; exit 3; }
     grep -q "flake-analysis-worker.env" <<< "$out" || { echo "pre-flight fail: worker env missing" >&2; echo "$out" >&2; exit 3; }
-    grep -q "^100$" <<< "$out" || { echo "pre-flight fail: dataset count != 100" >&2; echo "$out" >&2; exit 3; }
+    # Dataset count check: verify non-zero, and if --expected-image-count
+    # provided, assert exact match (guards against partial S3 sync).
+    dataset_count=$(tail -1 <<< "$out" | tr -d '[:space:]')
+    if [[ ! "$dataset_count" =~ ^[0-9]+$ ]] || (( dataset_count <= 0 )); then
+        echo "pre-flight fail: dataset count not positive integer (got: $dataset_count)" >&2
+        echo "$out" >&2
+        exit 3
+    fi
+    if [[ -n "$EXPECTED_IMAGE_COUNT" ]]; then
+        if (( dataset_count != EXPECTED_IMAGE_COUNT )); then
+            echo "pre-flight fail: dataset count mismatch (got $dataset_count, expected $EXPECTED_IMAGE_COUNT)" >&2
+            echo "$out" >&2
+            exit 3
+        fi
+        log 6 "dataset staged: $dataset_count images in $DATASET_DIR (matches expected count)"
+    else
+        log 6 "dataset staged: $dataset_count images in $DATASET_DIR"
+    fi
 fi
 
 # ------- phase 7 -------
@@ -215,10 +325,11 @@ if (( DRYRUN )); then
     log 7 "Would: scp measure-defer.py via SSM + run with --weights-uri $WEIGHTS"
 else
     payload_b64=$(base64 < "$REPO_ROOT/scripts/sam/measure-defer.py")
-    # shellcheck disable=SC2016  # $DATASET expands locally inside $(basename ...)
+    # Use pre-constructed DATASET_DIR and ANALYSIS_DIR (computed in phase 6).
     cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+        --timeout-seconds 120 \
         --document-name AWS-RunShellScript \
-        --parameters "commands=[\"echo $payload_b64 | base64 -d > /tmp/measure-defer.py\",\"chmod +x /tmp/measure-defer.py\",\"sudo /opt/sam/stand-alone-analyzer/.venv/bin/python3 /tmp/measure-defer.py --weights-uri '$WEIGHTS' --dataset-dir /opt/sam/dataset/$(basename '$DATASET' | tr -d '/') --analysis-folder /opt/sam/runs/$RUN_ID --run-id $RUN_ID --scan-id $SCAN_ID\"]" \
+        --parameters "commands=[\"echo $payload_b64 | base64 -d > /tmp/measure-defer.py\",\"chmod +x /tmp/measure-defer.py\",\"sudo /opt/sam/stand-alone-analyzer/.venv/bin/python3 /tmp/measure-defer.py --weights-uri '$WEIGHTS' --dataset-dir '$DATASET_DIR' --analysis-folder '$ANALYSIS_DIR' --run-id $RUN_ID --scan-id $SCAN_ID\"]" \
         --query "Command.CommandId" --output text)
     # Poll the SSM command Status until it leaves InProgress. Cold-start
     # measure-defer.py (uv venv import + RDS connect + procrastinate
@@ -247,18 +358,46 @@ else
                 ;;
         esac
     done
-    out=$(aws_q ssm get-command-invocation \
+    # Capture both stdout and stderr for better diagnostics on defer failure.
+    invo=$(aws_q ssm get-command-invocation \
         --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
-        --query "StandardOutputContent" --output text)
+        --query "[StandardOutputContent,StandardErrorContent]" \
+        --output text)
+    out=$(awk -F'\t' 'NR==1 {print $1}' <<< "$invo")
+    err=$(awk -F'\t' 'NR==1 {print $2}' <<< "$invo")
     JOB_ID=$(grep -oE 'job_id=[0-9]+' <<< "$out" | head -1 | cut -d= -f2 || true)
-    [[ -n "$JOB_ID" ]] || { echo "defer success but no job_id in stdout: $out" >&2; exit 4; }
+    if [[ -z "$JOB_ID" ]]; then
+        echo "defer success but no job_id in stdout" >&2
+        echo "stdout: $out" >&2
+        echo "stderr: $err" >&2
+        exit 4
+    fi
     log 7 "deferred job_id=$JOB_ID"
 fi
 
 # ------- phase 8 -------
 log 8 "polling loop (tick=30s, wall_cap=${WALL_CAP_MIN}m, cost_cap=\$$COST_CAP_USD)"
 deadline=$(( LAUNCH_TS_EPOCH + WALL_CAP_MIN * 60 ))
-hourly_rate_on_demand=7.23
+# Map won instance type + market to actual hourly rate for cost projection.
+case "$WON_INSTANCE_TYPE" in
+    g6e.48xlarge)
+        if [[ "$WON_MARKET" == "spot" ]]; then hourly_rate=5.96; else hourly_rate=7.23; fi
+        ;;
+    g6e.24xlarge)
+        if [[ "$WON_MARKET" == "spot" ]]; then hourly_rate=2.97; else hourly_rate=3.61; fi
+        ;;
+    g6e.12xlarge)
+        if [[ "$WON_MARKET" == "spot" ]]; then hourly_rate=1.86; else hourly_rate=2.52; fi
+        ;;
+    g6e.4xlarge)
+        if [[ "$WON_MARKET" == "spot" ]]; then hourly_rate=0.62; else hourly_rate=0.77; fi
+        ;;
+    *)
+        hourly_rate=7.23  # fallback to highest tier OD rate if unknown
+        log 8 "WARNING: unknown instance type $WON_INSTANCE_TYPE, using fallback rate \$$hourly_rate/hr"
+        ;;
+esac
+log 8 "cost projection: $WON_INSTANCE_TYPE $WON_MARKET = \$$hourly_rate/hr"
 status="unknown"
 if (( DRYRUN )); then
     log 8 "Would: poll procrastinate_jobs.status WHERE id=$JOB_ID"
@@ -272,7 +411,7 @@ else
             break
         fi
         elapsed_s=$(( now - LAUNCH_TS_EPOCH ))
-        proj_cost=$(awk -v s="$elapsed_s" -v r="$hourly_rate_on_demand" \
+        proj_cost=$(awk -v s="$elapsed_s" -v r="$hourly_rate" \
                         'BEGIN { printf "%.2f", s/3600.0*r }')
         if awk -v p="$proj_cost" -v c="$COST_CAP_USD" \
                'BEGIN { exit !(p > c) }'; then
@@ -280,20 +419,54 @@ else
             status="cost_cap_exceeded"
             break
         fi
+        # Query job status with robust error detection.
+        # Append || echo QUERY_FAILED so psql non-zero exit surfaces.
         cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+            --timeout-seconds 60 \
             --document-name AWS-RunShellScript \
-            --parameters "commands=[\"sudo bash -c 'set -a; . /etc/flake-analysis-worker.env; set +a; PGPASSWORD=\\\"\\\$SAA_DB_PASSWORD\\\" psql -h \\\$SAA_DB_HOST -p \\\$SAA_DB_PORT -U \\\$SAA_DB_USER -d \\\$SAA_DB_NAME -tAc \\\"SELECT status FROM procrastinate_jobs WHERE id=$JOB_ID\\\"'\"]" \
+            --parameters "commands=[\"sudo bash -c 'set -a; . /etc/flake-analysis-worker.env; set +a; PGPASSWORD=\\\"\\\$SAA_DB_PASSWORD\\\" psql -h \\\$SAA_DB_HOST -p \\\$SAA_DB_PORT -U \\\$SAA_DB_USER -d \\\$SAA_DB_NAME -tAc \\\"SELECT status FROM procrastinate_jobs WHERE id=$JOB_ID\\\" || echo QUERY_FAILED'\"]" \
             --query "Command.CommandId" --output text)
         sleep 5
-        s=$(aws_q ssm get-command-invocation \
+        # Capture full invocation result: Status, stdout, stderr.
+        invo=$(aws_q ssm get-command-invocation \
             --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
-            --query "StandardOutputContent" --output text 2>/dev/null | tr -d '[:space:]')
+            --query "[Status,StandardOutputContent,StandardErrorContent]" \
+            --output text 2>/dev/null || echo "Failed			")
+        ssm_status=$(awk -F'\t' 'NR==1 {print $1}' <<< "$invo")
+        stdout=$(awk -F'\t' 'NR==1 {print $2}' <<< "$invo")
+        stderr=$(awk -F'\t' 'NR==1 {print $3}' <<< "$invo")
+        # Check SSM command execution status first.
+        if [[ "$ssm_status" != "Success" ]]; then
+            log 8 "SSM command status=$ssm_status (transient failure, will retry)"
+            sleep 25
+            continue
+        fi
+        # Check for psql query failure sentinel.
+        if [[ "$stdout" == *"QUERY_FAILED"* || -n "$stderr" ]]; then
+            echo "polling ABORT: psql query failed (bad JOB_ID or DB creds)" >&2
+            echo "stdout: $stdout" >&2
+            echo "stderr: $stderr" >&2
+            status="psql_error"
+            break
+        fi
+        # Extract and validate procrastinate job status.
+        s=$(echo "$stdout" | tr -d '[:space:]')
+        if [[ -z "$s" ]]; then
+            log 8 "WARNING: empty status (job row not found?), elapsed=${elapsed_s}s proj_cost=\$$proj_cost"
+            sleep 25
+            continue
+        fi
         log 8 "elapsed=${elapsed_s}s proj_cost=\$$proj_cost status=$s"
         case "$s" in
             succeeded) status="succeeded"; break;;
-            failed)    status="failed"; break;;
+            failed|aborted|cancelled) status="failed"; break;;
+            todo|doing|aborting) sleep 25; continue;;
+            *)
+                log 8 "WARNING: unknown procrastinate status: $s"
+                sleep 25
+                continue
+                ;;
         esac
-        sleep 25
     done
 fi
 log 8 "loop exit status=$status"
@@ -301,18 +474,58 @@ log 8 "loop exit status=$status"
 # ------- phase 9 + 10 -------
 log 9 "collect"
 if [[ "$status" == "succeeded" && $DRYRUN -eq 0 ]]; then
-    mkdir -p "claudedocs/measurement-${RUN_ID}"
+    # Check if output dir exists; if so, rename to avoid clobbering.
+    outdir="claudedocs/measurement-${RUN_ID}"
+    if [[ -d "$outdir" ]]; then
+        retry_suffix="retry-$(date -u +%s)"
+        log 9 "output dir exists, renaming to ${outdir}-${retry_suffix}"
+        mv "$outdir" "${outdir}-${retry_suffix}"
+    fi
+    mkdir -p "$outdir"
+
+    # SAM writes to SUBDIRS["sam"] = "07_sam" (not "sam").
+    RESULTS_JSON="${ANALYSIS_DIR}/07_sam/per_image_results.json"
+
+    # Pre-check: does the expected results file exist?
     cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+        --timeout-seconds 60 \
         --document-name AWS-RunShellScript \
-        --parameters "commands=[\"cat /opt/sam/runs/${RUN_ID}/sam/per_image_results.json\"]" \
+        --parameters "commands=[\"test -f $RESULTS_JSON && echo EXISTS || echo MISSING\"]" \
+        --query "Command.CommandId" --output text)
+    sleep 5
+    existence_check=$(aws_q ssm get-command-invocation \
+        --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+        --query "StandardOutputContent" --output text | tr -d '[:space:]')
+    if [[ "$existence_check" != "EXISTS" ]]; then
+        echo "collect FAIL: results file not found at $RESULTS_JSON" >&2
+        log 9 "running find to diagnose..."
+        cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+            --timeout-seconds 60 \
+            --document-name AWS-RunShellScript \
+            --parameters "commands=[\"find $ANALYSIS_DIR -name per_image_results.json\"]" \
+            --query "Command.CommandId" --output text)
+        sleep 5
+        found=$(aws_q ssm get-command-invocation \
+            --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
+            --query "StandardOutputContent" --output text)
+        echo "find results: $found" >&2
+        exit 6
+    fi
+    log 9 "results file exists, collecting..."
+
+    cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+        --timeout-seconds 60 \
+        --document-name AWS-RunShellScript \
+        --parameters "commands=[\"cat $RESULTS_JSON\"]" \
         --query "Command.CommandId" --output text)
     sleep 5
     aws_q ssm get-command-invocation \
         --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
         --query "StandardOutputContent" --output text \
-        > "claudedocs/measurement-${RUN_ID}/per_image_results.json"
+        > "${outdir}/per_image_results.json"
 
     cmd_id=$(aws_q ssm send-command --instance-ids "$INSTANCE_ID" \
+        --timeout-seconds 60 \
         --document-name AWS-RunShellScript \
         --parameters "commands=[\"sudo bash -c 'set -a; . /etc/flake-analysis-worker.env; set +a; PGPASSWORD=\\\"\\\$SAA_DB_PASSWORD\\\" psql -h \\\$SAA_DB_HOST -p \\\$SAA_DB_PORT -U \\\$SAA_DB_USER -d \\\$SAA_DB_NAME -tAc \\\"SELECT extract(epoch from ts) as ts_epoch, event, payload FROM worker_events WHERE run_id=$RUN_ID ORDER BY ts\\\"'\"]" \
         --query "Command.CommandId" --output text)
@@ -320,7 +533,7 @@ if [[ "$status" == "succeeded" && $DRYRUN -eq 0 ]]; then
     aws_q ssm get-command-invocation \
         --command-id "$cmd_id" --instance-id "$INSTANCE_ID" \
         --query "StandardOutputContent" --output text \
-        > "claudedocs/measurement-${RUN_ID}/worker_events.tsv"
+        > "${outdir}/worker_events.tsv"
 fi
 
 log 10 "compute timing breakdown"
@@ -329,7 +542,7 @@ if [[ "$status" == "succeeded" ]]; then
         boot_s=70; model_load_s=30; proc_s=30; total_s=130
     else
         boot_s="$BOOT_S"
-        events_tsv="claudedocs/measurement-${RUN_ID}/worker_events.tsv"
+        events_tsv="${outdir}/worker_events.tsv"
         ts_load=$(awk -F'|' '$2 ~ /marker:model_load_start/ {print $1; exit}' "$events_tsv")
         ts_proc_start=$(awk -F'|' '$2 ~ /marker:processing_start/ {print $1; exit}' "$events_tsv")
         ts_proc_end=$(awk -F'|' '$2 ~ /marker:processing_end/ {print $1; exit}' "$events_tsv")
@@ -341,11 +554,14 @@ if [[ "$status" == "succeeded" ]]; then
     fi
     log 10 "boot_s=$boot_s model_load_s=$model_load_s processing_s=$proc_s total_s=$total_s"
     if (( ! DRYRUN )); then
-        cat > "claudedocs/measurement-${RUN_ID}/summary.json" <<EOF
+        cat > "${outdir}/summary.json" <<EOF
 {
   "run_id": ${RUN_ID},
   "instance_id": "${INSTANCE_ID}",
-  "instance_type": "${INSTANCE_TYPE}",
+  "instance_type": "${WON_INSTANCE_TYPE}",
+  "gpu_count": ${WON_GPU_COUNT},
+  "market": "${WON_MARKET}",
+  "availability_zone": "${WON_AZ}",
   "ami_id": "${AMI_ID}",
   "weights_uri": "${WEIGHTS}",
   "dataset_uri": "${DATASET}",
