@@ -9,10 +9,10 @@ from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import (
     get_active_analysis,
     get_db_session,
-    get_manifest,
     get_session_for_background,
 )
 from flake_analysis.api.mutex import acquire_scan_lock
+from flake_analysis.api.services.hydrate import ensure_scan_hydrated
 from flake_analysis.api.services.runs import record_run_end, record_run_start
 from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.api.schemas.compute import (
@@ -43,7 +43,9 @@ async def run_thumbnails(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Run thumbnails step with SSE progress."""
-    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    manifest = await ensure_scan_hydrated(
+        session, project_id=project_id, scan_id=scan_id
+    )
 
     # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
@@ -110,7 +112,9 @@ async def run_background(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Run background generation step with SSE progress."""
-    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    manifest = await ensure_scan_hydrated(
+        session, project_id=project_id, scan_id=scan_id
+    )
 
     analysis = await get_active_analysis(scan_id, session)
     if analysis is None:
@@ -203,7 +207,9 @@ async def run_domain_stats(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Run domain stats step with SSE progress."""
-    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    manifest = await ensure_scan_hydrated(
+        session, project_id=project_id, scan_id=scan_id
+    )
 
     analysis = await get_active_analysis(scan_id, session)
     if analysis is None:
@@ -409,7 +415,9 @@ async def run_sam(
     ``error`` notifications and are translated to the same
     ``pipeline_failed`` envelope shape.
     """
-    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    manifest = await ensure_scan_hydrated(
+        session, project_id=project_id, scan_id=scan_id
+    )
 
     analysis = await get_active_analysis(scan_id, session)
     if analysis is None:
@@ -542,7 +550,9 @@ async def run_domain_proximity(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Run domain proximity step with SSE progress."""
-    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    manifest = await ensure_scan_hydrated(
+        session, project_id=project_id, scan_id=scan_id
+    )
 
     analysis = await get_active_analysis(scan_id, session)
     if analysis is None:

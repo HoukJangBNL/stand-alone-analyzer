@@ -21,7 +21,6 @@ even though it has no Run row.
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
@@ -31,7 +30,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import (
     get_db_session,
-    get_manifest,
     get_session_for_background,
 )
 from flake_analysis.api.mutex import acquire_scan_lock
@@ -44,6 +42,7 @@ from flake_analysis.api.schemas.compute import (
 )
 from flake_analysis.api.services.analyses import get_or_create_default_analysis
 from flake_analysis.api.services.cascade import apply_background_cascade_if_needed
+from flake_analysis.api.services.hydrate import ensure_scan_hydrated
 from flake_analysis.api.services.runs import record_run_end, record_run_start
 from flake_analysis.api.services.usage import emit as usage_emit
 from flake_analysis.api.sse import PipelineProgressBridge, sse_stream
@@ -221,7 +220,10 @@ async def run_pipeline(
     domain_stats and domain_proximity run in parallel; if either fails the
     other is allowed to finish then the pipeline_error fires.
     """
-    manifest = await get_manifest(project_id=project_id, scan_id=scan_id)
+    # Hydrate S3 images to local filesystem before pipeline runs
+    manifest = await ensure_scan_hydrated(
+        session, project_id=project_id, scan_id=scan_id
+    )
 
     analysis = await get_or_create_default_analysis(session, scan_id=scan_id)
     cascade_summary = await apply_background_cascade_if_needed(
