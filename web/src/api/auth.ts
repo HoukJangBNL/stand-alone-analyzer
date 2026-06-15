@@ -94,6 +94,10 @@ export async function exchangeCode(code: string, redirectUri: string): Promise<L
 
 /**
  * Fetch current user (hydrate on mount).
+ *
+ * DEV-ONLY: When VITE_DEV_AUTH_BYPASS=1, this calls /auth/me without a token,
+ * relying on the backend's SAA_AUTH_DEV_BYPASS=1 to return a dev user.
+ * Production builds (no flag) require a real Cognito token from OAuth callback.
  */
 export async function fetchCurrentUser(): Promise<CurrentUser> {
   const resp = await fetch('/api/v1/auth/me', {
