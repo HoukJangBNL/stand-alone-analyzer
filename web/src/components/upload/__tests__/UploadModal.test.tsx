@@ -133,8 +133,8 @@ describe('UploadModal', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
-  // ---- Close-during-upload confirmation flow (Task D3) ----
-  describe('close confirmation while running', () => {
+  // ---- Task 2: Close keeps upload running, "Cancel upload" stops it ----
+  describe('close and cancel upload while running', () => {
     // Helper: render the modal and force `running=true` by holding a never-
     // resolving createScan promise. This is the only public path to set the
     // running flag, since it's local React state in UploadModal.
@@ -171,32 +171,44 @@ describe('UploadModal', () => {
       return { onClose, release }
     }
 
-    it('Test A: clicking Close mid-run shows confirmation, does NOT call onClose yet', async () => {
+    it('Test A: clicking Close mid-run calls onClose immediately, preserves scanId (upload keeps running)', async () => {
       const { onClose } = await renderRunning()
       await userEvent.click(screen.getByTestId('upload-modal-close'))
-      expect(await screen.findByTestId('upload-modal-close-confirm')).toBeTruthy()
-      expect(onClose).not.toHaveBeenCalled()
-      // scanId still intact.
-      expect(useUploadStore.getState().scanId).toBe('s42')
-    })
-
-    it('Test B: confirming Stop & Close preserves scanId and calls onClose', async () => {
-      const { onClose } = await renderRunning()
-      await userEvent.click(screen.getByTestId('upload-modal-close'))
-      await screen.findByTestId('upload-modal-close-confirm')
-      await userEvent.click(screen.getByTestId('upload-modal-close-confirm-stop'))
-      expect(useUploadStore.getState().scanId).toBe('s42')
+      // Task 2: Close just closes, no confirm dialog
       expect(onClose).toHaveBeenCalled()
+      // scanId still intact (upload continues in background)
+      expect(useUploadStore.getState().scanId).toBe('s42')
     })
 
-    it('Test C: clicking Cancel keeps modal open and scanId intact', async () => {
+    it('Test B: "Cancel upload" button shows confirm dialog', async () => {
       const { onClose } = await renderRunning()
-      await userEvent.click(screen.getByTestId('upload-modal-close'))
-      await screen.findByTestId('upload-modal-close-confirm')
-      await userEvent.click(screen.getByTestId('upload-modal-close-confirm-cancel'))
-      // Confirm UI dismissed.
+      // Click the red "Cancel upload" button
+      await userEvent.click(screen.getByTestId('upload-modal-cancel-upload'))
+      // Should show cancel-upload confirm dialog
+      expect(await screen.findByTestId('upload-modal-cancel-confirm')).toBeTruthy()
+      expect(onClose).not.toHaveBeenCalled()
+      expect(useUploadStore.getState().scanId).toBe('s42')
+    })
+
+    it('Test C: confirming cancel upload clears transient files, does NOT call onClose', async () => {
+      const { onClose } = await renderRunning()
+      await userEvent.click(screen.getByTestId('upload-modal-cancel-upload'))
+      await screen.findByTestId('upload-modal-cancel-confirm')
+      await userEvent.click(screen.getByTestId('upload-modal-cancel-confirm-yes'))
+      // Cancel upload clears transient but does NOT close modal
+      expect(onClose).not.toHaveBeenCalled()
+      // Transient files cleared (only 'done' survives, none here)
+      expect(useUploadStore.getState().order).toHaveLength(0)
+    })
+
+    it('Test D: clicking "No, keep uploading" dismisses confirm, keeps modal open', async () => {
+      const { onClose } = await renderRunning()
+      await userEvent.click(screen.getByTestId('upload-modal-cancel-upload'))
+      await screen.findByTestId('upload-modal-cancel-confirm')
+      await userEvent.click(screen.getByTestId('upload-modal-cancel-confirm-no'))
+      // Confirm UI dismissed
       await waitFor(() =>
-        expect(screen.queryByTestId('upload-modal-close-confirm')).toBeNull(),
+        expect(screen.queryByTestId('upload-modal-cancel-confirm')).toBeNull(),
       )
       expect(onClose).not.toHaveBeenCalled()
       expect(useUploadStore.getState().scanId).toBe('s42')
@@ -212,11 +224,11 @@ describe('UploadModal', () => {
       expect(useUploadStore.getState().scanId).toBeNull()
     })
 
-    it('Test E: stale createScan resolution after Stop & Close does NOT leak scanId or toast', async () => {
-      // Spy on toast.success so we can assert nothing fires post-close.
+    it('Test E: stale createScan resolution after Cancel Upload does NOT leak scanId or toast', async () => {
+      // Spy on toast.success so we can assert nothing fires post-cancel.
       const toastSuccessSpy = vi.spyOn(toast, 'success').mockImplementation(() => 'tid' as unknown as string | number)
 
-      // Capture the AbortSignal that handleClose -> abort() should mark.
+      // Capture the AbortSignal that handleConfirmCancelUpload -> abort() should mark.
       let capturedSignal: AbortSignal | undefined
       let resolveCreateScan: (v: { scan_id: string }) => void = () => {}
       const blocked = new Promise<{ scan_id: string }>((resolve) => {
@@ -252,18 +264,19 @@ describe('UploadModal', () => {
       // call toast.success, but be defensive — count from this point on.
       toastSuccessSpy.mockClear()
 
-      // Close → confirm Stop & Close.
-      await userEvent.click(screen.getByTestId('upload-modal-close'))
-      await screen.findByTestId('upload-modal-close-confirm')
-      await userEvent.click(screen.getByTestId('upload-modal-close-confirm-stop'))
-      expect(onClose).toHaveBeenCalled()
+      // Cancel upload → confirm.
+      await userEvent.click(screen.getByTestId('upload-modal-cancel-upload'))
+      await screen.findByTestId('upload-modal-cancel-confirm')
+      await userEvent.click(screen.getByTestId('upload-modal-cancel-confirm-yes'))
+      // Modal stays open after cancel (does not call onClose)
+      expect(onClose).not.toHaveBeenCalled()
 
       // The signal should be aborted (approach 1 — controller wired through).
       expect(capturedSignal?.aborted).toBe(true)
 
       // Now resolve the stale createScan promise. The mutation's onSuccess
       // would normally fire setScanId + toast.success — neither must happen
-      // on a closed modal.
+      // after abort.
       resolveCreateScan({ scan_id: 's999' })
       // Let microtasks flush.
       await new Promise((r) => setTimeout(r, 0))

@@ -54,7 +54,7 @@ export class Orchestrator {
   private cancelled = false
 
   constructor(opts: OrchestratorOptions = {}) {
-    this.concurrency = opts.concurrency ?? 4
+    this.concurrency = opts.concurrency ?? 8
   }
 
   /** Run every queued file through the pipeline. Resolves when all settle. */
@@ -132,6 +132,8 @@ export class Orchestrator {
     try {
       // 1) hash
       store.patch(uid, { status: 'hashing' })
+      // Mark upload start on first file transition from queued → hashing
+      store.markUploadStarted()
       const hex = await sha256Hex(f.file)
       if (this.cancelled || ctrl.signal.aborted) {
         throw new DOMException('aborted', 'AbortError')
@@ -165,6 +167,8 @@ export class Orchestrator {
         ctrl.signal,
       )
       store.patch(uid, { status: 'done', image_id: cmp.image_id })
+      // Record completion timestamp for throughput/ETA calc
+      store.recordCompletion()
     } catch (e: unknown) {
       const msg = (e as { message?: string })?.message ?? String(e)
       const aborted = (e as { name?: string })?.name === 'AbortError'
@@ -188,7 +192,7 @@ export class Orchestrator {
 /** Module-scope singleton — UploadModal owns its lifecycle. */
 let current: Orchestrator | null = null
 export function getOrchestrator(): Orchestrator {
-  if (!current) current = new Orchestrator({ concurrency: 4 })
+  if (!current) current = new Orchestrator({ concurrency: 8 })
   return current
 }
 export function resetOrchestrator(): void {

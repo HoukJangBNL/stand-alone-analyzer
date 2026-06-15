@@ -31,6 +31,16 @@ export interface UploadState {
   scanId: string | null
   files: Record<string, UploadFile>
   order: string[] // stable display order
+  /**
+   * Timestamp (Date.now() ms) when the first file moved from queued → hashing.
+   * Used to compute throughput + ETA. null until upload begins.
+   */
+  uploadStartedAt: number | null
+  /**
+   * Sample buffer of recent completion timestamps (Date.now() ms) for ETA
+   * throughput calc. Tracks the last ~20 completions as a rolling window.
+   */
+  completionTimestamps: number[]
 
   setScanId(id: string | null): void
   addFiles(files: File[]): void
@@ -46,6 +56,17 @@ export interface UploadState {
    * so the user could potentially re-open and resume later.
    */
   clearTransientFiles(): void
+  /**
+   * Mark upload start time (for ETA calc). Called once by orchestrator when
+   * the first file transitions from queued → hashing.
+   */
+  markUploadStarted(): void
+  /**
+   * Record a file completion timestamp (for throughput/ETA calc). Called by
+   * orchestrator each time a file reaches 'done' status. Keeps a rolling
+   * window of the last 20 completions to smooth ETA.
+   */
+  recordCompletion(): void
 }
 
 function genUid(): string {
@@ -76,6 +97,8 @@ export const useUploadStore = create<UploadState>((set) => ({
   scanId: null,
   files: {},
   order: [],
+  uploadStartedAt: null,
+  completionTimestamps: [],
 
   setScanId(id) {
     set({ scanId: id })
@@ -128,7 +151,7 @@ export const useUploadStore = create<UploadState>((set) => ({
     })
   },
   reset() {
-    set({ scanId: null, files: {}, order: [] })
+    set({ scanId: null, files: {}, order: [], uploadStartedAt: null, completionTimestamps: [] })
   },
   clearTransientFiles() {
     set((s) => {
@@ -142,6 +165,22 @@ export const useUploadStore = create<UploadState>((set) => ({
         }
       }
       return { files: nextFiles, order: nextOrder }
+    })
+  },
+  markUploadStarted() {
+    set((s) => {
+      // Only set once — don't overwrite if already started (e.g. retry)
+      if (s.uploadStartedAt !== null) return s
+      return { uploadStartedAt: Date.now() }
+    })
+  },
+  recordCompletion() {
+    set((s) => {
+      const ts = Date.now()
+      // Rolling window of last 20 completions
+      const next = [...s.completionTimestamps, ts]
+      if (next.length > 20) next.shift()
+      return { completionTimestamps: next }
     })
   },
 }))
