@@ -85,6 +85,24 @@ S3_POLICY=$(cat <<EOF
       "Condition": {
         "StringLike": {"s3:prefix": ["${S3_PREFIX}*", "${S3_PREFIX}"]}
       }
+    },
+    {
+      "Sid": "ReadWriteScansPrefix",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
+      "Resource": "arn:aws:s3:::${S3_BUCKET}/scans/*"
+    },
+    {
+      "Sid": "ListScansPrefix",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::${S3_BUCKET}",
+      "Condition": {
+        "StringLike": {"s3:prefix": ["scans/*"]}
+      }
     }
   ]
 }
