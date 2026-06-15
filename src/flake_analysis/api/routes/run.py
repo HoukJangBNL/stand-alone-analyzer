@@ -1,10 +1,18 @@
 """Compute run endpoints (SSE) per backend design §1.2."""
 from __future__ import annotations
 import asyncio
+import json
 import logging
+import os
+from typing import Any
+
+import boto3
+from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from flake_analysis.api import errors as app_errors
 from flake_analysis.api.auth import User, get_current_user
 from flake_analysis.api.deps import (
     get_active_analysis,
@@ -12,8 +20,10 @@ from flake_analysis.api.deps import (
     get_session_for_background,
 )
 from flake_analysis.api.mutex import acquire_scan_lock
+from flake_analysis.api.services import scans_service
 from flake_analysis.api.services.hydrate import ensure_scan_hydrated
 from flake_analysis.api.services.runs import record_run_end, record_run_start
+from flake_analysis.api.services.s3_presign import PRESIGN_TTL_SECONDS
 from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.api.schemas.compute import (
     BackgroundParams,
@@ -676,3 +686,142 @@ async def run_domain_proximity(
                 await lock_cm.__aexit__(None, None, None)
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.get("/sam/results")
+async def get_sam_results(
+    project_id: str,
+    scan_id: int,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Read SAM per_image_results.json summary from S3 (Task 5).
+
+    Returns the parsed JSON summary containing images count, masks_total,
+    errors, and per_image details. The worker (Task 4) uploads this file
+    to `s3://{bucket}/scans/{scan_id}/07_sam/per_image_results.json` after
+    a SAM run completes.
+
+    Returns 404 when the file doesn't exist (no SAM run yet or still running).
+    Auth: same project-level access as other scan routes.
+    """
+    # Verify user has access to this scan
+    await scans_service.get_scan_for_user(session, scan_id=scan_id, user=user)
+
+    bucket = os.environ.get("SAA_S3_BUCKET")
+    if not bucket:
+        logger.error(
+            "get_sam_results aborted: SAA_S3_BUCKET not configured",
+            extra={"scan_id": scan_id},
+        )
+        raise app_errors.S3NotConfigured(scan_id=scan_id)
+
+    key = f"scans/{scan_id}/07_sam/per_image_results.json"
+
+    # Read from S3 in executor (sync boto3)
+    def _get_s3_object() -> bytes:
+        client = boto3.client("s3", region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-2"))
+        try:
+            resp = client.get_object(Bucket=bucket, Key=key)
+            return resp["Body"].read()
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in ("404", "NoSuchKey", "NotFound"):
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No SAM results for scan {scan_id} (file not found in S3)",
+                ) from exc
+            logger.exception(
+                "get_sam_results S3 error",
+                extra={"scan_id": scan_id, "s3_key": key, "s3_error_code": code},
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"S3 error reading SAM results: {code}",
+            ) from exc
+
+    loop = asyncio.get_running_loop()
+    body_bytes = await loop.run_in_executor(None, _get_s3_object)
+
+    # Parse and return JSON
+    try:
+        results = json.loads(body_bytes.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        logger.exception(
+            "get_sam_results: invalid JSON in S3 object",
+            extra={"scan_id": scan_id, "s3_key": key},
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="SAM results file is corrupted (invalid JSON)",
+        ) from exc
+
+    return results
+
+
+@router.get("/sam/masks")
+async def get_sam_masks(
+    project_id: str,
+    scan_id: int,
+    user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict[str, Any]:
+    """List SAM mask objects under scans/{scan_id}/07_sam/ with presigned GET URLs (Task 5).
+
+    Returns a dict with a `masks` key containing a list of objects, each with:
+    - `key`: the S3 object key
+    - `url`: a presigned GET URL (short TTL) for the browser to fetch directly
+
+    Returns an empty list when no SAM run has occurred yet.
+    Auth: same project-level access as other scan routes.
+    """
+    # Verify user has access to this scan
+    await scans_service.get_scan_for_user(session, scan_id=scan_id, user=user)
+
+    bucket = os.environ.get("SAA_S3_BUCKET")
+    if not bucket:
+        logger.error(
+            "get_sam_masks aborted: SAA_S3_BUCKET not configured",
+            extra={"scan_id": scan_id},
+        )
+        raise app_errors.S3NotConfigured(scan_id=scan_id)
+
+    prefix = f"scans/{scan_id}/07_sam/"
+
+    # List S3 objects and presign in executor (sync boto3)
+    def _list_and_presign() -> list[dict[str, str]]:
+        client = boto3.client("s3", region_name=os.environ.get("AWS_DEFAULT_REGION", "us-east-2"))
+        try:
+            resp = client.list_objects_v2(Bucket=bucket, Prefix=prefix)
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            logger.exception(
+                "get_sam_masks S3 list error",
+                extra={"scan_id": scan_id, "prefix": prefix, "s3_error_code": code},
+            )
+            raise HTTPException(
+                status_code=500,
+                detail=f"S3 error listing masks: {code}",
+            ) from exc
+
+        objects = resp.get("Contents", [])
+        if not objects:
+            return []
+
+        # Presign each object
+        masks = []
+        for obj in objects:
+            key = obj["Key"]
+            url = client.generate_presigned_url(
+                ClientMethod="get_object",
+                Params={"Bucket": bucket, "Key": key},
+                ExpiresIn=PRESIGN_TTL_SECONDS,
+                HttpMethod="GET",
+            )
+            masks.append({"key": key, "url": url})
+        return masks
+
+    loop = asyncio.get_running_loop()
+    masks = await loop.run_in_executor(None, _list_and_presign)
+
+    return {"masks": masks}
