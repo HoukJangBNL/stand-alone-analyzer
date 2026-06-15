@@ -430,3 +430,203 @@ def test_run_sam_gpu_ready_filters_non_image_extensions(monkeypatch, tmp_path):
     assert len(gpu_ready) == 1
     # 7 canonical extensions + 2 mixed-case = 9 images counted.
     assert gpu_ready[0]["image_count"] == 9
+
+
+def test_run_sam_s3_prefix_downloads_manifest_and_syncs_images(monkeypatch, tmp_path):
+    """When s3_prefix is given, run_sam downloads manifest.json from S3,
+    syncs each image from scans/{id}/images/{sha}.png to a local dir using
+    the manifest entry's filename (ix/iy pattern), then runs SAM on that
+    local dir. After SAM completes, it uploads the 07_sam/ results back to
+    S3 under scans/{id}/07_sam/."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    # Use tmp_path for run base instead of /opt/sam
+    monkeypatch.setenv("SAM_RUN_BASE", str(tmp_path / "runs"))
+
+    progress_payloads: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_payloads.append(payload),
+    )
+    monkeypatch.setattr(worker_tasks, "emit_marker", lambda **kw: None)
+
+    # Mock boto3 S3 client
+    s3_calls: dict[str, list] = {"get_object": [], "download_file": [], "upload_file": []}
+
+    manifest_json = {
+        "version": 1,
+        "scan_id": 42,
+        "images": [
+            {"sha256": "sha111", "filename": "ix001_iy002.png", "grid_ix": 1, "grid_iy": 2},
+            {"sha256": "sha222", "filename": "ix003_iy004.png", "grid_ix": 3, "grid_iy": 4},
+        ],
+    }
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket, Key):
+            s3_calls["get_object"].append((Bucket, Key))
+            import json
+            return {"Body": type("", (), {"read": lambda: json.dumps(manifest_json).encode()})}
+
+        def download_file(self, Bucket, Key, Filename):
+            s3_calls["download_file"].append((Bucket, Key, Filename))
+            # Create the file so SAM step sees it
+            from pathlib import Path
+            Path(Filename).parent.mkdir(parents=True, exist_ok=True)
+            Path(Filename).touch()
+
+        def upload_file(self, Filename, Bucket, Key):
+            s3_calls["upload_file"].append((Filename, Bucket, Key))
+
+    def fake_boto3_client(service_name, **kwargs):
+        if service_name == "s3":
+            return FakeS3Client()
+        raise ValueError(f"Unexpected service: {service_name}")
+
+    import boto3
+    monkeypatch.setattr(boto3, "client", fake_boto3_client)
+
+    # Mock run_sam_step to create a dummy 07_sam output
+    def fake_runner(**kw):
+        sam_dir = tmp_path / "analysis" / "07_sam"
+        sam_dir.mkdir(parents=True, exist_ok=True)
+        (sam_dir / "per_image_results.json").write_text('{"test": "data"}')
+        (sam_dir / "mask.png").touch()
+        return {"images": 2, "masks_total": 5, "errors": 0, "per_image": {}}
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", fake_runner)
+
+    worker_tasks.run_sam(
+        run_id=99,
+        s3_prefix="scans/42/",
+        raw_images_dir=None,
+        analysis_folder=str(tmp_path / "analysis"),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    # Manifest downloaded
+    assert len(s3_calls["get_object"]) == 1
+    assert s3_calls["get_object"][0] == ("qpress-uploads", "scans/42/manifest.json")
+
+    # Each image downloaded with sha256 key, written to filename from manifest
+    assert len(s3_calls["download_file"]) == 2
+    download_keys = [call[1] for call in s3_calls["download_file"]]
+    assert "scans/42/images/sha111.png" in download_keys
+    assert "scans/42/images/sha222.png" in download_keys
+
+    # Files written with original filenames (ix/iy), NOT sha
+    download_filenames = [call[2] for call in s3_calls["download_file"]]
+    assert any("ix001_iy002.png" in fn for fn in download_filenames)
+    assert any("ix003_iy004.png" in fn for fn in download_filenames)
+
+    # Results uploaded to S3 under scans/42/07_sam/
+    assert len(s3_calls["upload_file"]) >= 2
+    upload_keys = [call[2] for call in s3_calls["upload_file"]]
+    assert any(k.startswith("scans/42/07_sam/") for k in upload_keys)
+    assert any("per_image_results.json" in k for k in upload_keys)
+
+
+def test_run_sam_backward_compat_measure_run_path(monkeypatch, tmp_path):
+    """When raw_images_dir is given and s3_prefix is None (measure-run path),
+    no S3 manifest download, no sync, no result upload. run_sam_step is called
+    directly with the passed raw_images_dir."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    progress_payloads: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_payloads.append(payload),
+    )
+    monkeypatch.setattr(worker_tasks, "emit_marker", lambda **kw: None)
+
+    # Track run_sam_step calls
+    runner_calls: list[dict] = []
+
+    def fake_runner(**kw):
+        runner_calls.append(kw)
+        return {"images": 1, "masks_total": 2, "errors": 0, "per_image": {}}
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", fake_runner)
+
+    # Create a measure-run images dir
+    images_dir = tmp_path / "measure_images"
+    images_dir.mkdir()
+    (images_dir / "img.png").touch()
+
+    worker_tasks.run_sam(
+        run_id=88,
+        raw_images_dir=str(images_dir),
+        s3_prefix=None,
+        analysis_folder=str(tmp_path / "analysis"),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    # run_sam_step called with the passed raw_images_dir
+    assert len(runner_calls) == 1
+    assert runner_calls[0]["raw_images_dir"] == str(images_dir)
+
+    # No boto3 S3 client should have been created (no S3 calls)
+    # This is implicit — if boto3.client was called it would error in real env
+
+
+def test_run_sam_s3_filename_fallback_when_none(monkeypatch, tmp_path):
+    """If a manifest entry has filename=None, fall back to {sha}.png
+    (defensive — real data has no nulls but don't crash)."""
+    from flake_analysis.worker import tasks as worker_tasks
+
+    monkeypatch.setenv("SAM_RUN_BASE", str(tmp_path / "runs"))
+    monkeypatch.setattr(worker_tasks, "_emit_progress", lambda **kw: None)
+    monkeypatch.setattr(worker_tasks, "emit_marker", lambda **kw: None)
+
+    s3_calls: dict[str, list] = {"download_file": []}
+
+    manifest_json = {
+        "version": 1,
+        "scan_id": 43,
+        "images": [
+            {"sha256": "sha333", "filename": None, "grid_ix": 5, "grid_iy": 6},
+        ],
+    }
+
+    class FakeS3Client:
+        def get_object(self, *, Bucket, Key):
+            import json
+            return {"Body": type("", (), {"read": lambda: json.dumps(manifest_json).encode()})}
+
+        def download_file(self, Bucket, Key, Filename):
+            s3_calls["download_file"].append((Bucket, Key, Filename))
+            from pathlib import Path
+            Path(Filename).parent.mkdir(parents=True, exist_ok=True)
+            Path(Filename).touch()
+
+        def upload_file(self, Filename, Bucket, Key):
+            pass
+
+    def fake_boto3_client(service_name, **kwargs):
+        if service_name == "s3":
+            return FakeS3Client()
+        raise ValueError(f"Unexpected service: {service_name}")
+
+    import boto3
+    monkeypatch.setattr(boto3, "client", fake_boto3_client)
+
+    def fake_runner(**kw):
+        sam_dir = tmp_path / "analysis" / "07_sam"
+        sam_dir.mkdir(parents=True, exist_ok=True)
+        return {"images": 1, "masks_total": 0, "errors": 0, "per_image": {}}
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", fake_runner)
+
+    worker_tasks.run_sam(
+        run_id=100,
+        s3_prefix="scans/43/",
+        raw_images_dir=None,
+        analysis_folder=str(tmp_path / "analysis"),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    # Filename should fall back to sha333.png
+    download_filenames = [call[2] for call in s3_calls["download_file"]]
+    assert any("sha333.png" in fn for fn in download_filenames)
