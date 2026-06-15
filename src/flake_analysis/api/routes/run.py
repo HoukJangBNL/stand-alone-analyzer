@@ -476,8 +476,9 @@ async def run_sam(
     if not bucket:
         raise HTTPException(status_code=500, detail="SAA_S3_BUCKET not configured")
 
-    s3_key = f"scans/{scan_id}/manifest.json"
-    s3_prefix = f"scans/{scan_id}/"
+    # Use the real scan_prefix derived from DB images.s3_uri (not hardcoded)
+    scan_prefix = manifest_dict.get("scan_prefix", f"scans/{scan_id}/")
+    s3_key = f"{scan_prefix}manifest.json"
 
     # Upload manifest to S3 in executor to avoid blocking event loop
     loop = asyncio.get_running_loop()
@@ -499,7 +500,7 @@ async def run_sam(
                 analysis_folder=analysis_folder_path,
                 weights_path=params.weights_path,
                 device=params.device,
-                s3_prefix=s3_prefix,
+                s3_prefix=scan_prefix,
                 bridge=bridge,
             )
 
@@ -688,6 +689,30 @@ async def run_domain_proximity(
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+async def _derive_scan_prefix_from_db(session: AsyncSession, scan_id: int) -> str:
+    """Derive the scan's S3 base prefix from its first image's s3_uri.
+
+    Helper for read routes that need to locate S3 assets under the correct
+    prefix (which may be empty or "dev/" etc depending on SAA_S3_PREFIX at
+    upload time). Returns e.g. "scans/51/" or "dev/scans/6/".
+
+    Raises HTTPException(500) if the scan has no images (can't derive prefix).
+    """
+    from sqlalchemy import select
+    from flake_analysis.db.models import Image
+    from flake_analysis.api.services.sam_manifest import derive_scan_s3_prefix
+
+    stmt = select(Image.s3_uri).where(Image.scan_id == scan_id).limit(1)
+    result = await session.execute(stmt)
+    first_uri = result.scalar_one_or_none()
+    if not first_uri:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cannot derive S3 prefix for scan {scan_id} (no images in DB)"
+        )
+    return derive_scan_s3_prefix(first_uri)
+
+
 @router.get("/sam/results")
 async def get_sam_results(
     project_id: str,
@@ -699,8 +724,9 @@ async def get_sam_results(
 
     Returns the parsed JSON summary containing images count, masks_total,
     errors, and per_image details. The worker (Task 4) uploads this file
-    to `s3://{bucket}/scans/{scan_id}/07_sam/per_image_results.json` after
-    a SAM run completes.
+    to `s3://{bucket}/{scan_prefix}07_sam/per_image_results.json` after
+    a SAM run completes. The scan_prefix is derived from the scan's real
+    images.s3_uri to handle non-empty SAA_S3_PREFIX.
 
     Returns 404 when the file doesn't exist (no SAM run yet or still running).
     Auth: same project-level access as other scan routes.
@@ -716,7 +742,9 @@ async def get_sam_results(
         )
         raise app_errors.S3NotConfigured(scan_id=scan_id)
 
-    key = f"scans/{scan_id}/07_sam/per_image_results.json"
+    # Derive the real scan prefix from DB (not hardcoded)
+    scan_prefix = await _derive_scan_prefix_from_db(session, scan_id)
+    key = f"{scan_prefix}07_sam/per_image_results.json"
 
     # Read from S3 in executor (sync boto3)
     def _get_s3_object() -> bytes:
@@ -766,11 +794,14 @@ async def get_sam_masks(
     user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict[str, Any]:
-    """List SAM mask objects under scans/{scan_id}/07_sam/ with presigned GET URLs (Task 5).
+    """List SAM mask objects under {scan_prefix}07_sam/ with presigned GET URLs (Task 5).
 
     Returns a dict with a `masks` key containing a list of objects, each with:
     - `key`: the S3 object key
     - `url`: a presigned GET URL (short TTL) for the browser to fetch directly
+
+    The scan_prefix is derived from the scan's real images.s3_uri to handle
+    non-empty SAA_S3_PREFIX (e.g. dev/scans/6/).
 
     Returns an empty list when no SAM run has occurred yet.
     Auth: same project-level access as other scan routes.
@@ -786,7 +817,9 @@ async def get_sam_masks(
         )
         raise app_errors.S3NotConfigured(scan_id=scan_id)
 
-    prefix = f"scans/{scan_id}/07_sam/"
+    # Derive the real scan prefix from DB (not hardcoded)
+    scan_prefix = await _derive_scan_prefix_from_db(session, scan_id)
+    prefix = f"{scan_prefix}07_sam/"
 
     # List S3 objects and presign in executor (sync boto3)
     def _list_and_presign() -> list[dict[str, str]]:

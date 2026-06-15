@@ -93,10 +93,11 @@ def _mock_sam_manifest_and_s3(monkeypatch):
     specific manifest data or S3 put_object capture can override by patching
     again.
     """
-    # Mock manifest generator
+    # Mock manifest generator (with scan_prefix for robustness fix)
     fake_manifest = {
         "version": 1,
         "scan_id": SID,
+        "scan_prefix": f"scans/{SID}/",
         "images": [],
     }
     monkeypatch.setattr(

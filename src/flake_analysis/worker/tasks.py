@@ -114,9 +114,9 @@ def _sync_scan_from_s3(
     """Sync images from S3 for a web-uploaded scan.
 
     Downloads manifest.json from {s3_prefix}manifest.json, then syncs each
-    image from {s3_prefix}images/{sha256}.png to dest_dir/{filename} (using
-    the original ix/iy filename from the manifest). Returns the count of
-    images synced.
+    image from the REAL S3 key (from manifest entry["key"]) to dest_dir/{filename}.
+    The manifest carries the actual s3_uri-derived key per image, so this works
+    for any SAA_S3_PREFIX (empty or "dev/" etc). Returns the count of images synced.
 
     Uses bounded concurrency (ThreadPoolExecutor with ~12 workers) since a
     full scan has up to 3648 files. Skips files that already exist locally
@@ -124,7 +124,7 @@ def _sync_scan_from_s3(
     count (don't run SAM on a partial set).
 
     Args:
-        s3_prefix: S3 prefix for the scan (e.g. "scans/42/")
+        s3_prefix: S3 prefix for the scan (e.g. "scans/42/" or "dev/scans/6/")
         dest_dir: Local directory to sync images to
         bucket: S3 bucket name
 
@@ -154,15 +154,21 @@ def _sync_scan_from_s3(
 
     def _download_one(entry: dict) -> bool:
         """Download one image, return True if actually downloaded."""
-        sha = entry["sha256"]
-        filename = entry.get("filename") or f"{sha}.png"
+        # Use the real S3 key from the manifest (derived from DB s3_uri)
+        s3_key = entry.get("key")
+        if not s3_key:
+            # Fallback for old manifests without key field (reconstructed path)
+            sha = entry["sha256"]
+            s3_key = f"{s3_prefix}images/{sha}.png"
+            logger.warning("Manifest entry missing 'key', falling back to reconstructed path: %s", s3_key)
+
+        filename = entry.get("filename") or entry["sha256"] + ".png"
         local_path = dest_dir / filename
 
         # Skip if already exists with nonzero size (idempotent)
         if local_path.exists() and local_path.stat().st_size > 0:
             return False
 
-        s3_key = f"{s3_prefix}images/{sha}.png"
         try:
             s3.download_file(bucket, s3_key, str(local_path))
             return True

@@ -457,9 +457,22 @@ def test_run_sam_s3_prefix_downloads_manifest_and_syncs_images(monkeypatch, tmp_
     manifest_json = {
         "version": 1,
         "scan_id": 42,
+        "scan_prefix": "scans/42/",
         "images": [
-            {"sha256": "sha111", "filename": "ix001_iy002.png", "grid_ix": 1, "grid_iy": 2},
-            {"sha256": "sha222", "filename": "ix003_iy004.png", "grid_ix": 3, "grid_iy": 4},
+            {
+                "sha256": "sha111",
+                "filename": "ix001_iy002.png",
+                "grid_ix": 1,
+                "grid_iy": 2,
+                "key": "scans/42/images/sha111.png",
+            },
+            {
+                "sha256": "sha222",
+                "filename": "ix003_iy004.png",
+                "grid_ix": 3,
+                "grid_iy": 4,
+                "key": "scans/42/images/sha222.png",
+            },
         ],
     }
 
