@@ -21,21 +21,10 @@ describe('PipelineParamsForm', () => {
     ).toBeTruthy()
   })
 
-  it('Run button is disabled when sam.weights_path is empty', () => {
+  it('Run button is enabled without weights_path (no longer gated)', () => {
     render(
       <PipelineParamsForm
-        initialValues={{ sam: { weights_path: '' } }}
-        onSubmit={() => {}}
-      />
-    )
-    const runBtn = screen.getByTestId('pipeline-form-run') as HTMLButtonElement
-    expect(runBtn.disabled).toBe(true)
-  })
-
-  it('Run button is enabled when sam.weights_path is filled', () => {
-    render(
-      <PipelineParamsForm
-        initialValues={{ sam: { weights_path: '/srv/sam/merged.pt' } }}
+        initialValues={{}}
         onSubmit={() => {}}
       />
     )
@@ -43,11 +32,11 @@ describe('PipelineParamsForm', () => {
     expect(runBtn.disabled).toBe(false)
   })
 
-  it('clicking Run calls onSubmit with a complete PipelineBody', () => {
+  it('clicking Run calls onSubmit with a complete PipelineBody (sam without weights_path)', () => {
     const onSubmit = vi.fn()
     render(
       <PipelineParamsForm
-        initialValues={{ sam: { weights_path: '/srv/sam/merged.pt' } }}
+        initialValues={{}}
         onSubmit={onSubmit}
       />
     )
@@ -59,7 +48,8 @@ describe('PipelineParamsForm', () => {
     expect(body).toHaveProperty('sam')
     expect(body).toHaveProperty('domain_stats')
     expect(body).toHaveProperty('domain_proximity')
-    expect(body.sam.weights_path).toBe('/srv/sam/merged.pt')
+    // sam should not have weights_path
+    expect(body.sam).not.toHaveProperty('weights_path')
   })
 
   it('changing background.seed fires onBackgroundDirty(true), reverting fires (false)', () => {
@@ -67,7 +57,6 @@ describe('PipelineParamsForm', () => {
     render(
       <PipelineParamsForm
         initialValues={{
-          sam: { weights_path: '/srv/sam/merged.pt' },
           background: {
             seed: 0,
             max_images: 100,
@@ -95,7 +84,7 @@ describe('PipelineParamsForm', () => {
   it('isRunning=true disables the Run button', () => {
     render(
       <PipelineParamsForm
-        initialValues={{ sam: { weights_path: '/srv/sam/merged.pt' } }}
+        initialValues={{}}
         onSubmit={() => {}}
         isRunning
       />

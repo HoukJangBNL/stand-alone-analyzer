@@ -330,7 +330,7 @@ async def _defer_sam_job(
     *,
     run_id: int,
     analysis_folder,
-    weights_path,
+    weights_path: str | None,
     device: str | None,
     raw_images_dir=None,
     s3_prefix: str | None = None,
@@ -387,7 +387,7 @@ async def _defer_sam_job(
     kwargs = {
         "run_id": run_id,
         "analysis_folder": str(analysis_folder),
-        "weights_path": str(weights_path),
+        "weights_path": str(weights_path) if weights_path else "",
         "device": device,
     }
     if s3_prefix is not None:

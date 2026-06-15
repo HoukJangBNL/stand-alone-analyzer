@@ -664,3 +664,39 @@ async def test_run_sam_writes_manifest_to_s3_and_defers_with_s3_prefix(
     assert "raw_images_dir" not in defer_kwargs
     assert "analysis_folder" in defer_kwargs
     assert "weights_path" in defer_kwargs
+
+
+@pytest.mark.asyncio
+async def test_run_sam_without_weights_path_is_valid(tmp_path, monkeypatch, _client_app):
+    """POST /run/sam with no weights_path is valid (production multi-GPU path ignores it).
+
+    The 8-GPU SAM worker path loads AMI-baked M3 LoRA model and ignores weights_path
+    entirely. Frontend now omits it; backend must accept requests without it.
+    """
+    _setup_project(tmp_path, monkeypatch, pid="p_no_weights", sid=SID)
+    _stub_session_dep(_client_app)
+
+    # Stub defer + stream so the route completes without a real queue
+    with _runs_audit_patches():
+        with patch("flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock()) as mock_defer:
+            with patch(
+                "flake_analysis.api.routes.run._stream_sam_events",
+                new=_fake_stream_factory([
+                    {"type": "progress", "progress": 0.5, "message": "processing"},
+                    {"type": "completed", "result": {"images": 10, "masks_total": 100, "errors": 0}},
+                ]),
+            ):
+                async with AsyncClient(transport=ASGITransport(app=_client_app), base_url="http://test") as ac:
+                    resp = await ac.post(
+                        f"/api/v1/projects/p_no_weights/scans/{SID}/run/sam",
+                        json={},  # No weights_path
+                    )
+
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+
+    # Assert defer was called (route didn't crash on missing weights_path)
+    assert mock_defer.call_count == 1
+    defer_kwargs = mock_defer.call_args.kwargs
+    # Backend should pass empty string when weights_path is None
+    assert "weights_path" in defer_kwargs
+    assert defer_kwargs["weights_path"] in ("", None)  # Either is acceptable

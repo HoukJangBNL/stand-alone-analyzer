@@ -71,7 +71,7 @@ class DomainProximitySummary(BaseModel):
 
 class SamParams(BaseModel):
     """POST /run/sam body."""
-    weights_path: str  # absolute path; Phase 4 will add S3 download path
+    weights_path: str | None = None  # optional: prod multi-GPU path ignores this (AMI-baked M3)
     device: str | None = None  # None = auto-detect
 
 

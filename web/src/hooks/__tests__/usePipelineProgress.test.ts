@@ -133,7 +133,7 @@ describe('usePipelineProgress', () => {
 
     void act(() => {
       void result.current.start({
-        sam: { weights_path: '/srv/sam/merged.pt' },
+        sam: {},
       })
     })
 
@@ -162,7 +162,7 @@ describe('usePipelineProgress', () => {
 
     void act(() => {
       void result.current.start({
-        sam: { weights_path: '/srv/sam/merged.pt' },
+        sam: {},
       })
     })
 
@@ -200,7 +200,7 @@ describe('usePipelineProgress', () => {
 
     void act(() => {
       void result.current.start({
-        sam: { weights_path: '/srv/sam/merged.pt' },
+        sam: {},
       })
     })
 
@@ -240,7 +240,7 @@ describe('usePipelineProgress', () => {
 
     void act(() => {
       void result.current.start({
-        sam: { weights_path: '/srv/sam/merged.pt' },
+        sam: {},
       })
     })
 
@@ -285,7 +285,7 @@ describe('usePipelineProgress', () => {
 
     void act(() => {
       void result.current.start({
-        sam: { weights_path: '/srv/sam/merged.pt' },
+        sam: {},
       })
     })
 
@@ -321,7 +321,7 @@ describe('usePipelineProgress', () => {
 
     void act(() => {
       void result.current.start({
-        sam: { weights_path: '/srv/sam/merged.pt' },
+        sam: {},
       })
     })
 
@@ -380,7 +380,7 @@ describe('usePipelineProgress', () => {
 
     void act(() => {
       void result.current.start({
-        sam: { weights_path: '/srv/sam/merged.pt' },
+        sam: {},
       })
     })
 
@@ -428,7 +428,7 @@ describe('usePipelineProgress', () => {
 
     void act(() => {
       void result.current.start({
-        sam: { weights_path: '/srv/sam/merged.pt' },
+        sam: {},
       })
     })
 

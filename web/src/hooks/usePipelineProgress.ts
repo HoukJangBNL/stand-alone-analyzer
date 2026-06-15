@@ -72,7 +72,7 @@ export interface PipelineBody {
     gaussian_sigma?: number
     method?: string
   }
-  sam: { weights_path: string; device?: string | null }
+  sam?: { device?: string | null }
   domain_stats?: { repr_mode?: string; raw_ext?: string }
   domain_proximity?: {
     r_max_px?: number

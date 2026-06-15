@@ -63,13 +63,13 @@ describe('SamRunPanel', () => {
     expect(mockedUseStepProgress).toHaveBeenCalledWith('p1', 42, 'sam')
   })
 
-  it('idle: clicking Run calls start with weights_path payload', () => {
+  it('idle: clicking Run calls start with empty payload (no weights_path)', () => {
     const { start } = setHook({ status: 'idle' })
     render(<SamRunPanel projectId="p1" scanId={42} />)
 
     fireEvent.click(screen.getByTestId('compute-sam-run'))
     expect(start).toHaveBeenCalledTimes(1)
-    expect(start).toHaveBeenCalledWith({ weights_path: '/srv/sam/merged.pt' })
+    expect(start).toHaveBeenCalledWith({})
   })
 
   it('running: shows progress bar with pct value, message, run disabled, cancel visible', () => {

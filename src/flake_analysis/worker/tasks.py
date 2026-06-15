@@ -239,7 +239,7 @@ def run_sam(
     raw_images_dir: str | None = None,
     s3_prefix: str | None = None,
     analysis_folder: str,
-    weights_path: str,
+    weights_path: str | None = None,
     device: str | None = None,
     model_meta: dict[str, str] | None = None,
 ) -> dict[str, Any]:
@@ -362,10 +362,12 @@ def run_sam(
     masks_total = 0
     errors = 0
     try:
+        # Multi-GPU path ignores weights_path (AMI-baked M3); single-GPU needs it.
+        # Empty/None is fine for prod path; local dev fallback would need real path.
         result = run_sam_step(
             raw_images_dir=effective_raw_images_dir,
             analysis_folder=analysis_folder,
-            weights_path=weights_path,
+            weights_path=weights_path or "",
             device=device,
             progress_callback=_on_progress,
         )

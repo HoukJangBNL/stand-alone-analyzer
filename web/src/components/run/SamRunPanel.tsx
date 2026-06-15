@@ -7,9 +7,7 @@
  * token; the latter renders in red so users notice partial failures while the
  * stream keeps going.
  *
- * Weights path is read from VITE_SAM_WEIGHTS_PATH (build-time env) and falls
- * back to the canonical bastion path. Device is intentionally omitted — the
- * server picks it up from its own runtime config.
+ * SAM now uses the AMI-baked fine-tuned model — no weights_path needed.
  */
 import { useStepProgress } from '@/hooks/useStepProgress'
 
@@ -18,8 +16,9 @@ interface SamRunPanelProps {
   scanId: number
 }
 
+// SamParams is now empty — the 8-GPU worker loads weights from AMI-baked config
 interface SamParams {
-  weights_path: string
+  // Empty — no params needed
 }
 
 interface SamResult {
@@ -27,8 +26,6 @@ interface SamResult {
   masks_total: number
   errors: number
 }
-
-const DEFAULT_WEIGHTS = '/srv/sam/merged.pt'
 
 function isErrorMessage(msg: string): boolean {
   return /error/i.test(msg)
@@ -47,13 +44,8 @@ export function SamRunPanel({ projectId, scanId }: SamRunPanelProps) {
     cancel,
   } = useStepProgress<SamParams, SamResult>(projectId, scanId, 'sam')
 
-  // Vite injects env vars on import.meta.env. The project doesn't ship a
-  // vite-env.d.ts, so funnel through `unknown` to satisfy strict TS.
-  const env = (import.meta as unknown as { env?: Record<string, string> }).env
-  const weightsPath = env?.VITE_SAM_WEIGHTS_PATH ?? DEFAULT_WEIGHTS
-
   const handleRun = () => {
-    void start({ weights_path: weightsPath })
+    void start({})
   }
 
   const isRunning = status === 'running'

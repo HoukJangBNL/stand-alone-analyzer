@@ -64,7 +64,7 @@ class PipelineBody(BaseModel):
 
     thumbnails: ThumbnailsParams = Field(default_factory=ThumbnailsParams)
     background: BackgroundParams = Field(default_factory=BackgroundParams)
-    sam: SamParams  # required: no default for weights_path
+    sam: SamParams = Field(default_factory=SamParams)  # weights_path now optional
     domain_stats: DomainStatsParams = Field(default_factory=DomainStatsParams)
     domain_proximity: DomainProximityParams = Field(default_factory=DomainProximityParams)
 
@@ -168,7 +168,7 @@ async def _defer_sam_job(
     run_id: int,
     raw_images_dir,
     analysis_folder,
-    weights_path,
+    weights_path: str | None,
     device: str | None,
 ) -> None:
     """Push a SAM job onto the procrastinate ``gpu`` queue.
@@ -185,7 +185,7 @@ async def _defer_sam_job(
         run_id=run_id,
         raw_images_dir=str(raw_images_dir),
         analysis_folder=str(analysis_folder),
-        weights_path=str(weights_path),
+        weights_path=str(weights_path) if weights_path else "",
         device=device,
     )
 

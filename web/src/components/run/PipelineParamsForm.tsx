@@ -3,20 +3,16 @@
  * P5.3 — PipelineParamsForm.
  *
  * Five collapsible sections (one per step) backing a single PipelineBody.
- * Submission is gated on a non-empty SAM weights_path. Background-section
- * dirty tracking emits a callback so P5.4 (ComputeTab) can prompt the user
- * to re-run downstream steps when the cascade rule fires.
+ * Background-section dirty tracking emits a callback so P5.4 (ComputeTab) can
+ * prompt the user to re-run downstream steps when the cascade rule fires.
+ *
+ * SAM now uses the AMI-baked fine-tuned model — no weights_path needed.
  *
  * No persistence: form values live in component state only (Plan §P5.1
  * Option B).
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { PipelineBody } from '@/hooks/usePipelineProgress'
-
-const ENV_WEIGHTS = (
-  (import.meta as unknown as { env?: Record<string, string> }).env ?? {}
-).VITE_SAM_WEIGHTS_PATH
-const DEFAULT_WEIGHTS = ENV_WEIGHTS ?? '/srv/sam/merged.pt'
 
 interface FormValues {
   thumbnails: {
@@ -31,7 +27,6 @@ interface FormValues {
     method: string
   }
   sam: {
-    weights_path: string
     device: string | null
   }
   domain_stats: {
@@ -57,7 +52,7 @@ const DEFAULTS: FormValues = {
     gaussian_sigma: 10.0,
     method: 'median',
   },
-  sam: { weights_path: DEFAULT_WEIGHTS, device: null },
+  sam: { device: null },
   domain_stats: { repr_mode: 'median', raw_ext: '.png' },
   domain_proximity: {
     r_max_px: 200,
@@ -113,8 +108,6 @@ export function PipelineParamsForm({
   const initial = useMemo(() => mergeDefaults(initialValues), [initialValues])
   const [values, setValues] = useState<FormValues>(initial)
   const [bgDirty, setBgDirty] = useState(false)
-
-  const samEmpty = !values.sam.weights_path.trim()
 
   // Track background dirtiness against initial.background.
   useEffect(() => {
@@ -253,21 +246,12 @@ export function PipelineParamsForm({
       </details>
 
       {/* SAM */}
-      <details data-testid="pipeline-form-section-sam" open={samEmpty}>
-        <summary>SAM{samEmpty ? ' (weights_path required)' : ''}</summary>
+      <details data-testid="pipeline-form-section-sam">
+        <summary>SAM</summary>
         <div style={{ padding: '8px 12px', display: 'grid', gap: 6 }}>
-          <label>
-            weights_path *
-            <input
-              data-testid="pipeline-form-sam-weights-path"
-              type="text"
-              value={values.sam.weights_path}
-              onChange={(e) =>
-                update('sam', { weights_path: e.target.value })
-              }
-            />
-            <small> Required (no server-side default).</small>
-          </label>
+          <p style={{ fontSize: '0.9em', color: '#555', margin: 0 }}>
+            Uses the configured fine-tuned model from the AMI.
+          </p>
           <label>
             device
             <input
@@ -434,7 +418,7 @@ export function PipelineParamsForm({
           type="button"
           data-testid="pipeline-form-run"
           onClick={handleRun}
-          disabled={isRunning || samEmpty}
+          disabled={isRunning}
         >
           ▶ Run pipeline
         </button>
