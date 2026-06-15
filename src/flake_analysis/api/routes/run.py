@@ -319,10 +319,11 @@ async def _ensure_gpu_worker():
 async def _defer_sam_job(
     *,
     run_id: int,
-    raw_images_dir,
     analysis_folder,
     weights_path,
     device: str | None,
+    raw_images_dir=None,
+    s3_prefix: str | None = None,
     bridge: ProgressBridge | None = None,
 ) -> None:
     """Push a SAM job onto the procrastinate ``gpu`` queue.
@@ -373,13 +374,18 @@ async def _defer_sam_job(
     from flake_analysis.worker import tasks as _tasks  # noqa: F401
     from flake_analysis.worker.app import app
 
-    await app.tasks["run_sam"].defer_async(
-        run_id=run_id,
-        raw_images_dir=str(raw_images_dir),
-        analysis_folder=str(analysis_folder),
-        weights_path=str(weights_path),
-        device=device,
-    )
+    kwargs = {
+        "run_id": run_id,
+        "analysis_folder": str(analysis_folder),
+        "weights_path": str(weights_path),
+        "device": device,
+    }
+    if s3_prefix is not None:
+        kwargs["s3_prefix"] = s3_prefix
+    if raw_images_dir is not None:
+        kwargs["raw_images_dir"] = str(raw_images_dir)
+
+    await app.tasks["run_sam"].defer_async(**kwargs)
 
 
 def _stream_sam_events(run_id: int):
@@ -414,14 +420,26 @@ async def run_sam(
     worker process drains. Failures inside the worker arrive as
     ``error`` notifications and are translated to the same
     ``pipeline_failed`` envelope shape.
+
+    For web-uploaded scans (images in S3), this generates a manifest and
+    uploads it to S3, then defers with s3_prefix for the worker to sync
+    images directly from S3 instead of downloading to the API host.
     """
-    manifest = await ensure_scan_hydrated(
-        session, project_id=project_id, scan_id=scan_id
-    )
+    import json
+    import os
+    from flake_analysis.state.paths import analysis_folder as compute_analysis_folder
+    from flake_analysis.api.services.sam_manifest import generate_sam_manifest_for_scan
 
     analysis = await get_active_analysis(scan_id, session)
     if analysis is None:
         raise HTTPException(status_code=404, detail="no analysis for scan")
+
+    # Compute analysis_folder directly without hydrating (no 9GB download)
+    root = os.environ.get("SAA_ANALYSIS_ROOT") or os.environ.get(
+        "SAA_ANALYSIS_FOLDER", "/mnt/analysis"
+    )
+    analysis_folder_path = compute_analysis_folder(root, project_id, scan_id)
+    analysis_folder_path.mkdir(parents=True, exist_ok=True)
 
     lock_cm = acquire_scan_lock(scan_id)
     await lock_cm.__aenter__()
@@ -440,6 +458,27 @@ async def run_sam(
     run_id = await record_run_start(session, analysis_id=analysis.id, step="sam")
     await session.commit()
 
+    # Generate SAM manifest and upload to S3
+    manifest_dict = await generate_sam_manifest_for_scan(session, scan_id=scan_id)
+    manifest_json = json.dumps(manifest_dict)
+
+    bucket = os.environ.get("SAA_S3_BUCKET")
+    if not bucket:
+        raise HTTPException(status_code=500, detail="SAA_S3_BUCKET not configured")
+
+    s3_key = f"scans/{scan_id}/manifest.json"
+    s3_prefix = f"scans/{scan_id}/"
+
+    # Upload manifest to S3 in executor to avoid blocking event loop
+    loop = asyncio.get_running_loop()
+
+    def _upload_manifest():
+        import boto3
+        s3 = boto3.client("s3")
+        s3.put_object(Bucket=bucket, Key=s3_key, Body=manifest_json.encode("utf-8"))
+
+    await loop.run_in_executor(None, _upload_manifest)
+
     bridge = ProgressBridge()
 
     async def driver():
@@ -447,10 +486,10 @@ async def run_sam(
         try:
             await _defer_sam_job(
                 run_id=run_id,
-                raw_images_dir=manifest.raw_images_dir,
-                analysis_folder=manifest.analysis_folder,
+                analysis_folder=analysis_folder_path,
                 weights_path=params.weights_path,
                 device=params.device,
+                s3_prefix=s3_prefix,
                 bridge=bridge,
             )
 

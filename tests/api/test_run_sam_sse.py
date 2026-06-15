@@ -85,6 +85,38 @@ def _clear_scan_locks():
     mutex._scan_locks.clear()
 
 
+@pytest.fixture(autouse=True)
+def _mock_sam_manifest_and_s3(monkeypatch):
+    """Auto-mock generate_sam_manifest_for_scan and boto3 for all tests.
+
+    The S3-sync path (Task 3) requires these for run_sam. Tests that need
+    specific manifest data or S3 put_object capture can override by patching
+    again.
+    """
+    # Mock manifest generator
+    fake_manifest = {
+        "version": 1,
+        "scan_id": SID,
+        "images": [],
+    }
+    monkeypatch.setattr(
+        "flake_analysis.api.services.sam_manifest.generate_sam_manifest_for_scan",
+        AsyncMock(return_value=fake_manifest),
+    )
+
+    # Mock boto3 S3 client to no-op
+    from unittest.mock import MagicMock
+    def fake_boto3_client(service_name):
+        if service_name == "s3":
+            mock_client = MagicMock()
+            mock_client.put_object = MagicMock(return_value={})
+            return mock_client
+        raise ValueError(f"Unexpected service: {service_name}")
+
+    monkeypatch.setattr("boto3.client", fake_boto3_client)
+    monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+
+
 @pytest.fixture
 def _client_app():
     return _make_app()
@@ -530,3 +562,104 @@ async def test_run_sam_driver_loop_routes_gpu_ready_payload(
     payload = json.loads(data_after[len("data: "):])
     assert payload["type"] == "gpu_ready"
     assert payload["image_count"] == 100
+
+
+@pytest.mark.asyncio
+async def test_run_sam_writes_manifest_to_s3_and_defers_with_s3_prefix(
+    tmp_path, monkeypatch, _client_app
+):
+    """run_sam writes a SAM manifest to S3 at scans/{scan_id}/manifest.json
+    and defers the worker with s3_prefix instead of raw_images_dir.
+
+    This is the S3-sync path for web-uploaded scans (Task 3 of the web-scan
+    S3 SAM path implementation).
+    """
+    from unittest.mock import MagicMock
+
+    _setup_project(tmp_path, monkeypatch, pid="p_sam_s3", sid=SID)
+
+    # Mock generate_sam_manifest_for_scan
+    fake_manifest = {
+        "version": 1,
+        "scan_id": SID,
+        "images": [
+            {"sha256": "abc123", "filename": "ix001_iy002.png", "grid_ix": 1, "grid_iy": 2},
+            {"sha256": "def456", "filename": "ix003_iy004.png", "grid_ix": 3, "grid_iy": 4},
+        ],
+    }
+
+    # Pre-import tasks so its @app.task decorators run against the real
+    # app, BEFORE we monkeypatch the app symbol.
+    import flake_analysis.worker.tasks  # noqa: F401
+
+    # Capture defer_async call arguments
+    defer_kwargs = {}
+
+    class _FakeTask:
+        async def defer_async(self, **kw):
+            defer_kwargs.update(kw)
+
+    class _FakeApp:
+        tasks = {"run_sam": _FakeTask()}
+
+    monkeypatch.setattr("flake_analysis.worker.app.app", _FakeApp())
+
+    # Mock boto3 S3 client
+    s3_put_calls = []
+
+    def fake_boto3_client(service_name):
+        if service_name == "s3":
+            mock_client = MagicMock()
+            mock_client.put_object = lambda **kw: s3_put_calls.append(kw)
+            return mock_client
+        raise ValueError(f"Unexpected service: {service_name}")
+
+    monkeypatch.setattr("boto3.client", fake_boto3_client)
+    monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+
+    _stub_session_dep(_client_app)
+
+    fake_payloads = [
+        {
+            "type": "completed",
+            "result": {"images": 2, "masks_total": 7, "errors": 0, "per_image": {}},
+        },
+    ]
+
+    with _runs_audit_patches(), patch(
+        "flake_analysis.api.routes.run._ensure_gpu_worker",
+        new=AsyncMock(return_value=None),
+    ), patch(
+        "flake_analysis.api.routes.run._stream_sam_events",
+        side_effect=_fake_stream_factory(fake_payloads),
+    ), patch(
+        "flake_analysis.api.services.sam_manifest.generate_sam_manifest_for_scan",
+        new=AsyncMock(return_value=fake_manifest),
+    ):
+        async with AsyncClient(
+            transport=ASGITransport(app=_client_app), base_url="http://test"
+        ) as client:
+            async with client.stream(
+                "POST",
+                f"/api/v1/projects/p_sam_s3/scans/{SID}/run/sam",
+                json={"weights_path": "/tmp/fake_weights.pt"},
+            ) as resp:
+                assert resp.status_code == 200
+                # Consume the stream to allow the driver to complete
+                async for _ in resp.aiter_lines():
+                    pass
+
+    # Assert S3 put_object was called with the manifest
+    assert len(s3_put_calls) == 1
+    put_call = s3_put_calls[0]
+    assert put_call["Bucket"] == "qpress-uploads"
+    assert put_call["Key"] == f"scans/{SID}/manifest.json"
+    manifest_body = json.loads(put_call["Body"])
+    assert manifest_body == fake_manifest
+
+    # Assert defer_async was called with s3_prefix and WITHOUT raw_images_dir
+    assert "s3_prefix" in defer_kwargs
+    assert defer_kwargs["s3_prefix"] == f"scans/{SID}/"
+    assert "raw_images_dir" not in defer_kwargs
+    assert "analysis_folder" in defer_kwargs
+    assert "weights_path" in defer_kwargs
