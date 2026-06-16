@@ -104,10 +104,15 @@ def _mock_sam_manifest_and_s3(monkeypatch):
     The pipeline SAM step requires these for the S3-sync path. Tests that need
     specific manifest data or S3 put_object capture can override by patching again.
     Mirrors the fixture in test_run_sam_sse.py.
+
+    CRITICAL: Patch at run_pipeline module level because the route imports the
+    bound name (line 52: `from ...sam_manifest import generate_sam_manifest_for_scan`).
+    The route now calls this BEFORE the SSE stream starts (on the request session)
+    to avoid concurrent session deadlock, so the patch must be in the route's namespace.
     """
     from unittest.mock import AsyncMock, MagicMock
 
-    # Mock manifest generator
+    # Mock manifest generator at the route's imported name
     fake_manifest = {
         "version": 1,
         "scan_id": 42,
@@ -115,7 +120,7 @@ def _mock_sam_manifest_and_s3(monkeypatch):
         "images": [],
     }
     monkeypatch.setattr(
-        "flake_analysis.api.services.sam_manifest.generate_sam_manifest_for_scan",
+        "flake_analysis.api.routes.run_pipeline.generate_sam_manifest_for_scan",
         AsyncMock(return_value=fake_manifest),
     )
 
@@ -259,15 +264,32 @@ async def test_pipeline_streams_all_5_steps_and_writes_4_runs_rows(
         },
     ]
 
+    # Track SAM manifest generation to verify it's called once on request session
+    from unittest.mock import AsyncMock
+    manifest_mock = AsyncMock(return_value={
+        "version": 1,
+        "scan_id": sid,
+        "scan_prefix": f"scans/{sid}/",
+        "images": [],
+    })
+
     with patch("flake_analysis.api.routes.run_pipeline.run_thumbnails_step", side_effect=thumbs), \
          patch("flake_analysis.api.routes.run_pipeline.run_background_step", side_effect=bg), \
-         patch("flake_analysis.api.services.sam_dispatch.defer_sam_job", new=AsyncMock(return_value=None)), \
+         patch("flake_analysis.api.routes.run_pipeline.generate_sam_manifest_for_scan", new=manifest_mock), \
+         patch("flake_analysis.api.services.sam_dispatch.defer_sam_job", new=AsyncMock(return_value=None)) as defer_mock, \
          patch("flake_analysis.api.routes.run_pipeline._stream_sam_events", side_effect=_fake_sam_stream(sam_payloads)), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_stats_step", side_effect=stats), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_proximity_step", side_effect=prox):
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             status, events = await _post_pipeline_collect_events(client, pid, sid, body)
             assert status == 200
+
+    # Assert SAM manifest was generated exactly once (on request session, pre-stream)
+    assert manifest_mock.call_count == 1, "generate_sam_manifest_for_scan must be called exactly once"
+    # Assert defer_sam_job was called with s3_prefix derived from the manifest
+    assert defer_mock.call_count == 1
+    defer_kwargs = defer_mock.call_args.kwargs
+    assert defer_kwargs["s3_prefix"] == f"scans/{sid}/"
 
     started = [e for e in events if e["type"] == "step_started"]
     completed = [e for e in events if e["type"] == "step_completed"]
@@ -469,9 +491,16 @@ async def test_pipeline_cascade_clears_steps_done(
         },
     ]
     defer_mock = AsyncMock(return_value=None)
+    manifest_mock = AsyncMock(return_value={
+        "version": 1,
+        "scan_id": sid,
+        "scan_prefix": f"scans/{sid}/",
+        "images": [],
+    })
 
     with patch("flake_analysis.api.routes.run_pipeline.run_thumbnails_step", side_effect=thumbs), \
          patch("flake_analysis.api.routes.run_pipeline.run_background_step", side_effect=bg), \
+         patch("flake_analysis.api.routes.run_pipeline.generate_sam_manifest_for_scan", new=manifest_mock), \
          patch("flake_analysis.api.services.sam_dispatch.defer_sam_job", new=defer_mock), \
          patch("flake_analysis.api.routes.run_pipeline._stream_sam_events", side_effect=_fake_sam_stream(sam_payloads)), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_stats_step", side_effect=stats), \

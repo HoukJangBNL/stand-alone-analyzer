@@ -201,6 +201,11 @@ async def run_pipeline(
     # session yields.
     analysis_id = analysis.id
 
+    # Generate the SAM manifest on the REQUEST session (before SSE stream starts)
+    # to avoid concurrent session deadlock. The driver's _run_sam closure will
+    # use this captured manifest_dict directly instead of opening a second session.
+    sam_manifest_dict = await generate_sam_manifest_for_scan(session, scan_id=scan_id)
+
     # Acquire the per-scan lock synchronously so a contended request gets an
     # HTTP-level error envelope (ProjectBusy -> 423) instead of an SSE stream
     # that opens and immediately errors.
@@ -294,25 +299,24 @@ async def run_pipeline(
         orchestrator's gather/sequence handles it identically to a CPU
         step crashing in the executor.
 
-        Generates the SAM manifest and uploads it to S3 under the scan's real
-        prefix (derived from DB images.s3_uri), then defers with s3_prefix for
-        the worker to sync from S3 directly.
+        Uses the pre-generated sam_manifest_dict (captured from the request
+        session before the SSE stream started) and uploads it to S3 under
+        the scan's real prefix (derived from DB images.s3_uri), then defers
+        with s3_prefix for the worker to sync from S3 directly.
         """
         bridge.step_started("sam", _STEP_INDEX["sam"])
         await _emit_usage(user, step="sam", project_id=project_id, scan_id=scan_id)
         run_id = await _start_run_row(analysis_id=analysis_id, step="sam")
 
-        # Generate SAM manifest (need a fresh session since driver is in bg context)
-        async with get_session_for_background() as bg:
-            manifest_dict = await generate_sam_manifest_for_scan(bg, scan_id=scan_id)
-        manifest_json = json.dumps(manifest_dict)
+        # Use the pre-generated manifest_dict from the request session
+        manifest_json = json.dumps(sam_manifest_dict)
 
         # Upload manifest to S3 under the scan's real prefix
         bucket = os.environ.get("SAA_S3_BUCKET")
         if not bucket:
             raise RuntimeError("SAA_S3_BUCKET not configured")
 
-        scan_prefix = manifest_dict.get("scan_prefix", f"scans/{scan_id}/")
+        scan_prefix = sam_manifest_dict.get("scan_prefix", f"scans/{scan_id}/")
         s3_key = f"{scan_prefix}manifest.json"
 
         # Upload in executor to avoid blocking event loop
