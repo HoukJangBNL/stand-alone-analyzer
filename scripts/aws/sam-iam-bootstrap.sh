@@ -93,7 +93,10 @@ S3_POLICY=$(cat <<EOF
         "s3:GetObject",
         "s3:PutObject"
       ],
-      "Resource": "arn:aws:s3:::${S3_BUCKET}/scans/*"
+      "Resource": [
+        "arn:aws:s3:::${S3_BUCKET}/scans/*",
+        "arn:aws:s3:::${S3_BUCKET}/dev/scans/*"
+      ]
     },
     {
       "Sid": "ListScansPrefix",
@@ -101,7 +104,7 @@ S3_POLICY=$(cat <<EOF
       "Action": "s3:ListBucket",
       "Resource": "arn:aws:s3:::${S3_BUCKET}",
       "Condition": {
-        "StringLike": {"s3:prefix": ["scans/*"]}
+        "StringLike": {"s3:prefix": ["scans/*", "dev/scans/*"]}
       }
     }
   ]
