@@ -403,12 +403,17 @@ async def test_default_factory_uses_boto3_ec2_client(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable():
+def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable(monkeypatch):
     """T7n: when ALL three AZs reject spot with capacity errors,
     _launch_one rotates to on-demand and accepts the first AZ that
     returns an instance. NetworkInterfaces.SubnetId is overridden
-    per-call to bypass the LT's pinned single-AZ subnet."""
+    per-call to bypass the LT's pinned single-AZ subnet.
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from flake_analysis.worker.launcher import _launch_one, SUBNETS_BY_AZ
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     capacity_err = ClientError(
         {"Error": {"Code": "InsufficientInstanceCapacity",
@@ -452,16 +457,21 @@ def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable():
     assert calls[3]["InstanceMarketOptions"] == {}
 
 
-def test_launch_one_raises_capacity_error_when_full_ladder_fails():
+def test_launch_one_raises_capacity_error_when_full_ladder_fails(monkeypatch):
     """T7q: when every instance type × AZ × market combination is
     refused, _launch_one raises GpuCapacityUnavailable after exactly
     `len(INSTANCE_TYPE_LADDER) × 6` attempts (3 AZs × 2 markets per
-    type)."""
+    type).
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         GpuCapacityUnavailable,
         INSTANCE_TYPE_LADDER,
     )
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     capacity_err = ClientError(
         {"Error": {"Code": "InsufficientInstanceCapacity",
@@ -484,14 +494,19 @@ def test_launch_one_raises_capacity_error_when_full_ladder_fails():
     assert ec2.attempt == len(INSTANCE_TYPE_LADDER) * 6
 
 
-def test_launch_one_falls_through_ladder_to_smaller_gpu():
+def test_launch_one_falls_through_ladder_to_smaller_gpu(monkeypatch):
     """T7q: when the largest GPU type is fully drought across all AZs
     and markets (6 refusals), _launch_one steps down to the next
-    instance type. First successful attempt wins."""
+    instance type. First successful attempt wins.
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         INSTANCE_TYPE_LADDER,
     )
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     capacity_err = ClientError(
         {"Error": {"Code": "InsufficientInstanceCapacity",
@@ -555,13 +570,18 @@ def test_launch_one_propagates_non_capacity_client_errors():
     assert exc_info.value.response["Error"]["Code"] == "UnauthorizedOperation"
 
 
-def test_launch_one_falls_back_to_on_demand_on_max_spot_count_exceeded():
+def test_launch_one_falls_back_to_on_demand_on_max_spot_count_exceeded(monkeypatch):
     """Owner directive 2026-06-08: any spot failure → automatic
     on-demand. MaxSpotInstanceCountExceeded happens when AWS still
     holds the spot quota from a recent terminate (~10 min release
-    delay). Without this, every back-to-back run fails."""
+    delay). Without this, every back-to-back run fails.
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from botocore.exceptions import ClientError
     from flake_analysis.worker.launcher import _launch_one
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     quota_err = ClientError(
         {"Error": {"Code": "MaxSpotInstanceCountExceeded",
@@ -585,11 +605,16 @@ def test_launch_one_falls_back_to_on_demand_on_max_spot_count_exceeded():
     assert ec2.attempt == 2
 
 
-def test_launch_one_falls_back_to_on_demand_on_unsupported_spot():
+def test_launch_one_falls_back_to_on_demand_on_unsupported_spot(monkeypatch):
     """`Unsupported` is returned for spot when an instance type isn't
-    available as spot in a given subnet. Should also retry on-demand."""
+    available as spot in a given subnet. Should also retry on-demand.
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from botocore.exceptions import ClientError
     from flake_analysis.worker.launcher import _launch_one
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     unsupported_err = ClientError(
         {"Error": {"Code": "Unsupported",
@@ -613,10 +638,15 @@ def test_launch_one_falls_back_to_on_demand_on_unsupported_spot():
     assert ec2.attempt == 2
 
 
-def test_launch_one_falls_back_on_spot_max_price_too_low():
-    """SpotMaxPriceTooLow is also a spot-only failure."""
+def test_launch_one_falls_back_on_spot_max_price_too_low(monkeypatch):
+    """SpotMaxPriceTooLow is also a spot-only failure.
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from botocore.exceptions import ClientError
     from flake_analysis.worker.launcher import _launch_one
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     err = ClientError(
         {"Error": {"Code": "SpotMaxPriceTooLow",
@@ -640,11 +670,184 @@ def test_launch_one_falls_back_on_spot_max_price_too_low():
 
 
 # ---------------------------------------------------------------------------
+# T7 — On-demand-only mode (default, 2026-06-16)
+# ---------------------------------------------------------------------------
+
+
+def test_launch_one_uses_ondemand_only_by_default(monkeypatch):
+    """Default behavior (SAM_GPU_MARKET unset or 'ondemand'): skip spot
+    phase entirely. For each tier, try on-demand across all AZs, then
+    step down. No spot attempts."""
+    import os
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        INSTANCE_TYPE_LADDER,
+        SUBNETS_BY_AZ,
+    )
+
+    # Ensure default env (no SAM_GPU_MARKET set)
+    monkeypatch.delenv("SAM_GPU_MARKET", raising=False)
+
+    calls: list[dict] = []
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            calls.append(kwargs)
+            # First tier (48xlarge) on-demand: first AZ succeeds
+            return {"Instances": [{"InstanceId": "i-ondemand-default"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+
+    assert instance_id == "i-ondemand-default"
+    # Only 1 attempt: first tier, first AZ, on-demand
+    assert ec2.attempt == 1
+    assert len(calls) == 1
+    # Verify it's on-demand (has InstanceMarketOptions={})
+    assert calls[0]["InstanceMarketOptions"] == {}
+    # Verify it's the first tier
+    assert calls[0]["InstanceType"] == INSTANCE_TYPE_LADDER[0]
+
+
+def test_launch_one_ondemand_only_steps_down_ladder_on_capacity_error(monkeypatch):
+    """On-demand-only mode: InsufficientInstanceCapacity on tier 1 across
+    all AZs → steps down to tier 2 on-demand (no spot attempts)."""
+    import os
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        INSTANCE_TYPE_LADDER,
+    )
+
+    monkeypatch.delenv("SAM_GPU_MARKET", raising=False)
+
+    capacity_err = ClientError(
+        {"Error": {"Code": "InsufficientInstanceCapacity",
+                   "Message": "Insufficient capacity"}},
+        "RunInstances",
+    )
+
+    calls: list[dict] = []
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            calls.append(kwargs)
+            # Tier 1 (48xlarge): all 3 AZs on-demand fail (attempts 1-3)
+            if self.attempt <= 3:
+                raise capacity_err
+            # Tier 2 (24xlarge): first AZ on-demand succeeds (attempt 4)
+            return {"Instances": [{"InstanceId": "i-tier2-ondemand"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+
+    assert instance_id == "i-tier2-ondemand"
+    # 3 attempts on tier 1 (all AZs on-demand) + 1 on tier 2
+    assert ec2.attempt == 4
+    # All calls should be on-demand
+    for call in calls:
+        assert call["InstanceMarketOptions"] == {}
+    # Verify tier progression
+    for call in calls[:3]:
+        assert call["InstanceType"] == INSTANCE_TYPE_LADDER[0]
+    assert calls[3]["InstanceType"] == INSTANCE_TYPE_LADDER[1]
+
+
+def test_launch_one_ondemand_only_raises_capacity_error_after_full_ladder(monkeypatch):
+    """On-demand-only mode: all tiers × all AZs on-demand exhausted →
+    raises GpuCapacityUnavailable after 4 tiers × 3 AZs = 12 attempts
+    (not 24, since no spot phase)."""
+    import os
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        GpuCapacityUnavailable,
+        INSTANCE_TYPE_LADDER,
+        SUBNETS_BY_AZ,
+    )
+
+    monkeypatch.delenv("SAM_GPU_MARKET", raising=False)
+
+    capacity_err = ClientError(
+        {"Error": {"Code": "InsufficientInstanceCapacity",
+                   "Message": "Insufficient capacity"}},
+        "RunInstances",
+    )
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            # Every attempt fails
+            raise capacity_err
+
+    ec2 = _FakeEc2()
+    with pytest.raises(GpuCapacityUnavailable):
+        _launch_one(ec2)
+
+    # On-demand-only: 4 tiers × 3 AZs × 1 market = 12 attempts
+    expected_attempts = len(INSTANCE_TYPE_LADDER) * len(SUBNETS_BY_AZ)
+    assert ec2.attempt == expected_attempts
+
+
+def test_launch_one_spot_first_mode_preserves_legacy_behavior(monkeypatch):
+    """Explicit SAM_GPU_MARKET='spot-first': preserves the legacy spot→
+    on-demand fallback behavior (3 AZs spot, then 3 AZs on-demand per
+    tier)."""
+    import os
+    from flake_analysis.worker.launcher import (
+        _launch_one,
+        SUBNETS_BY_AZ,
+    )
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
+
+    capacity_err = ClientError(
+        {"Error": {"Code": "InsufficientInstanceCapacity",
+                   "Message": "Insufficient capacity"}},
+        "RunInstances",
+    )
+
+    calls: list[dict] = []
+
+    class _FakeEc2:
+        def __init__(self):
+            self.attempt = 0
+
+        def run_instances(self, **kwargs):
+            self.attempt += 1
+            calls.append(kwargs)
+            # Spot attempts 1-3 (all AZs) fail, on-demand attempt 4 succeeds
+            if self.attempt <= 3:
+                raise capacity_err
+            return {"Instances": [{"InstanceId": "i-spot-first-test"}]}
+
+    ec2 = _FakeEc2()
+    instance_id = _launch_one(ec2)
+
+    assert instance_id == "i-spot-first-test"
+    assert len(calls) == 4
+    # First 3 calls: spot (no InstanceMarketOptions)
+    for call in calls[:3]:
+        assert "InstanceMarketOptions" not in call
+    # 4th call: on-demand
+    assert calls[3]["InstanceMarketOptions"] == {}
+
+
+# ---------------------------------------------------------------------------
 # T7 — On-demand error tolerance (bug fix 2026-06-12)
 # ---------------------------------------------------------------------------
 
 
-def test_launch_one_continues_ladder_on_max_spot_count_during_ondemand():
+def test_launch_one_continues_ladder_on_max_spot_count_during_ondemand(monkeypatch):
     """Bug fix: MaxSpotInstanceCountExceeded can leak onto on-demand
     calls when recent spot requests haven't cleared. This is a transient
     account-level limit that should NOT kill the ladder — step down to
@@ -652,11 +855,16 @@ def test_launch_one_continues_ladder_on_max_spot_count_during_ondemand():
 
     Observed 2026-06-12: g6e.48xlarge spot exhausted (3 AZs), then first
     on-demand call raised MaxSpotInstanceCountExceeded and killed the
-    ladder instead of trying 24xlarge."""
+    ladder instead of trying 24xlarge.
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         INSTANCE_TYPE_LADDER,
     )
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     quota_err = ClientError(
         {"Error": {"Code": "MaxSpotInstanceCountExceeded",
@@ -844,17 +1052,22 @@ def test_launch_one_still_propagates_invalid_parameter_on_ondemand():
     assert ec2.attempt == 4
 
 
-def test_launch_one_raises_capacity_unavailable_after_full_ladder_exhaustion():
+def test_launch_one_raises_capacity_unavailable_after_full_ladder_exhaustion(monkeypatch):
     """When MaxSpotInstanceCountExceeded (or other tolerated error) occurs
     on EVERY attempt across the full ladder (4 tiers × 3 AZs × 2 markets
     = 24 attempts), _launch_one must raise GpuCapacityUnavailable (not
-    the raw boto ClientError) to converge to the clean terminal state."""
+    the raw boto ClientError) to converge to the clean terminal state.
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         GpuCapacityUnavailable,
         INSTANCE_TYPE_LADDER,
         SUBNETS_BY_AZ,
     )
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     quota_err = ClientError(
         {"Error": {"Code": "MaxSpotInstanceCountExceeded",
@@ -880,16 +1093,21 @@ def test_launch_one_raises_capacity_unavailable_after_full_ladder_exhaustion():
     assert ec2.attempt == expected_attempts
 
 
-def test_launch_one_recovers_mid_ladder_after_tolerated_errors():
+def test_launch_one_recovers_mid_ladder_after_tolerated_errors(monkeypatch):
     """Tolerated error (MaxSpotInstanceCountExceeded) occurs deeper in
     the ladder (not just tier 1). Tier 1 spot exhausts all AZs with
     capacity errors, tier 1 on-demand hits the tolerated error in all
     AZs, then tier 2 spot SUCCEEDS. Assert it returns the tier-2
-    instance id and correct InstanceType."""
+    instance id and correct InstanceType.
+
+    Tests legacy spot-first behavior (requires explicit env var)."""
+    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         INSTANCE_TYPE_LADDER,
     )
+
+    monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
 
     quota_err = ClientError(
         {"Error": {"Code": "MaxSpotInstanceCountExceeded",

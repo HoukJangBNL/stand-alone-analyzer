@@ -1,4 +1,4 @@
-"""API-side spot launcher (P4.4).
+"""API-side GPU worker launcher (P4.4).
 
 Boots a GPU worker EC2 instance on demand when no live worker is
 draining the procrastinate ``gpu`` queue. Called from the SAM and
@@ -37,8 +37,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Protocol
+from typing import Any, Callable, Protocol
 
 import boto3
 import psycopg
@@ -108,6 +109,22 @@ TAG_ROLE_WORKER: str = "worker"
 #: window"). The production caller passes this to
 #: ``pg_try_advisory_lock(key)``.
 ADVISORY_LOCK_KEY: int = 0xCAFE0044
+
+
+def _market_preference() -> str:
+    """Read SAM_GPU_MARKET env var to determine market order.
+
+    Returns:
+        "ondemand" (default) — skip spot, try on-demand only
+        "spot-first" — legacy behavior (spot → on-demand fallback per tier)
+
+    Context (2026-06-16): spot instances get reclaimed mid-run by AWS
+    (Server.SpotInstanceTermination / instance-terminated-no-capacity),
+    wasting compute. Owner directive: always use on-demand so runs
+    complete. Cost delta: g6e.48xlarge $5.96 spot → $7.23 on-demand
+    (~21% higher), acceptable trade for reliability.
+    """
+    return os.environ.get("SAM_GPU_MARKET", "ondemand")
 
 
 # ---------------------------------------------------------------------------
@@ -417,53 +434,63 @@ def _try_run_instances(
 def _launch_one(ec2: Any) -> str:
     """Synchronous boto3 call: boot exactly one worker.
 
-    Triple-tier fallback (T7n + T7q):
+    Triple-tier fallback (T7n + T7q), with market preference control:
       * outer: instance-type ladder — try the largest GPU SKU first,
         fall back to smaller ones to absorb capacity drought
         (:data:`INSTANCE_TYPE_LADDER`).
-      * middle: market — spot first (cheaper), on-demand fallback
-        (always available outside multi-AZ outages).
+      * middle: market — controlled by SAM_GPU_MARKET env var:
+          - "ondemand" (default): on-demand only (no spot attempts)
+          - "spot-first": spot first, on-demand fallback (legacy)
       * inner: AZ rotation — try each us-east-2 AZ in turn, since
         g6e capacity flits between AZs in real time (T7n / §40).
 
-    Order per instance type: spot 2a/2b/2c → on-demand 2a/2b/2c (6
-    attempts), then step down to the next instance type.
+    Default (on-demand-only) order per instance type: on-demand
+    2a/2b/2c (3 attempts), then step down. Full ladder = 12 attempts.
 
-    With the default 4-tier ladder this gives 24 attempts before
-    raising :class:`GpuCapacityUnavailable`. Each attempt is ~2-3 s
-    so worst-case total wall is ~1 min. Non-capacity ClientErrors
-    (IAM, malformed template) propagate immediately.
+    Spot-first order per instance type: spot 2a/2b/2c → on-demand
+    2a/2b/2c (6 attempts), then step down. Full ladder = 24 attempts.
+
+    Each attempt is ~2-3 s so worst-case total wall is 36 s (on-demand)
+    or ~1 min (spot-first). Non-capacity ClientErrors (IAM, malformed
+    template) propagate immediately.
 
     Owner directive 2026-06-11: "8장부터 시작해서 실패하면 7장 이런식
     으로 내려와서 최대한 빨리 실행하게" — the ladder embodies that
     "biggest available wins" preference.
+
+    Owner directive 2026-06-16: on-demand by default; spot reclamation
+    (Server.SpotInstanceTermination) wastes compute. Cost delta ~21%
+    (g6e.48xlarge $5.96 spot → $7.23 on-demand) is acceptable.
     """
     azs = list(SUBNETS_BY_AZ.keys())  # ['us-east-2a', '2b', '2c']
+    market = _market_preference()
 
     for instance_type in INSTANCE_TYPE_LADDER:
-        # Phase 1: spot in each AZ.
-        for az in azs:
-            subnet = SUBNETS_BY_AZ[az]
-            result = _try_run_instances(
-                ec2,
-                instance_type=instance_type,
-                subnet_id=subnet,
-                on_demand=False,
-            )
-            if result is not None:
-                logger.info(
-                    "launched %s spot in %s (subnet %s) → %s",
-                    instance_type, az, subnet, result,
+        if market == "spot-first":
+            # Legacy: Phase 1 spot, Phase 2 on-demand
+            for az in azs:
+                subnet = SUBNETS_BY_AZ[az]
+                result = _try_run_instances(
+                    ec2,
+                    instance_type=instance_type,
+                    subnet_id=subnet,
+                    on_demand=False,
                 )
-                return result
+                if result is not None:
+                    logger.info(
+                        "launched %s spot in %s (subnet %s) → %s",
+                        instance_type, az, subnet, result,
+                    )
+                    return result
+                logger.info(
+                    "%s spot refused in %s — trying next AZ", instance_type, az,
+                )
+
             logger.info(
-                "%s spot refused in %s — trying next AZ", instance_type, az,
+                "%s spot exhausted; switching to on-demand", instance_type,
             )
 
-        # Phase 2: on-demand in each AZ for the same instance type.
-        logger.info(
-            "%s spot exhausted; switching to on-demand", instance_type,
-        )
+        # On-demand phase (either exclusive or fallback depending on market)
         for az in azs:
             subnet = SUBNETS_BY_AZ[az]
             result = _try_run_instances(
@@ -483,16 +510,18 @@ def _launch_one(ec2: Any) -> str:
                 instance_type, az,
             )
 
+        markets_tried = "spot+on-demand" if market == "spot-first" else "on-demand"
         logger.info(
-            "%s exhausted across all AZs and markets — stepping down",
-            instance_type,
+            "%s exhausted across all AZs (%s) — stepping down",
+            instance_type, markets_tried,
         )
 
     # All instance types × AZs × markets refused.
+    markets_desc = "both markets (spot+on-demand)" if market == "spot-first" else "on-demand"
     raise GpuCapacityUnavailable(
         "GPU capacity unavailable in us-east-2 across the full ladder "
         f"({list(INSTANCE_TYPE_LADDER)}) × all AZs (2a/2b/2c) × "
-        "both markets (spot+on-demand). Retry in a few minutes."
+        f"{markets_desc}. Retry in a few minutes."
     )
 
 
