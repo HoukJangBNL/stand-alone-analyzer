@@ -7,7 +7,7 @@ for progress/terminal payloads from the worker.
 
 Tests now patch two route-level seams:
 
-- ``flake_analysis.api.routes.run._defer_sam_job``: stub to a no-op so
+- ``flake_analysis.api.services.sam_dispatch.defer_sam_job``: stub to a no-op so
   no real queue is touched. Tests don't assert on the deferred args
   here (the worker's own tests cover that).
 - ``flake_analysis.api.routes.run._stream_sam_events``: replace with a
@@ -87,11 +87,16 @@ def _clear_scan_locks():
 
 @pytest.fixture(autouse=True)
 def _mock_sam_manifest_and_s3(monkeypatch):
-    """Auto-mock generate_sam_manifest_for_scan and boto3 for all tests.
+    """Auto-mock generate_sam_manifest_for_scan, boto3, and _ensure_gpu_worker for all tests.
 
     The S3-sync path (Task 3) requires these for run_sam. Tests that need
     specific manifest data or S3 put_object capture can override by patching
     again.
+
+    _ensure_gpu_worker is mocked to return None (noop) so tests that don't
+    explicitly test the cold-start path don't need to mock EC2 calls. Tests
+    that DO test cold-start (test_defer_sam_job_emits_gpu_launching_when_action_is_launched)
+    override this with their own mock.
     """
     # Mock manifest generator (with scan_prefix for robustness fix)
     fake_manifest = {
@@ -107,7 +112,7 @@ def _mock_sam_manifest_and_s3(monkeypatch):
 
     # Mock boto3 S3 client to no-op
     from unittest.mock import MagicMock
-    def fake_boto3_client(service_name):
+    def fake_boto3_client(service_name, **kwargs):
         if service_name == "s3":
             mock_client = MagicMock()
             mock_client.put_object = MagicMock(return_value={})
@@ -116,6 +121,15 @@ def _mock_sam_manifest_and_s3(monkeypatch):
 
     monkeypatch.setattr("boto3.client", fake_boto3_client)
     monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+
+    # Mock _ensure_gpu_worker to return None (noop) by default
+    async def _fake_ensure_noop():
+        return None
+
+    monkeypatch.setattr(
+        "flake_analysis.api.services.sam_dispatch._ensure_gpu_worker",
+        _fake_ensure_noop,
+    )
 
 
 @pytest.fixture
@@ -186,7 +200,7 @@ async def test_run_sam_sse(tmp_path, monkeypatch, _client_app):
 
     _stub_session_dep(_client_app)
     with _runs_audit_patches(), patch(
-        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+        "flake_analysis.api.routes.run.defer_sam_job", new=AsyncMock(return_value=None)
     ), patch(
         "flake_analysis.api.routes.run._stream_sam_events",
         side_effect=_fake_stream_factory(fake_payloads),
@@ -231,7 +245,7 @@ async def test_run_sam_sse_wire_format(tmp_path, monkeypatch, _client_app):
 
     _stub_session_dep(_client_app)
     with _runs_audit_patches(), patch(
-        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+        "flake_analysis.api.routes.run.defer_sam_job", new=AsyncMock(return_value=None)
     ), patch(
         "flake_analysis.api.routes.run._stream_sam_events",
         side_effect=_fake_stream_factory(fake_payloads),
@@ -264,7 +278,7 @@ async def test_run_sam_pipeline_error_emits_sse_error_event(tmp_path, monkeypatc
 
     _stub_session_dep(_client_app)
     with _runs_audit_patches(), patch(
-        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+        "flake_analysis.api.routes.run.defer_sam_job", new=AsyncMock(return_value=None)
     ), patch(
         "flake_analysis.api.routes.run._stream_sam_events",
         side_effect=_fake_stream_factory(fake_payloads),
@@ -347,7 +361,7 @@ async def test_run_sam_writes_runs_row(tmp_path, monkeypatch, pg_session, active
     ]
 
     with patch(
-        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+        "flake_analysis.api.routes.run.defer_sam_job", new=AsyncMock(return_value=None)
     ), patch(
         "flake_analysis.api.routes.run._stream_sam_events",
         side_effect=_fake_stream_factory(fake_payloads),
@@ -381,11 +395,11 @@ async def test_run_sam_writes_runs_row(tmp_path, monkeypatch, pg_session, active
 
 
 # ---------------------------------------------------------------------------
-# GPU Dispatcher Task 2 — _ensure_gpu_worker / _defer_sam_job / driver loop
+# GPU Dispatcher Task 2 — _ensure_gpu_worker / defer_sam_job / driver loop
 #
 # These tests cover the cold-start UX wiring on the API side:
 #   - _ensure_gpu_worker now returns LaunchResult (was None)
-#   - _defer_sam_job optionally takes a ProgressBridge and emits
+#   - defer_sam_job optionally takes a ProgressBridge and emits
 #     gpu_launching when a fresh boot fired
 #   - run_sam driver loop has a non-terminal gpu_ready branch that
 #     forwards image_count from the worker NOTIFY payload
@@ -395,8 +409,8 @@ async def test_run_sam_writes_runs_row(tmp_path, monkeypatch, pg_session, active
 @pytest.mark.asyncio
 async def test_defer_sam_job_emits_gpu_launching_when_action_is_launched(monkeypatch):
     """When _ensure_gpu_worker returns LaunchResult(action='launched'),
-    _defer_sam_job calls bridge.emit_gpu_launching with the instance_id."""
-    from flake_analysis.api.routes import run as run_module
+    defer_sam_job calls bridge.emit_gpu_launching with the instance_id."""
+    from flake_analysis.api.services import sam_dispatch
     from flake_analysis.api.sse import ProgressBridge
     from flake_analysis.worker.launcher import LaunchResult
 
@@ -409,10 +423,10 @@ async def test_defer_sam_job_emits_gpu_launching_when_action_is_launched(monkeyp
     async def _fake_ensure():
         return LaunchResult(action="launched", instance_id="i-test123")
 
-    monkeypatch.setattr(run_module, "_ensure_gpu_worker", _fake_ensure)
+    monkeypatch.setattr(sam_dispatch, "_ensure_gpu_worker", _fake_ensure)
 
     # Pre-import tasks so its @app.task decorators run against the real
-    # app, BEFORE we monkeypatch the app symbol. _defer_sam_job's later
+    # app, BEFORE we monkeypatch the app symbol. defer_sam_job's later
     # `from flake_analysis.worker import tasks` will then be a no-op
     # (module already in sys.modules).
     import flake_analysis.worker.tasks  # noqa: F401
@@ -427,7 +441,7 @@ async def test_defer_sam_job_emits_gpu_launching_when_action_is_launched(monkeyp
 
     monkeypatch.setattr("flake_analysis.worker.app.app", _FakeApp())
 
-    await run_module._defer_sam_job(
+    await sam_dispatch.defer_sam_job(
         run_id=1,
         raw_images_dir="/x",
         analysis_folder="/y",
@@ -442,8 +456,8 @@ async def test_defer_sam_job_emits_gpu_launching_when_action_is_launched(monkeyp
 @pytest.mark.asyncio
 async def test_defer_sam_job_skips_gpu_launching_when_action_is_noop(monkeypatch):
     """When _ensure_gpu_worker returns LaunchResult(action='noop'),
-    _defer_sam_job does NOT call emit_gpu_launching."""
-    from flake_analysis.api.routes import run as run_module
+    defer_sam_job does NOT call emit_gpu_launching."""
+    from flake_analysis.api.services import sam_dispatch
     from flake_analysis.api.sse import ProgressBridge
     from flake_analysis.worker.launcher import LaunchResult
 
@@ -455,7 +469,7 @@ async def test_defer_sam_job_skips_gpu_launching_when_action_is_noop(monkeypatch
     async def _fake_ensure():
         return LaunchResult(action="noop", reason="worker_already_running")
 
-    monkeypatch.setattr(run_module, "_ensure_gpu_worker", _fake_ensure)
+    monkeypatch.setattr(sam_dispatch, "_ensure_gpu_worker", _fake_ensure)
 
     class _FakeTask:
         async def defer_async(self, **kw):
@@ -466,7 +480,7 @@ async def test_defer_sam_job_skips_gpu_launching_when_action_is_noop(monkeypatch
 
     monkeypatch.setattr("flake_analysis.worker.app.app", _FakeApp())
 
-    await run_module._defer_sam_job(
+    await sam_dispatch.defer_sam_job(
         run_id=2,
         raw_images_dir="/x",
         analysis_folder="/y",
@@ -480,15 +494,15 @@ async def test_defer_sam_job_skips_gpu_launching_when_action_is_noop(monkeypatch
 
 @pytest.mark.asyncio
 async def test_defer_sam_job_works_without_bridge_kwarg(monkeypatch):
-    """Backwards-compat: _defer_sam_job(...) without bridge= still works.
+    """Backwards-compat: defer_sam_job(...) without bridge= still works.
     Existing call sites that haven't been updated must keep functioning."""
-    from flake_analysis.api.routes import run as run_module
+    from flake_analysis.api.services import sam_dispatch
     from flake_analysis.worker.launcher import LaunchResult
 
     async def _fake_ensure():
         return LaunchResult(action="launched", instance_id="i-test")
 
-    monkeypatch.setattr(run_module, "_ensure_gpu_worker", _fake_ensure)
+    monkeypatch.setattr(sam_dispatch, "_ensure_gpu_worker", _fake_ensure)
 
     class _FakeTask:
         async def defer_async(self, **kw):
@@ -500,7 +514,7 @@ async def test_defer_sam_job_works_without_bridge_kwarg(monkeypatch):
     monkeypatch.setattr("flake_analysis.worker.app.app", _FakeApp())
 
     # No bridge= kwarg — must not raise.
-    await run_module._defer_sam_job(
+    await sam_dispatch.defer_sam_job(
         run_id=3,
         raw_images_dir="/x",
         analysis_folder="/y",
@@ -534,7 +548,7 @@ async def test_run_sam_driver_loop_routes_gpu_ready_payload(
 
     _stub_session_dep(_client_app)
     with _runs_audit_patches(), patch(
-        "flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock(return_value=None)
+        "flake_analysis.api.routes.run.defer_sam_job", new=AsyncMock(return_value=None)
     ), patch(
         "flake_analysis.api.routes.run._stream_sam_events",
         side_effect=_fake_stream_factory(fake_payloads),
@@ -628,7 +642,7 @@ async def test_run_sam_writes_manifest_to_s3_and_defers_with_s3_prefix(
     ]
 
     with _runs_audit_patches(), patch(
-        "flake_analysis.api.routes.run._ensure_gpu_worker",
+        "flake_analysis.api.services.sam_dispatch._ensure_gpu_worker",
         new=AsyncMock(return_value=None),
     ), patch(
         "flake_analysis.api.routes.run._stream_sam_events",
@@ -678,7 +692,7 @@ async def test_run_sam_without_weights_path_is_valid(tmp_path, monkeypatch, _cli
 
     # Stub defer + stream so the route completes without a real queue
     with _runs_audit_patches():
-        with patch("flake_analysis.api.routes.run._defer_sam_job", new=AsyncMock()) as mock_defer:
+        with patch("flake_analysis.api.routes.run.defer_sam_job", new=AsyncMock()) as mock_defer:
             with patch(
                 "flake_analysis.api.routes.run._stream_sam_events",
                 new=_fake_stream_factory([

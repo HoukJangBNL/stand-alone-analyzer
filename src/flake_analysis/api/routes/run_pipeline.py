@@ -21,7 +21,10 @@ even though it has no Run row.
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 
+import boto3
 from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -45,6 +48,8 @@ from flake_analysis.api.services.cascade import apply_background_cascade_if_need
 from flake_analysis.api.services.hydrate import ensure_scan_hydrated
 from flake_analysis.api.services.runs import record_run_end, record_run_start
 from flake_analysis.api.services.usage import emit as usage_emit
+from flake_analysis.api.services.sam_dispatch import defer_sam_job
+from flake_analysis.api.services.sam_manifest import generate_sam_manifest_for_scan
 from flake_analysis.api.sse import PipelineProgressBridge, sse_stream
 from flake_analysis.api.sse_listen import listen_for_run
 from flake_analysis.db.models import Analysis
@@ -146,48 +151,6 @@ async def _mark_step_done(*, analysis_id: int, step: str) -> None:
 # fakes that synthesise the worker→API NOTIFY stream without touching a
 # real queue.
 # ---------------------------------------------------------------------------
-
-
-async def _ensure_gpu_worker() -> None:
-    """Boot a GPU worker EC2 instance if none is live (P4.4).
-
-    Module-level seam — see ``flake_analysis.api.routes.run._ensure_gpu_worker``
-    for the full docstring. Defined locally so the pipeline route's
-    test fakes can patch it independently of the per-step route's.
-    """
-    from flake_analysis.worker.launcher import (
-        PgAdvisoryLock,
-        ensure_worker_running,
-    )
-
-    await ensure_worker_running(advisory_lock=PgAdvisoryLock())
-
-
-async def _defer_sam_job(
-    *,
-    run_id: int,
-    raw_images_dir,
-    analysis_folder,
-    weights_path: str | None,
-    device: str | None,
-) -> None:
-    """Push a SAM job onto the procrastinate ``gpu`` queue.
-
-    Before deferring, ensures a GPU worker exists (P4.4); see
-    :func:`flake_analysis.api.routes.run._defer_sam_job` for details.
-    """
-    await _ensure_gpu_worker()
-
-    from flake_analysis.worker import tasks as _tasks  # noqa: F401 — register tasks
-    from flake_analysis.worker.app import app
-
-    await app.tasks["run_sam"].defer_async(
-        run_id=run_id,
-        raw_images_dir=str(raw_images_dir),
-        analysis_folder=str(analysis_folder),
-        weights_path=str(weights_path) if weights_path else "",
-        device=device,
-    )
 
 
 def _stream_sam_events(run_id: int):
@@ -330,17 +293,45 @@ async def run_pipeline(
         ``error`` terminal. ``error`` raises :class:`_StepFailure` so the
         orchestrator's gather/sequence handles it identically to a CPU
         step crashing in the executor.
+
+        Generates the SAM manifest and uploads it to S3 under the scan's real
+        prefix (derived from DB images.s3_uri), then defers with s3_prefix for
+        the worker to sync from S3 directly.
         """
         bridge.step_started("sam", _STEP_INDEX["sam"])
         await _emit_usage(user, step="sam", project_id=project_id, scan_id=scan_id)
         run_id = await _start_run_row(analysis_id=analysis_id, step="sam")
 
-        await _defer_sam_job(
+        # Generate SAM manifest (need a fresh session since driver is in bg context)
+        async with get_session_for_background() as bg:
+            manifest_dict = await generate_sam_manifest_for_scan(bg, scan_id=scan_id)
+        manifest_json = json.dumps(manifest_dict)
+
+        # Upload manifest to S3 under the scan's real prefix
+        bucket = os.environ.get("SAA_S3_BUCKET")
+        if not bucket:
+            raise RuntimeError("SAA_S3_BUCKET not configured")
+
+        scan_prefix = manifest_dict.get("scan_prefix", f"scans/{scan_id}/")
+        s3_key = f"{scan_prefix}manifest.json"
+
+        # Upload in executor to avoid blocking event loop
+        loop = asyncio.get_running_loop()
+
+        def _upload_manifest():
+            s3 = boto3.client("s3")
+            s3.put_object(Bucket=bucket, Key=s3_key, Body=manifest_json.encode("utf-8"))
+
+        await loop.run_in_executor(None, _upload_manifest)
+
+        # Defer SAM job with s3_prefix (worker syncs from S3, not local)
+        await defer_sam_job(
             run_id=run_id,
-            raw_images_dir=manifest.raw_images_dir,
             analysis_folder=manifest.analysis_folder,
             weights_path=body.sam.weights_path,
             device=body.sam.device,
+            s3_prefix=scan_prefix,
+            bridge=bridge,
         )
 
         terminal_result: dict | None = None

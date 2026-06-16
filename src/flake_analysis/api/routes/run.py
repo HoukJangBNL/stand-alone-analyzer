@@ -24,6 +24,7 @@ from flake_analysis.api.services import scans_service
 from flake_analysis.api.services.hydrate import ensure_scan_hydrated
 from flake_analysis.api.services.runs import record_run_end, record_run_start
 from flake_analysis.api.services.s3_presign import PRESIGN_TTL_SECONDS
+from flake_analysis.api.services.sam_dispatch import defer_sam_job
 from flake_analysis.api.sse import ProgressBridge, sse_stream
 from flake_analysis.api.schemas.compute import (
     BackgroundParams,
@@ -302,101 +303,6 @@ async def run_domain_stats(
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
-async def _ensure_gpu_worker():
-    """Boot a GPU worker EC2 instance if none is live (P4.4).
-
-    Returns the :class:`flake_analysis.worker.launcher.LaunchResult`
-    so the caller (e.g. :func:`_defer_sam_job`) can decide whether to
-    emit a ``gpu_launching`` SSE frame. ``action == "launched"``
-    means we just kicked off a fresh spot boot and ``instance_id`` is
-    populated; ``action == "noop"`` means a worker was already live.
-
-    Module-level seam so tests can monkeypatch with a no-op or a
-    canned ``LaunchResult``. The production implementation calls
-    ``ensure_worker_running`` from
-    :mod:`flake_analysis.worker.launcher`, which checks the EC2 fleet
-    and (optionally) launches a single spot instance via the
-    ``qpress-sam-gpu-worker`` launch template.
-    """
-    from flake_analysis.worker.launcher import (
-        PgAdvisoryLock,
-        ensure_worker_running,
-    )
-
-    return await ensure_worker_running(advisory_lock=PgAdvisoryLock())
-
-
-async def _defer_sam_job(
-    *,
-    run_id: int,
-    analysis_folder,
-    weights_path: str | None,
-    device: str | None,
-    raw_images_dir=None,
-    s3_prefix: str | None = None,
-    bridge: ProgressBridge | None = None,
-) -> None:
-    """Push a SAM job onto the procrastinate ``gpu`` queue.
-
-    Before deferring, ensures a GPU worker exists (P4.4). If the fleet
-    is empty, this kicks off a spot launch via the
-    ``qpress-sam-gpu-worker`` launch template and — when a ``bridge``
-    is supplied — emits a non-terminal ``gpu_launching`` SSE frame so
-    the frontend can render the cold-start wait (~60-90s spot
-    allocation + boot). When a worker is already live (``action ==
-    "noop"``), no frame is emitted and the defer proceeds immediately.
-
-    The defer itself does not wait for the worker to come online — the
-    SSE stream stays open and the worker drains the procrastinate
-    queue once it boots (3-5 min cold start total).
-
-    Defined as a module-level seam so tests can monkeypatch this symbol
-    with a no-op rather than requiring an InMemoryConnector or real
-    queue. The real implementation imports the production app lazily so
-    test files that only patch ``_stream_sam_events`` don't pay the
-    psycopg-pool open cost.
-
-    The ``bridge`` parameter is keyword-only and defaults to ``None``
-    for backwards compatibility with call sites (or tests) that don't
-    care about cold-start UX.
-    """
-    launch_result = await _ensure_gpu_worker()
-
-    # Emit gpu_launching ONLY when we know we just kicked off a fresh
-    # boot and have an instance_id to report. Defensive try/except —
-    # an SSE emit failure must never cancel the actual defer.
-    if (
-        bridge is not None
-        and launch_result is not None
-        and getattr(launch_result, "action", None) == "launched"
-        and getattr(launch_result, "instance_id", None) is not None
-    ):
-        try:
-            bridge.emit_gpu_launching(launch_result.instance_id)
-        except Exception:  # noqa: BLE001 — never let SSE emit failures cancel defer
-            logger.exception(
-                "gpu_launching emit failed for run_id=%s", run_id,
-            )
-
-    # Importing the tasks module registers @app.task decorators on the
-    # production App. The connector pool is opened lazily by procrastinate
-    # the first time defer_async runs.
-    from flake_analysis.worker import tasks as _tasks  # noqa: F401
-    from flake_analysis.worker.app import app
-
-    kwargs = {
-        "run_id": run_id,
-        "analysis_folder": str(analysis_folder),
-        "weights_path": str(weights_path) if weights_path else "",
-        "device": device,
-    }
-    if s3_prefix is not None:
-        kwargs["s3_prefix"] = s3_prefix
-    if raw_images_dir is not None:
-        kwargs["raw_images_dir"] = str(raw_images_dir)
-
-    await app.tasks["run_sam"].defer_async(**kwargs)
-
 
 def _stream_sam_events(run_id: int):
     """Yield decoded NOTIFY payloads from the worker's progress channel.
@@ -435,8 +341,6 @@ async def run_sam(
     uploads it to S3, then defers with s3_prefix for the worker to sync
     images directly from S3 instead of downloading to the API host.
     """
-    import json
-    import os
     from flake_analysis.state.paths import analysis_folder as compute_analysis_folder
     from flake_analysis.api.services.sam_manifest import generate_sam_manifest_for_scan
 
@@ -484,7 +388,6 @@ async def run_sam(
     loop = asyncio.get_running_loop()
 
     def _upload_manifest():
-        import boto3
         s3 = boto3.client("s3")
         s3.put_object(Bucket=bucket, Key=s3_key, Body=manifest_json.encode("utf-8"))
 
@@ -495,7 +398,7 @@ async def run_sam(
     async def driver():
         """Defer the SAM job, listen for fan-out, translate to bridge events."""
         try:
-            await _defer_sam_job(
+            await defer_sam_job(
                 run_id=run_id,
                 analysis_folder=analysis_folder_path,
                 weights_path=params.weights_path,

@@ -16,7 +16,7 @@ P4.2.d swap (SAM step → procrastinate worker queue):
     domain_proximity) still patch the runner symbols at
     ``flake_analysis.api.routes.run_pipeline``. The SAM step now defers
     to a worker via two seams that we patch instead:
-      - ``_defer_sam_job`` (no-op AsyncMock to skip the queue)
+      - ``defer_sam_job`` from sam_dispatch service (no-op AsyncMock to skip the queue)
       - ``_stream_sam_events`` (fake async iterator yielding the
         ``progress``/``completed``/``error`` payloads the old in-process
         mock would have produced via its progress_callback + return).
@@ -95,6 +95,49 @@ def _clear_scan_locks():
     mutex._scan_locks.clear()
     yield
     mutex._scan_locks.clear()
+
+
+@pytest.fixture(autouse=True)
+def _mock_sam_manifest_and_s3(monkeypatch):
+    """Auto-mock generate_sam_manifest_for_scan, boto3, and _ensure_gpu_worker for all pipeline tests.
+
+    The pipeline SAM step requires these for the S3-sync path. Tests that need
+    specific manifest data or S3 put_object capture can override by patching again.
+    Mirrors the fixture in test_run_sam_sse.py.
+    """
+    from unittest.mock import AsyncMock, MagicMock
+
+    # Mock manifest generator
+    fake_manifest = {
+        "version": 1,
+        "scan_id": 42,
+        "scan_prefix": "scans/42/",
+        "images": [],
+    }
+    monkeypatch.setattr(
+        "flake_analysis.api.services.sam_manifest.generate_sam_manifest_for_scan",
+        AsyncMock(return_value=fake_manifest),
+    )
+
+    # Mock boto3 S3 client to no-op
+    def fake_boto3_client(service_name, **kwargs):
+        if service_name == "s3":
+            mock_client = MagicMock()
+            mock_client.put_object = MagicMock(return_value={})
+            return mock_client
+        raise ValueError(f"Unexpected service: {service_name}")
+
+    monkeypatch.setattr("boto3.client", fake_boto3_client)
+    monkeypatch.setenv("SAA_S3_BUCKET", "qpress-uploads")
+
+    # Mock _ensure_gpu_worker to return None (noop) by default
+    async def _fake_ensure_noop():
+        return None
+
+    monkeypatch.setattr(
+        "flake_analysis.api.services.sam_dispatch._ensure_gpu_worker",
+        _fake_ensure_noop,
+    )
 
 
 def _wire_pg_sessions(app, pg_session, monkeypatch):
@@ -218,7 +261,7 @@ async def test_pipeline_streams_all_5_steps_and_writes_4_runs_rows(
 
     with patch("flake_analysis.api.routes.run_pipeline.run_thumbnails_step", side_effect=thumbs), \
          patch("flake_analysis.api.routes.run_pipeline.run_background_step", side_effect=bg), \
-         patch("flake_analysis.api.routes.run_pipeline._defer_sam_job", new=AsyncMock(return_value=None)), \
+         patch("flake_analysis.api.services.sam_dispatch.defer_sam_job", new=AsyncMock(return_value=None)), \
          patch("flake_analysis.api.routes.run_pipeline._stream_sam_events", side_effect=_fake_sam_stream(sam_payloads)), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_stats_step", side_effect=stats), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_proximity_step", side_effect=prox):
@@ -226,7 +269,6 @@ async def test_pipeline_streams_all_5_steps_and_writes_4_runs_rows(
             status, events = await _post_pipeline_collect_events(client, pid, sid, body)
             assert status == 200
 
-    types = [e["type"] for e in events]
     started = [e for e in events if e["type"] == "step_started"]
     completed = [e for e in events if e["type"] == "step_completed"]
     done = [e for e in events if e["type"] == "pipeline_done"]
@@ -323,7 +365,7 @@ async def test_pipeline_emits_pipeline_error_on_step_failure(
 
     with patch("flake_analysis.api.routes.run_pipeline.run_thumbnails_step", side_effect=thumbs), \
          patch("flake_analysis.api.routes.run_pipeline.run_background_step", side_effect=bg), \
-         patch("flake_analysis.api.routes.run_pipeline._defer_sam_job", new=AsyncMock(return_value=None)), \
+         patch("flake_analysis.api.services.sam_dispatch.defer_sam_job", new=AsyncMock(return_value=None)), \
          patch("flake_analysis.api.routes.run_pipeline._stream_sam_events", side_effect=_fake_sam_stream(sam_error_payloads)), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_stats_step", side_effect=stats_impl), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_proximity_step", side_effect=prox_impl):
@@ -430,7 +472,7 @@ async def test_pipeline_cascade_clears_steps_done(
 
     with patch("flake_analysis.api.routes.run_pipeline.run_thumbnails_step", side_effect=thumbs), \
          patch("flake_analysis.api.routes.run_pipeline.run_background_step", side_effect=bg), \
-         patch("flake_analysis.api.routes.run_pipeline._defer_sam_job", new=defer_mock), \
+         patch("flake_analysis.api.services.sam_dispatch.defer_sam_job", new=defer_mock), \
          patch("flake_analysis.api.routes.run_pipeline._stream_sam_events", side_effect=_fake_sam_stream(sam_payloads)), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_stats_step", side_effect=stats), \
          patch("flake_analysis.api.routes.run_pipeline.run_domain_proximity_step", side_effect=prox):

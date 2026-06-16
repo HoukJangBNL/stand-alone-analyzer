@@ -170,6 +170,35 @@ class PipelineProgressBridge:
         event = {"type": "step_completed", "step": step, "result": result}
         self._loop.call_soon_threadsafe(self._put_progress, event)
 
+    def emit_gpu_launching(self, instance_id: str) -> None:
+        """Non-terminal cold-start event for SAM step in pipeline.
+
+        Emits a gpu_launching event through the step_progress envelope
+        so the frontend SamRunPanel shows "Launching GPU..." during
+        spot boot (~60-90s).
+
+        This mirrors ProgressBridge.emit_gpu_launching but wraps the
+        event in step_progress so the pipeline timeline can pass it
+        through to the SAM sub-panel without breaking the overall
+        step-oriented SSE contract.
+
+        Uses the standard step_progress wire contract ({step, pct, msg})
+        so the existing pipeline timeline renders the cold-start message
+        on the SAM step with NO frontend change (the step_progress reducer
+        reads `msg`/`pct`). The extra `gpu_launching`/`instance_id` fields
+        are passed through for any consumer that wants them, but the
+        user-visible signal is the msg.
+        """
+        event = {
+            "type": "step_progress",
+            "step": "sam",
+            "pct": 0.0,
+            "msg": "Launching GPU instance…",
+            "gpu_launching": True,
+            "instance_id": str(instance_id),
+        }
+        self._loop.call_soon_threadsafe(self._put_progress, event)
+
     def pipeline_done(self, summary: dict) -> None:
         """Terminal. Enqueues ``pipeline_done`` and the sentinel."""
         event = {"type": "pipeline_done", **summary}
