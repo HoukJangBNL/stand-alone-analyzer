@@ -19,6 +19,20 @@ tests can monkeypatch it with a list collector — see
 ``tests/worker/test_tasks.py``. In production it serializes the payload
 as JSON and runs ``NOTIFY`` through a sync psycopg connection.
 
+Mid-run progress poller (Item 1)
+---------------------------------
+During the multi-GPU SAM step, the vendor's spawn Pool returns results
+only when ALL children finish, so the progress_callback only fires at
+phase boundaries with progress=0.0. To surface incremental progress
+during the 8-GPU run, :func:`run_sam` runs :func:`run_sam_step` in a
+worker thread and polls the output masks directory
+(``<analysis_folder>/07_sam/masks/``) every ~5s. Each immediate subdir
+under ``masks/`` = one processed image. The poller emits
+``progress = done/total`` via the existing :func:`_emit_progress` NOTIFY
+path. Progress is clamped to [0, 0.99] during polling; the terminal
+``completed`` event signals done. The poller stops when the
+:func:`run_sam_step` thread finishes.
+
 Wire format
 -----------
 Each emit takes::
@@ -42,6 +56,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -362,15 +378,83 @@ def run_sam(
     masks_total = 0
     errors = 0
     try:
-        # Multi-GPU path ignores weights_path (AMI-baked M3); single-GPU needs it.
-        # Empty/None is fine for prod path; local dev fallback would need real path.
-        result = run_sam_step(
-            raw_images_dir=effective_raw_images_dir,
-            analysis_folder=analysis_folder,
-            weights_path=weights_path or "",
-            device=device,
-            progress_callback=_on_progress,
-        )
+        result_holder: dict[str, Any] = {}
+        exception_holder: list[BaseException] = []
+
+        def _run_sam_in_thread() -> None:
+            """Execute run_sam_step in a worker thread so main thread can poll progress."""
+            try:
+                result = run_sam_step(
+                    raw_images_dir=effective_raw_images_dir,
+                    analysis_folder=analysis_folder,
+                    weights_path=weights_path or "",
+                    device=device,
+                    progress_callback=_on_progress,
+                )
+                result_holder["result"] = result
+            except BaseException as exc:  # noqa: BLE001
+                exception_holder.append(exc)
+
+        # Run SAM in a worker thread and poll the masks directory for progress
+        # (Item 1: output-dir polling approach). Only run the poller if we have
+        # a nonzero image count (total > 0). For measure-run (s3_prefix=None),
+        # emitting NOTIFY is harmless (no listener), so we keep the poller for
+        # uniformity.
+        if n_imgs > 0:
+            runner_thread = threading.Thread(target=_run_sam_in_thread, daemon=True)
+            runner_thread.start()
+
+            # Poll the masks directory every ~5s for incremental progress
+            # (env override for tests: SAM_PROGRESS_POLL_INTERVAL_SEC)
+            masks_dir = Path(analysis_folder) / "07_sam" / "masks"
+            poll_interval_sec = float(os.environ.get("SAM_PROGRESS_POLL_INTERVAL_SEC", "5.0"))
+            last_done = -1  # -1 so the first poll always emits (even if done=0)
+
+            while runner_thread.is_alive():
+                time.sleep(poll_interval_sec)
+                if not runner_thread.is_alive():
+                    break
+
+                try:
+                    # Count completed images: each subdir under masks/ = one processed image
+                    if masks_dir.exists():
+                        done = sum(1 for p in masks_dir.iterdir() if p.is_dir())
+                    else:
+                        done = 0
+
+                    # Only emit if count changed (reduce NOTIFY spam)
+                    if done != last_done:
+                        # Clamp progress to [0, 0.99] during polling; completed event signals 1.0
+                        pct = min(done / n_imgs, 0.99)
+                        _emit_progress(
+                            run_id=run_id,
+                            payload={
+                                "type": "progress",
+                                "progress": float(pct),
+                                "message": f"{done}/{n_imgs} images",
+                            },
+                        )
+                        last_done = done
+                except Exception:  # noqa: BLE001 — never let poller errors cancel the job
+                    logger.exception("progress poller failed for run_id=%s", run_id)
+
+            runner_thread.join()
+
+            # If the thread stored an exception, re-raise it
+            if exception_holder:
+                raise exception_holder[0]
+
+            result = result_holder.get("result", {})
+        else:
+            # No images (defensive): run directly without poller
+            result = run_sam_step(
+                raw_images_dir=effective_raw_images_dir,
+                analysis_folder=analysis_folder,
+                weights_path=weights_path or "",
+                device=device,
+                progress_callback=_on_progress,
+            )
+
         masks_total = int(result.get("masks_total", 0) or 0)
         errors = int(result.get("errors", 0) or 0)
 

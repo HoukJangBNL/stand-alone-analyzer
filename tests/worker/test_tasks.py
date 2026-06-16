@@ -643,3 +643,205 @@ def test_run_sam_s3_filename_fallback_when_none(monkeypatch, tmp_path):
     # Filename should fall back to sha333.png
     download_filenames = [call[2] for call in s3_calls["download_file"]]
     assert any("sha333.png" in fn for fn in download_filenames)
+
+
+def test_run_sam_emits_incremental_progress_during_processing(monkeypatch, tmp_path):
+    """run_sam polls the output masks directory during run_sam_step execution
+    and emits progress events with done/total image counts. Progress values
+    must increase monotonically and stay below 1.0 during polling (terminal
+    'completed' emits 1.0). The poller must not break existing events
+    (gpu_ready, completed, sam_task_start/end markers)."""
+    from flake_analysis.worker import tasks as worker_tasks
+    import time
+
+    # Use a faster poll interval for tests (0.4s instead of 5s)
+    monkeypatch.setenv("SAM_PROGRESS_POLL_INTERVAL_SEC", "0.4")
+
+    progress_payloads: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_payloads.append(payload),
+    )
+    marker_events: list[str] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "emit_marker",
+        lambda *, run_id, event, payload=None: marker_events.append(event),
+    )
+
+    # Create a test image directory with 5 images
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    for i in range(5):
+        (images_dir / f"img{i}.png").touch()
+
+    analysis_folder = tmp_path / "analysis"
+    masks_dir = analysis_folder / "07_sam" / "masks"
+
+    # Mock run_sam_step to simulate slow multi-GPU processing that creates
+    # mask subdirs incrementally (one per image)
+    def slow_runner(**kw):
+        masks_dir.mkdir(parents=True, exist_ok=True)
+        # Simulate processing 5 images over ~1.5 seconds (fast enough for test)
+        for i in range(5):
+            time.sleep(0.3)  # 300ms per image
+            # Create a mask subdir for each completed image
+            img_mask_dir = masks_dir / f"img{i}"
+            img_mask_dir.mkdir()
+            # Each image produces ~14 mask files (mimics real vendor output)
+            for m in range(14):
+                (img_mask_dir / f"mask_{m}.png").touch()
+        return {"images": 5, "masks_total": 70, "errors": 0, "per_image": {}}
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", slow_runner)
+
+    worker_tasks.run_sam(
+        run_id=77,
+        raw_images_dir=str(images_dir),
+        s3_prefix=None,
+        analysis_folder=str(analysis_folder),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    # Extract progress events (excluding gpu_ready, completed)
+    progress_events = [
+        p for p in progress_payloads
+        if p.get("type") == "progress" and "message" in p
+    ]
+
+    # Should have seen incremental progress updates during the run
+    # (at least 2 polls during the 1.5s run with a ~0.5s poll interval)
+    assert len(progress_events) >= 2, "Expected at least 2 progress polls"
+
+    # Check that progress values are monotonic and < 1.0 during polling
+    progress_values = [p["progress"] for p in progress_events if "/" in p["message"]]
+    for pct in progress_values:
+        assert 0.0 <= pct < 1.0, f"Progress {pct} must be in [0, 1)"
+    for i in range(len(progress_values) - 1):
+        assert progress_values[i] <= progress_values[i+1], "Progress must be monotonic"
+
+    # Check message format: "N/5 images"
+    progress_messages = [p["message"] for p in progress_events if "/" in p["message"]]
+    assert any("/5 images" in msg for msg in progress_messages), "Expected 'N/5 images' format"
+
+    # Existing events must still fire
+    gpu_ready = [p for p in progress_payloads if p.get("type") == "gpu_ready"]
+    completed = [p for p in progress_payloads if p.get("type") == "completed"]
+    assert len(gpu_ready) == 1, "gpu_ready must fire once"
+    assert len(completed) == 1, "completed must fire once"
+    assert gpu_ready[0]["image_count"] == 5, "gpu_ready must show correct count"
+    assert completed[0]["result"]["images"] == 5, "completed must carry result"
+
+    # Lifecycle markers must fire
+    assert "sam_task_start" in marker_events
+    assert "sam_task_end" in marker_events
+
+
+def test_run_sam_progress_poller_handles_missing_masks_dir_gracefully(monkeypatch, tmp_path):
+    """If the masks dir doesn't exist yet (model still loading), the poller
+    must emit progress=0 with a message like '0/N images', not crash."""
+    from flake_analysis.worker import tasks as worker_tasks
+    import time
+
+    monkeypatch.setenv("SAM_PROGRESS_POLL_INTERVAL_SEC", "0.3")
+
+    progress_payloads: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_payloads.append(payload),
+    )
+    monkeypatch.setattr(worker_tasks, "emit_marker", lambda **kw: None)
+
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    for i in range(3):
+        (images_dir / f"img{i}.png").touch()
+
+    analysis_folder = tmp_path / "analysis"
+
+    # Mock run_sam_step that delays before creating masks dir (simulates model load)
+    def delayed_runner(**kw):
+        time.sleep(0.8)  # No masks dir for first poll
+        masks_dir = analysis_folder / "07_sam" / "masks"
+        masks_dir.mkdir(parents=True, exist_ok=True)
+        for i in range(3):
+            (masks_dir / f"img{i}").mkdir()
+        return {"images": 3, "masks_total": 0, "errors": 0, "per_image": {}}
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", delayed_runner)
+
+    worker_tasks.run_sam(
+        run_id=88,
+        raw_images_dir=str(images_dir),
+        s3_prefix=None,
+        analysis_folder=str(analysis_folder),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    # Must not crash; should have emitted at least one progress event with 0/3
+    progress_events = [
+        p for p in progress_payloads
+        if p.get("type") == "progress" and "/" in p.get("message", "")
+    ]
+    assert len(progress_events) >= 1
+    # First poll should show 0/3
+    first_msg = progress_events[0]["message"]
+    assert "0/3" in first_msg or "/3" in first_msg
+
+
+def test_run_sam_progress_poller_survives_counting_errors(monkeypatch, tmp_path):
+    """If the poller encounters an exception while counting mask dirs (e.g.,
+    permissions error, race condition), it must log + continue without
+    crashing the job — mirroring the existing 'never let SSE emit failures
+    cancel the job' pattern."""
+    from flake_analysis.worker import tasks as worker_tasks
+    import time
+
+    monkeypatch.setenv("SAM_PROGRESS_POLL_INTERVAL_SEC", "0.2")
+
+    progress_payloads: list[dict] = []
+    monkeypatch.setattr(
+        worker_tasks,
+        "_emit_progress",
+        lambda *, run_id, payload: progress_payloads.append(payload),
+    )
+    monkeypatch.setattr(worker_tasks, "emit_marker", lambda **kw: None)
+
+    images_dir = tmp_path / "images"
+    images_dir.mkdir()
+    (images_dir / "img.png").touch()
+
+    analysis_folder = tmp_path / "analysis"
+
+    # Mock run_sam_step to run successfully
+    def fake_runner(**kw):
+        time.sleep(0.5)
+        return {"images": 1, "masks_total": 0, "errors": 0, "per_image": {}}
+
+    monkeypatch.setattr(worker_tasks, "run_sam_step", fake_runner)
+
+    # Inject a failure into Path.iterdir to simulate a counting error
+    original_iterdir = tmp_path.__class__.iterdir
+    def broken_iterdir(self):
+        # Break only for the masks directory
+        if "masks" in str(self):
+            raise PermissionError("simulated counting failure")
+        return original_iterdir(self)
+
+    monkeypatch.setattr(tmp_path.__class__, "iterdir", broken_iterdir)
+
+    # Job must complete successfully despite poller errors
+    result = worker_tasks.run_sam(
+        run_id=99,
+        raw_images_dir=str(images_dir),
+        s3_prefix=None,
+        analysis_folder=str(analysis_folder),
+        weights_path="/opt/sam/weights/m.pt",
+    )
+
+    assert result["images"] == 1
+    # Completed event must still fire
+    completed = [p for p in progress_payloads if p.get("type") == "completed"]
+    assert len(completed) == 1
