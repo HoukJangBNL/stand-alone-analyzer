@@ -58,6 +58,24 @@ logger = logging.getLogger(__name__)
 #: ``scripts/aws/sam-launch-template.sh``.
 LAUNCH_TEMPLATE_NAME: str = "qpress-sam-gpu-worker"
 
+#: Launch template version for on-demand instances. The $Default version
+#: (v49 as of 2026-06-16) has InstanceMarketOptions.MarketType=spot baked
+#: in, which cannot be overridden to on-demand via RunInstances parameters.
+#: This constant references a version WITHOUT InstanceMarketOptions, forcing
+#: AWS to launch on-demand instances.
+#:
+#: Bug context (2026-06-16): passing InstanceMarketOptions={} (empty dict)
+#: does NOT override a spot LT to on-demand — AWS treats it as "use template's
+#: market options". The only way to launch on-demand when the LT specifies
+#: spot is to use a different LT version without InstanceMarketOptions set.
+#:
+#: v51 of qpress-sam-gpu-worker was created 2026-06-16 from v49's full data
+#: with InstanceMarketOptions removed (verified InstanceMarketOptions=null,
+#: same AMI/IAM/SG as v49). NOTE: create-launch-template-version with
+#: --source-version MERGES and CANNOT drop a key, so v51 was created by
+#: passing the full launch-template-data WITHOUT the field (no source-version).
+LAUNCH_TEMPLATE_VERSION_ONDEMAND: str = "51"
+
 #: Region where the launch template + IAM + SG live.
 AWS_REGION: str = "us-east-2"
 
@@ -388,18 +406,30 @@ def _try_run_instances(
     and market type.
 
     Overrides the LT's pinned ``InstanceType`` and ``NetworkInterfaces``
-    (single-AZ subnet) per-call. Empty ``InstanceMarketOptions``
-    overrides the LT's MarketType=spot when ``on_demand=True``.
+    (single-AZ subnet) per-call. When ``on_demand=True``, we OMIT
+    ``InstanceMarketOptions`` entirely to override the LT's
+    MarketType=spot (AWS default for RunInstances is on-demand when
+    InstanceMarketOptions is absent).
+
+    Bug context (2026-06-16): passing an EMPTY dict ``{}`` for
+    InstanceMarketOptions does NOT override a spot launch template
+    to on-demand — AWS treats empty dict as "use template's market
+    options". The correct way to force on-demand when the LT specifies
+    spot is to NOT include the InstanceMarketOptions parameter at all.
 
     Returns the new InstanceId on success, ``None`` if AWS refused
     with a spot- or capacity-related code (InsufficientInstanceCapacity,
     MaxSpotInstanceCountExceeded, etc). Other ClientErrors propagate
     so callers see real bugs (IAM, malformed template, etc).
     """
+    # On-demand: use LT v51 (without InstanceMarketOptions) to force on-demand.
+    # Spot: use $Default (v49, has MarketType=spot baked in).
+    lt_version = LAUNCH_TEMPLATE_VERSION_ONDEMAND if on_demand else "$Default"
+
     kwargs: dict[str, Any] = {
         "LaunchTemplate": {
             "LaunchTemplateName": LAUNCH_TEMPLATE_NAME,
-            "Version": "$Default",
+            "Version": lt_version,
         },
         "InstanceType": instance_type,
         "MinCount": 1,
@@ -413,8 +443,6 @@ def _try_run_instances(
             }
         ],
     }
-    if on_demand:
-        kwargs["InstanceMarketOptions"] = {}
 
     try:
         resp = ec2.run_instances(**kwargs)

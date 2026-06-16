@@ -47,6 +47,7 @@ class FakeEc2Client:
     def __init__(self) -> None:
         self.describe_calls: list[dict[str, Any]] = []
         self.run_calls: list[dict[str, Any]] = []
+        self.versions_used: list[str] = []  # Track LT versions used
         # Configurable response state
         self._existing_instances: list[dict[str, Any]] = []
         self._run_error: ClientError | None = None
@@ -84,6 +85,10 @@ class FakeEc2Client:
         if self._run_error is not None:
             raise self._run_error
         self.run_calls.append(kwargs)
+        # Record the LaunchTemplate Version used
+        lt_version = kwargs.get("LaunchTemplate", {}).get("Version")
+        if lt_version:
+            self.versions_used.append(lt_version)
         return self._run_response
 
     def set_run_error(self, code: str, message: str) -> None:
@@ -176,7 +181,9 @@ async def test_pending_worker_does_not_boot_new_instance():
 
 @pytest.mark.asyncio
 async def test_no_worker_boots_one_via_launch_template():
-    """Empty fleet → launcher calls run-instances with the launch template name."""
+    """Empty fleet → launcher calls run-instances with the launch template name.
+
+    Default behavior (SAM_GPU_MARKET=ondemand): uses LT v51 (on-demand version)."""
     from flake_analysis.worker import launcher
 
     ec2 = FakeEc2Client()
@@ -197,7 +204,7 @@ async def test_no_worker_boots_one_via_launch_template():
     assert call["MaxCount"] == 1
     assert call["LaunchTemplate"] == {
         "LaunchTemplateName": "qpress-sam-gpu-worker",
-        "Version": "$Default",
+        "Version": "51",  # on-demand mode uses v51 (no InstanceMarketOptions)
     }
 
 
@@ -410,7 +417,6 @@ def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable(monke
     per-call to bypass the LT's pinned single-AZ subnet.
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from flake_analysis.worker.launcher import _launch_one, SUBNETS_BY_AZ
 
     monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
@@ -450,11 +456,11 @@ def test_launch_one_falls_back_to_on_demand_when_spot_capacity_unavailable(monke
     # Call 4 is on-demand starting at 2a again.
     assert subnets_seen[3] == expected_subnets[0]
 
-    # Calls 1-3: spot (no InstanceMarketOptions override).
+    # Calls 1-3: spot (use $Default LT version with spot baked in).
     for c in calls[:3]:
-        assert "InstanceMarketOptions" not in c
-    # Call 4: on-demand (explicit empty market options).
-    assert calls[3]["InstanceMarketOptions"] == {}
+        assert c["LaunchTemplate"]["Version"] == "$Default"
+    # Call 4: on-demand (use v51 LT version without InstanceMarketOptions).
+    assert calls[3]["LaunchTemplate"]["Version"] == "51"
 
 
 def test_launch_one_raises_capacity_error_when_full_ladder_fails(monkeypatch):
@@ -464,7 +470,6 @@ def test_launch_one_raises_capacity_error_when_full_ladder_fails(monkeypatch):
     type).
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         GpuCapacityUnavailable,
@@ -500,7 +505,6 @@ def test_launch_one_falls_through_ladder_to_smaller_gpu(monkeypatch):
     instance type. First successful attempt wins.
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         INSTANCE_TYPE_LADDER,
@@ -577,7 +581,6 @@ def test_launch_one_falls_back_to_on_demand_on_max_spot_count_exceeded(monkeypat
     delay). Without this, every back-to-back run fails.
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from botocore.exceptions import ClientError
     from flake_analysis.worker.launcher import _launch_one
 
@@ -610,7 +613,6 @@ def test_launch_one_falls_back_to_on_demand_on_unsupported_spot(monkeypatch):
     available as spot in a given subnet. Should also retry on-demand.
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from botocore.exceptions import ClientError
     from flake_analysis.worker.launcher import _launch_one
 
@@ -642,7 +644,6 @@ def test_launch_one_falls_back_on_spot_max_price_too_low(monkeypatch):
     """SpotMaxPriceTooLow is also a spot-only failure.
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from botocore.exceptions import ClientError
     from flake_analysis.worker.launcher import _launch_one
 
@@ -678,11 +679,9 @@ def test_launch_one_uses_ondemand_only_by_default(monkeypatch):
     """Default behavior (SAM_GPU_MARKET unset or 'ondemand'): skip spot
     phase entirely. For each tier, try on-demand across all AZs, then
     step down. No spot attempts."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         INSTANCE_TYPE_LADDER,
-        SUBNETS_BY_AZ,
     )
 
     # Ensure default env (no SAM_GPU_MARKET set)
@@ -707,8 +706,8 @@ def test_launch_one_uses_ondemand_only_by_default(monkeypatch):
     # Only 1 attempt: first tier, first AZ, on-demand
     assert ec2.attempt == 1
     assert len(calls) == 1
-    # Verify it's on-demand (has InstanceMarketOptions={})
-    assert calls[0]["InstanceMarketOptions"] == {}
+    # Verify it's on-demand (uses LT v51)
+    assert calls[0]["LaunchTemplate"]["Version"] == "51"
     # Verify it's the first tier
     assert calls[0]["InstanceType"] == INSTANCE_TYPE_LADDER[0]
 
@@ -716,7 +715,6 @@ def test_launch_one_uses_ondemand_only_by_default(monkeypatch):
 def test_launch_one_ondemand_only_steps_down_ladder_on_capacity_error(monkeypatch):
     """On-demand-only mode: InsufficientInstanceCapacity on tier 1 across
     all AZs → steps down to tier 2 on-demand (no spot attempts)."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         INSTANCE_TYPE_LADDER,
@@ -751,9 +749,9 @@ def test_launch_one_ondemand_only_steps_down_ladder_on_capacity_error(monkeypatc
     assert instance_id == "i-tier2-ondemand"
     # 3 attempts on tier 1 (all AZs on-demand) + 1 on tier 2
     assert ec2.attempt == 4
-    # All calls should be on-demand
+    # All calls should be on-demand (use LT v51)
     for call in calls:
-        assert call["InstanceMarketOptions"] == {}
+        assert call["LaunchTemplate"]["Version"] == "51"
     # Verify tier progression
     for call in calls[:3]:
         assert call["InstanceType"] == INSTANCE_TYPE_LADDER[0]
@@ -764,7 +762,6 @@ def test_launch_one_ondemand_only_raises_capacity_error_after_full_ladder(monkey
     """On-demand-only mode: all tiers × all AZs on-demand exhausted →
     raises GpuCapacityUnavailable after 4 tiers × 3 AZs = 12 attempts
     (not 24, since no spot phase)."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         GpuCapacityUnavailable,
@@ -802,10 +799,8 @@ def test_launch_one_spot_first_mode_preserves_legacy_behavior(monkeypatch):
     """Explicit SAM_GPU_MARKET='spot-first': preserves the legacy spot→
     on-demand fallback behavior (3 AZs spot, then 3 AZs on-demand per
     tier)."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
-        SUBNETS_BY_AZ,
     )
 
     monkeypatch.setenv("SAM_GPU_MARKET", "spot-first")
@@ -835,11 +830,11 @@ def test_launch_one_spot_first_mode_preserves_legacy_behavior(monkeypatch):
 
     assert instance_id == "i-spot-first-test"
     assert len(calls) == 4
-    # First 3 calls: spot (no InstanceMarketOptions)
+    # First 3 calls: spot (use $Default LT version)
     for call in calls[:3]:
-        assert "InstanceMarketOptions" not in call
-    # 4th call: on-demand
-    assert calls[3]["InstanceMarketOptions"] == {}
+        assert call["LaunchTemplate"]["Version"] == "$Default"
+    # 4th call: on-demand (use v51 LT version)
+    assert calls[3]["LaunchTemplate"]["Version"] == "51"
 
 
 # ---------------------------------------------------------------------------
@@ -858,7 +853,6 @@ def test_launch_one_continues_ladder_on_max_spot_count_during_ondemand(monkeypat
     ladder instead of trying 24xlarge.
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         INSTANCE_TYPE_LADDER,
@@ -1059,7 +1053,6 @@ def test_launch_one_raises_capacity_unavailable_after_full_ladder_exhaustion(mon
     the raw boto ClientError) to converge to the clean terminal state.
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         GpuCapacityUnavailable,
@@ -1101,7 +1094,6 @@ def test_launch_one_recovers_mid_ladder_after_tolerated_errors(monkeypatch):
     instance id and correct InstanceType.
 
     Tests legacy spot-first behavior (requires explicit env var)."""
-    import os
     from flake_analysis.worker.launcher import (
         _launch_one,
         INSTANCE_TYPE_LADDER,
