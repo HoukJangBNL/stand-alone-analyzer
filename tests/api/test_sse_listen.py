@@ -127,3 +127,27 @@ async def test_listen_releases_on_cancel():
     with pytest.raises(asyncio.CancelledError):
         await task
     # If we reach here without hanging, the helper handled cancellation.
+
+
+# ---------------------------------------------------------------------------
+# Regression test for run-51 hang (2026-06-16)
+# ---------------------------------------------------------------------------
+
+
+def test_asyncpg_kwargs_has_timeout(monkeypatch):
+    """Regression guard for run-51 hang: _asyncpg_kwargs() must include
+    timeout (asyncpg's connect-timeout arg) to prevent infinite block
+    when the bastion tunnel stalls. Mirrored fix for the launcher's
+    PgAdvisoryLock._conn_kwargs() connect_timeout."""
+    from flake_analysis.api.sse_listen import _asyncpg_kwargs
+
+    # Set minimal SAA_DB_* env so DbSettings() constructs
+    monkeypatch.setenv("SAA_DB_HOST", "127.0.0.1")
+    monkeypatch.setenv("SAA_DB_PORT", "5433")
+    monkeypatch.setenv("SAA_DB_NAME", "qpress")
+    monkeypatch.setenv("SAA_DB_USER", "houk")
+
+    kwargs = _asyncpg_kwargs()
+    assert "timeout" in kwargs
+    assert isinstance(kwargs["timeout"], (int, float))
+    assert kwargs["timeout"] > 0

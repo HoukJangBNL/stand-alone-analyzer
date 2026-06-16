@@ -223,6 +223,13 @@ class PgAdvisoryLock:
             "host": s.db_host,
             "port": s.db_port,
             "dbname": s.db_name,
+            # libpq seconds. Without this a stalled connect (e.g. a flaky
+            # bastion SSH tunnel) blocks the worker-launch path forever —
+            # the connect never completes its handshake, so no advisory
+            # lock is taken and ensure_worker_running parks indefinitely.
+            # Bounded so the SAM step surfaces a clean error and a retry
+            # (with a healthy tunnel) succeeds. See run-51 hang post-mortem.
+            "connect_timeout": 10,
         }
         if _require_ssl(s.db_host):
             # RDS rds.force_ssl=1: SSL-only, no prefer→fallback. See #217.

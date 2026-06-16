@@ -1138,3 +1138,31 @@ def test_launch_one_recovers_mid_ladder_after_tolerated_errors(monkeypatch):
     assert calls[6]["InstanceType"] == INSTANCE_TYPE_LADDER[1]
     # Verify it's a spot call (no InstanceMarketOptions override)
     assert "InstanceMarketOptions" not in calls[6]
+
+
+# ---------------------------------------------------------------------------
+# Regression test for run-51 hang (2026-06-16)
+# ---------------------------------------------------------------------------
+
+
+def test_advisory_lock_conn_kwargs_has_connect_timeout(monkeypatch):
+    """Regression guard for run-51 hang: PgAdvisoryLock._conn_kwargs() must
+    include connect_timeout to prevent infinite block when the bastion
+    tunnel stalls. Without this, a transient tunnel stall at defer time
+    froze the worker-launch path indefinitely — no advisory lock taken,
+    no GPU boot, silent hang until backend restart.
+
+    This path was explicitly NOT unit-tested before (see launcher.py:209-212),
+    so the bug slipped through. Now covered."""
+    from flake_analysis.worker.launcher import PgAdvisoryLock
+
+    # Set minimal SAA_DB_* env so DbSettings() constructs
+    monkeypatch.setenv("SAA_DB_HOST", "127.0.0.1")
+    monkeypatch.setenv("SAA_DB_PORT", "5433")
+    monkeypatch.setenv("SAA_DB_NAME", "qpress")
+    monkeypatch.setenv("SAA_DB_USER", "houk")
+
+    kwargs = PgAdvisoryLock._conn_kwargs()
+    assert "connect_timeout" in kwargs
+    assert isinstance(kwargs["connect_timeout"], int)
+    assert kwargs["connect_timeout"] > 0

@@ -51,6 +51,10 @@ def _asyncpg_kwargs() -> dict[str, Any]:
         "host": s.db_host,
         "port": s.db_port,
         "database": s.db_name,
+        # Bound the connect handshake (asyncpg default 60s) so a stalled
+        # bastion tunnel can't hang the SAM progress listener. Mirrors the
+        # connect_timeout added to PgAdvisoryLock. See run-51 hang post-mortem.
+        "timeout": 10,
     }
     if _require_ssl(s.db_host):
         # SSL forced on RDS (rds.force_ssl=1). Local dev/test PGs typically
